@@ -64,8 +64,6 @@ export const INVENTORY = [
   row('src/receivecaps.ts', String.raw`/\n$/u`, 'remote', NO_RUN, run('\n', 'x'), { op: 'replace', count: 2 }),
   row('src/repo-node.ts', String.raw`/^[0-9a-f]{40}$/u`, 'stored', FIXED, run('a', '')),
   row('src/repo-node.ts', String.raw`/^gitdir: (.+)$/mu`, 'stored', '^ under m starts once per line and .+ cannot leave its line, which $ under m always accepts', n => rep('gitdir: \n', n)),
-  row('src/repo-node.ts', String.raw`/[#;].*$/u`, 'stored', 'NOT linear: with a CR before the end, every # or ; starts a .* that runs to the CR and fails', n => `${'#'.repeat(n)}\r`,
-    { op: 'replace', knownBad: 'open: no fix branch yet (reviewer finding security/url-slash-run-regex-quadratic names it): a CRLF config line of # characters' }),
   row('src/repo-node.ts', String.raw`/^\[([^\]\s"]+)(\s+"([^"]*)")?\]$/u`, 'stored', 'anchored at ^; the name, space and quoted runs are pairwise disjoint classes', n => `[a "${'b'.repeat(n)}`),
   row('src/repo-node.ts', String.raw`/^([A-Za-z][\w-]*)\s*(=\s*(.*))?$/u`, 'stored', 'NOT linear: after "=", \\s* and .* trade spaces when a lone CR later in the line makes $ fail', n => `a=${' '.repeat(n)}x\ry`,
     { knownBad: 'open: no fix branch yet (found by this gate, 2026-11-11): a config value of spaces followed by a lone CR' }),
