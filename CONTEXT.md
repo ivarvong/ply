@@ -171,7 +171,7 @@ This session (2026-10-19 → 20):
 | Transport = plain record with two methods; HTTP implements it | operations never branch on transport; an SSH transport was added (and removed 2026-10-31, archive/ssh) with zero changes above the contract |
 | Errors: one table, codes validated at throw | retry policy is data; tests check docs ↔ table ↔ literals in source stay aligned |
 | After an acknowledged push, any read-back failure → `ambiguous` | the push may have landed; a transport code would invite a wrong retry (I25) |
-| Pack cache keyed by sha256(url, credential, body), wants-only | measured against GitHub: wants-only fetches are deterministic; poison → bust + one retry |
+| Pack cache keyed by sha256(url, credential, body), wants-only | measured against GitHub: wants-only fetches are deterministic; the store side is verified while streaming (O(chunk) state: framing, no ERR, pack trailer SHA-1), a HIT is served unparsed and the client's parse is the check: poison → bust + one retry |
 | Merge = tree merge + ported line merge, never "close enough" | clean results must equal `git merge-tree` byte for byte; anything uncertain is a conflict (superset) |
 | No rename detection; rename guards instead | porting merge-ort's rename detection is large; guards make every rename shape a conflict, never a wrong tree |
 | `rediff` option, default `myers` | git changed behaviour in 2.54; both are git; default follows current git, `skip`/`undecided` documented |
