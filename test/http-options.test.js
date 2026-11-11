@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { createTransport, parseHttpOptions } from '../src/http.js';
 import { GitHttp } from '../src/client.js';
 import { readFile } from '../src/read.js';
-import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
+import { DEFAULT_LIMITS, withLimits, parseLimits } from '../src/limits.js';
 import { unwrap } from './unwrap.js';
 
 const counting = () => { const c = { n: 0 }; c.fetchImpl = async () => { c.n++; return new Response('', { status: 500 }); }; return c; };
@@ -583,6 +583,20 @@ test('a timeout a timer cannot hold (above 2^31-1 ms) is refused where the optio
     }
     for (const fine of [0, 1, 2 ** 31 - 1]) assert.equal(createTransport('https://h/r', { limits: { [key]: fine } }).ok, true, `${key}=${fine}`);
   }
+});
+
+// The refusal's text reaches the caller: the key by its name, the bound written out (2^31 - 1 = 2147483647), and the
+// way to turn the timer off. Hand-written here, not read from src. The bound is the timers' alone: a limit that is not
+// a timer passes above it.
+test('a timeout above 2^31-1 ms is refused with a message naming the key and the bound; a limit that is no timer passes above it', () => {
+  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'requestTimeoutMs']) {
+    const message = `limits.${key} must be at most 2147483647 ms (0 turns the timer off)`;
+    for (const r of [createTransport('https://h/r', { limits: { [key]: 2147483648 } }), parseHttpOptions('https://h/r', { limits: { [key]: 2147483648 } }), parseLimits({ [key]: 2147483648 })]) {
+      assert.deepEqual([r.ok, r.error?.code, r.error?.message, r.error?.what, r.error?.got], [false, 'bad_request', message, key, 2147483648], key);
+    }
+  }
+  const big = parseLimits({ maxPackBytes: 2147483648 });
+  assert.deepEqual([big.ok, big.value?.maxPackBytes], [true, 2147483648]);
 });
 
 // The scheme rule (src/http.ts parseHttpOptions), in the suite the mutation gate runs. ply speaks git smart HTTP only

@@ -667,6 +667,26 @@ test('inflate stored, fixed, dynamic, and the header checks', () => {
   throws(() => unwrap(inflate(rawCut, 0, { raw: true })), 'pack_corrupt', 'inflate: unexpected end of input');
 });
 
+// The acknowledgments section (src/fetch.ts v2Step), in the suite the mutation gate runs. Expected values are git's
+// (fetch-pack.c process_ack): it reads "NAK", "ACK <oid>" (the prefix "ACK " with its space) and "ready", and dies
+// "unexpected acknowledgment line" on anything else. The message is ply's fixed text with the line in JSON quotes,
+// written out here by hand.
+test('v2 acknowledgments: NAK and ACK <oid> are kept; any other line is a protocol error that quotes it', () => {
+  const data = s => ({ kind: 'data', payload: te.encode(s) });
+  const inAcks = () => unwrap(v2StepR(v2Init(), data('acknowledgments\n'))).state;
+  const id = 'ab'.repeat(20);
+  const nak = v2StepR(inAcks(), data('NAK\n'));
+  assert.deepEqual([nak.ok, nak.value?.state.acks], [true, ['NAK']]);
+  const ack = v2StepR(inAcks(), data(`ACK ${id}\n`));
+  assert.deepEqual([ack.ok, ack.value?.state.acks], [true, [`ACK ${id}`]]);
+  for (const [sent, quoted] of [
+    ['hello\n', '"hello"'], ['\n', '""'], ['ACK\n', '"ACK"'], [`ACK${id}\n`, `"ACK${id}"`], ['NAKed\n', '"NAKed"'], ['nak\n', '"nak"'], [` ACK ${id}\n`, `" ACK ${id}"`],
+  ]) {
+    const r = v2StepR(inAcks(), data(sent));
+    assert.deepEqual([r.ok, r.error?.code, r.error?.message], [false, 'protocol', `v2: unexpected acknowledgment line ${quoted}`], JSON.stringify(sent));
+  }
+});
+
 test('v2 sections, sideband, and the single-object pack stream', async () => {
   const limits = withLimits({ maxSectionLines: 2 });
   let st = v2Init(limits);
