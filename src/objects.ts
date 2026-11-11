@@ -212,10 +212,18 @@ export function isMode(mode: unknown): mode is Mode {
 // An error never grows with a caller's text: at most QUOTE_UNITS UTF-16 units of a string are quoted (http.ts's
 // ERROR_QUOTE: 200), with the true length after it, and the `entry` field holds the same cut (cutName). A name over
 // TREE_MAX_NAME_BYTES is refused for its length, so without the cut that refusal alone is as large as the caller likes.
+// The cut never ends on the first half of a surrogate pair (a unit in d800..dbff): it stops one unit earlier, so what is
+// quoted of a well-formed name is well-formed, and an error about a name with a byte form holds no string without one.
 const QUOTE_UNITS = 200;
-const cutName = (name: string): string => (typeof name === 'string' && name.length > QUOTE_UNITS ? name.slice(0, QUOTE_UNITS) : name);
+const HIGH_SURROGATE_FIRST = 0xd8_00;
+const HIGH_SURROGATE_LAST = 0xdb_ff;
+function cut(text: string): string {
+  const last = text.charCodeAt(QUOTE_UNITS - 1); // oxlint-disable-line unicorn/prefer-code-point -- the unit itself: codePointAt would pair it with the next one
+  return text.slice(0, last >= HIGH_SURROGATE_FIRST && last <= HIGH_SURROGATE_LAST ? QUOTE_UNITS - 1 : QUOTE_UNITS);
+}
+const cutName = (name: string): string => (typeof name === 'string' && name.length > QUOTE_UNITS ? cut(name) : name);
 function quoted(value: unknown): string {
-  if (typeof value === 'string') return value.length > QUOTE_UNITS ? `${JSON.stringify(value.slice(0, QUOTE_UNITS))}… (${value.length} UTF-16 units)` : JSON.stringify(value);
+  if (typeof value === 'string') return value.length > QUOTE_UNITS ? `${JSON.stringify(cut(value))}… (${value.length} UTF-16 units)` : JSON.stringify(value);
   return value === null || typeof value === 'number' || typeof value === 'boolean' ? String(value) : typeof value;
 }
 // A caller's entry, parsed once: the mode is one of the five (`tree: entry "n": invalid mode`, what `mode`) and the oid

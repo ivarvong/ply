@@ -60,3 +60,30 @@ test('a short name is quoted whole, exactly as before; 200 units is not cut and 
   const dup = encodeTree([{ mode: '100644', name, oid: BLOB }, { mode: '40000', name, oid: BLOB }]);
   assert.deepEqual([dup.error.message, dup.error.entry], [`tree: duplicate entry "${'d'.repeat(200)}"… (3000 UTF-16 units)`, 'd'.repeat(200)]);
 });
+
+test('the cut never ends on the first half of a surrogate pair: a well-formed name gives a well-formed message and `entry`', () => {
+  // By hand: 199 `a`, then U+1F600 (the pair d83d de00, units 199 and 200), then ten `b`: 211 units. A cut at 200 units
+  // ends on d83d alone: a string with no byte form, in an error about a name that has one. The cut stops before the
+  // pair, at 199 units, and the length said is still the name's own.
+  const head = 'a'.repeat(199);
+  const name = `${head}\u{1F600}${'b'.repeat(10)}`;
+  for (const [fn, encode] of [['encodeTree', e => encodeTree([e])], ['encodeEntries', e => encodeEntries([e])], ['treeEntryOf', treeEntryOf]]) {
+    const got = encode({ mode: '644', name, oid: BLOB });
+    assert.deepEqual([got.error.message, got.error.entry], [`tree: entry "${head}"… (211 UTF-16 units): invalid mode "644"`, head], fn);
+  }
+  // a pair that ends exactly at unit 200 is kept whole: 198 `a` and the pair are the 200 units quoted
+  const fits = `${'a'.repeat(198)}\u{1F600}`;
+  const kept = encodeTree([{ mode: '644', name: `${fits}bbb`, oid: BLOB }]);
+  assert.deepEqual([kept.error.message, kept.error.entry], [`tree: entry "${fits}"… (203 UTF-16 units): invalid mode "644"`, fits]);
+  // a mode is cut by the same rule
+  const mode = encodeTree([{ mode: `${'7'.repeat(199)}\u{1F600}7`, name: 'a', oid: BLOB }]);
+  assert.equal(mode.error.message, `tree: entry "a": invalid mode "${'7'.repeat(199)}"… (202 UTF-16 units)`);
+  // The edges of the high-surrogate range, d800 to dbff, at unit 199: U+10000 is d800 dc00 and U+10FFFF is dbff dfff
+  // (cut before them: 199 units). U+D7FF and U+E000 are ordinary characters, and a low surrogate with no high one
+  // before it is the caller's own ill-formed name: none is the first half of a pair, so 200 units are kept.
+  for (const [at, units] of [['\u{10000}', 199], ['\u{10FFFF}', 199], ['퟿b', 200], ['\udc00b', 200], ['b', 200]]) {
+    const got = encodeTree([{ mode: '644', name: `${head}${at}bbbb`, oid: BLOB }]);
+    assert.equal(got.error.entry, `${head}${at}`.slice(0, units), `U+${at.codePointAt(0).toString(16)}`);
+    assert.equal(got.error.entry.isWellFormed(), at.charCodeAt(0) !== 0xdc00, `U+${at.codePointAt(0).toString(16)}`);
+  }
+});
