@@ -7,11 +7,14 @@
 //   - two runners on one plan, gated so the second's push of every step reaches git only after the first's landed, on
 //     a destination whose pre-receive hook refuses a push of what is already there: both end done; with the loser's
 //     reads failing after its last refusal, the loser is `ambiguous` (never paused, aborted or the refusal)
+//   - one runner whose push of every step k is overtaken: before its k-th receive-pack POST is forwarded, step k is
+//     landed through a second clean transport. Git itself then refuses the runner's push because the ref moved (a lost
+//     compare-and-swap, no hook), or a pre-receive hook installed for that one request declines it: done either way
 //   - atomic off, the temp ref's delete refused by an update hook while the create lands: done with tempLeft
 // Each expectation is the fault the wrapper injected and what git shows in the bare repository, not ply's output.
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';
+import { mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomFillSync } from 'node:crypto';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
@@ -20,7 +23,7 @@ import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
 import { createTransport } from '../src/http.js';
 import { planTransfer } from '../src/transferplan.js';
-import { runTransfer } from '../src/transfer.js';
+import { runTransfer, transferStep } from '../src/transfer.js';
 import { unwrap } from './unwrap.js';
 
 const must = r => { if (r.ok) return r.value; throw Object.assign(new Error(r.error.message), { code: r.error.code }); };
@@ -275,4 +278,63 @@ test('atomic off, the temp ref\'s delete refused by a hook while the create land
   assertPublished(bare, p, { temp: true }); // git: the branch at the planned head, the temp ref still there
   assert.equal(run.ok, true, run.ok ? '' : `the branch is published; the run said ${run.error.code}: ${run.error.message}`);
   assert.deepEqual(run.value, { tag: 'done', head: p.head, pushes: p.steps.length, tempLeft: true });
+});
+
+// One runner, overtaken at every step (no clock, no second runner to schedule): before the runner's k-th receive-pack
+// POST is forwarded, `before(k)` runs (it lands step k through a second, clean transport), then the request goes to
+// git and its whole report is read before the runner sees it. The runner's k-th push is step k: it reads the refs
+// after every push, and they show the step the clean transport landed.
+const isPush = (input, init) => {
+  const url = typeof input === 'string' ? input : input.url;
+  const method = init?.method ?? (typeof input === 'string' ? 'GET' : input.method);
+  return method === 'POST' && url.endsWith('/git-receive-pack');
+};
+function overtaken(before, around = { enter() {}, leave() {} }) {
+  const seen = { pushes: 0, reports: [] };
+  const fetchImpl = async (input, init) => {
+    if (!isPush(input, init)) return fetch(input, init);
+    await before(seen.pushes++);
+    around.enter();
+    try {
+      const res = await fetch(input, init);
+      // the hook (if any) stays until git has written its whole report: git runs it after the pack is in
+      seen.reports.push(new TextDecoder().decode(await res.clone().arrayBuffer()));
+      return res;
+    } finally { around.leave(); }
+  };
+  return { fetchImpl, seen };
+}
+const NG = /ng refs\/\S+ /u;
+
+test('a runner whose every push is overtaken by another transport landing that step: git refuses each push (the ref moved, or a hook declines), the refs show the step, the run is done', async () => {
+  const p = plan();
+  const n = p.steps.length;
+  assert.ok(n >= 3, 'batch steps and a final step');
+  for (const how of ['cas', 'hook']) {
+    const { bare, url } = repo();
+    const clean = unwrap(createTransport(url));
+    const hook = join(bare, 'hooks', 'pre-receive');
+    const around = how === 'hook'
+      ? { enter() { mkdirSync(join(bare, 'hooks'), { recursive: true }); writeFileSync(hook, '#!/bin/sh\nexit 1\n'); chmodSync(hook, 0o755); }, leave() { rmSync(hook, { force: true }); } }
+      : undefined;
+    const landed = [];
+    const o = overtaken(async k => {
+      // the other writer: step k through a clean transport, and git's own view of the ref it moved
+      landed.push(must(await transferStep(clean, from, p, k, src.commit)).step);
+      assert.equal(refsOf(bare), k < n - 1 ? `${p.tempRef} ${p.steps[k].temp}` : `${REF} ${p.head}`);
+    }, around);
+    const run = await runTransfer(unwrap(createTransport(url, { fetchImpl: o.fetchImpl })), from, p, src.commit, { settle: FAST });
+    assert.equal(run.ok, true, `${how}: git refused the runner's push of a step the other transport had landed (the refs show it); the runner said ${say(run)}`);
+    // the other transport landed every step, in order, before the runner's push of it reached git
+    assert.deepEqual(landed, Array.from({ length: n }, (_, k) => k), how);
+    // the protocol: git refused every push the runner made, in its own report-status
+    assert.equal(o.seen.reports.length, n, how);
+    for (const report of o.seen.reports) {
+      assert.match(report, NG, how);
+      // 'cas': no hook exists, the refusal is git's own (the ref is not at the old value the command names)
+      if (how === 'hook') assert.match(report, DECLINED); else assert.doesNotMatch(report, /hook declined/u);
+    }
+    assertPublished(bare, p);
+    assert.deepEqual(run.value, { tag: 'done', head: p.head, pushes: n, tempLeft: false }, how);
+  }
 });
