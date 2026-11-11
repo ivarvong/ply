@@ -121,6 +121,13 @@ const STACK = [
   ['src/transferload.ts', 'fromSaved', 'test/pack-saved.test.js'],
   ['src/receivecaps.ts', 'checkPushCaps', 'test/push-commands.test.js'],
   ['src/receivecaps.ts', 'pushPack', 'test/pack-plan.test.js'],
+  // the push drivers that hold a bound or an outcome input (review of 3aca484b, required change 1): readResponse
+  // enforces both report caps on what the host sends (report bytes against maxPack, report lines against the line cap)
+  // and sets `answered`, which chooses refused or ambiguous; send and sendSource refuse a pack over maxPack before a
+  // byte is sent and carry the body's own failure (`cut`) into the decision, where it becomes ambiguous.
+  ['src/push.ts', 'readResponse', 'test/push-unpack-host.test.js'],
+  ['src/push.ts', 'send', 'test/push-unpack-host.test.js'],
+  ['src/push.ts', 'sendSource', 'test/pack-plan.test.js'],
 ];
 const STACK_FILES = [...new Set(STACK.map(([file]) => file))];
 
@@ -225,10 +232,10 @@ const OWNERS = {
       parseReceivePackTooLarge malformed splitOnce reportInit reportStep reportFinish classifyReport KNOWN_NG knownNgClass
       HOST_CAS ngClass refused rejectionCode decideOutcome outcomeResult bandLines REPORT_V2_OPTION_LINES reportLineCap
       NOT_RUN codeOf refusedBeforeReceivePack serviceRefused unpackOf resolveAmbiguousByTip isEmptyBand3Ambiguous
-      finishPush decide`),
+      finishPush decide readResponse send sendSource`),
     exempt: words(`SHORT_OID isParsed nonEmpty pkts pushBody pushDefaults requestCap requestCaps unchecked checkBases
-      planPush requestBody readResponse outcomeAttrs objectTypeAttr bodyOf send receivePack push isPackLength
-      planPackPush sendSource pushPackChecked`),
+      planPush requestBody outcomeAttrs objectTypeAttr bodyOf receivePack push isPackLength planPackPush
+      pushPackChecked`),
   },
   'src/receivecaps.ts': {
     strict: words(`frameAt dataAt serviceHeaderEnd SHA1_HEX OID_HEX refLine shallowLine FORMAT objectFormat

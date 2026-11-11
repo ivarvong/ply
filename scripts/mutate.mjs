@@ -52,12 +52,15 @@ const EXEMPT_OWNERS = new Map([
   // canonical form and hash under it (TRANSFER_VERSION, optionJson, stepJson, canonical, transferPlanHash, edited,
   // wellFormedStep, checkTransferPlan).
   ['src/transferplan.ts', /^(OBJ_BLOB|OBJ_COMMIT|OBJ_TREE|MODE_BLOB|MODE_TREE|TRANSFER_REF_PREFIX|TRANSFER_IDENT|TRANSFER_GENERATED_OBJECTS|GEN_BYTES_PER_OBJECT|GEN_BYTES_FIXED|SIGNATURE_HEADERS|outOfRange|entryAt|batchTrees|commitObject|tempCommit|unsigned|rootCommit|reserved|treeEntries|tempFor|planSteps|planTransfer|transferKey)$/],
-  // push. Exempt: building the request from the caller's own options (commands, caps, bodies, the plan), the drivers
-  // that only move bytes between the transport and the decoders below, and span attributes. Strict: everything that
-  // reads the host's answer or turns it into an outcome: the sideband and report decoders and their caps, the unpack
-  // and ng classes and their tables, the too-large parse, the outcome decision and its Result, and the resolution of
-  // an ambiguous push (a wrong class turns a refusal into a retry, or a landed push into a failure).
-  ['src/push.ts', /^(SHORT_OID|isParsed|nonEmpty|pkts|pushBody|pushDefaults|requestCap|requestCaps|unchecked|checkBases|planPush|requestBody|readResponse|outcomeAttrs|objectTypeAttr|bodyOf|send|receivePack|push|isPackLength|planPackPush|sendSource|pushPackChecked)$/],
+  // push. Exempt: building the request from the caller's own options (commands, caps, bodies, the plan), the entry
+  // points that only plan, open the span and hand over to send or sendSource (receivePack, push, pushPackChecked), and
+  // span attributes. Strict: everything that reads the host's answer or turns it into an outcome: the sideband and
+  // report decoders and their caps, the unpack and ng classes and their tables, the too-large parse, the outcome
+  // decision and its Result, the resolution of an ambiguous push (a wrong class turns a refusal into a retry, or a
+  // landed push into a failure), and the three drivers: readResponse (it enforces both report caps on what the host
+  // sends and sets `answered`, which chooses refused or ambiguous), send and sendSource (the refusal of a pack over
+  // maxPack before the first byte, and the body's own failure, `cut`, which the decision turns into ambiguous).
+  ['src/push.ts', /^(SHORT_OID|isParsed|nonEmpty|pkts|pushBody|pushDefaults|requestCap|requestCaps|unchecked|checkBases|planPush|requestBody|outcomeAttrs|objectTypeAttr|bodyOf|receivePack|push|isPackLength|planPackPush|pushPackChecked)$/],
   // The receive-pack advertisement and the capability check before a push (checkPushCaps, pushPack: a missing
   // capability is `unsupported` before any byte is sent). Exempt: the problem's text for people and the length of the
   // line preview inside it.
