@@ -87,7 +87,9 @@ test('pack cache: second edit at the same tree serves commit+trees from cache; s
   const c = await run('MARK', 'MARK3');
   assert.deepEqual(c.d, { 'ls-refs': 1, fetch: 6, 'receive-pack': 1 }, 'every poisoned entry was refetched once');
   assert.equal(f.stats.bust, 5);
-  assert.equal(c.spans.filter(s => s.name === 'git.upload-pack fetch' && s.attrs['git.pack.cache.bust'] === true).length, 5);
+  // the cache checks a stored entry before it serves it, so the client never sees the poisoned HIT and never has to retry
+  assert.equal(c.spans.filter(s => s.name === 'git.upload-pack fetch' && s.attrs['git.pack.cache.bust'] === true).length, 0);
+  assert.equal(c.spans.filter(s => s.name === 'git.upload-pack fetch' && s.attrs['git.pack.cache'] === 'HIT').length, 0);
   assert.equal(c.spans.filter(s => s.name === 'git.upload-pack fetch' && s.attrs['git.pack.cache'] === 'BUST').length, 5);
   assert.equal(c.r.newCommit, headOf());
   git(bare, ['update-ref', 'refs/heads/main', a.r.oldCommit]);
@@ -227,7 +229,25 @@ test('buffered fetchPack (general client): poisoned cache entry → one bust →
   const b = await unwrapAsync(c.fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 }));
   assert.equal(b.parsed.stats.count, 1); assert.equal(f.stats.bust, 1);
   const spans = spansOf(ex).filter(s => s.name === 'git.upload-pack fetch');
-  assert.deepEqual(spans.map(s => s.attrs['git.pack.cache.bust']), [false, false, true]); assert.deepEqual(spans.map(s => s.attrs['git.response.cache']), ['MISS', 'HIT', 'BUST']);
+  // one exchange per call: the cache evicted the poisoned entry itself (BUST), the client did not have to retry
+  assert.deepEqual(spans.map(s => s.attrs['git.pack.cache.bust']), [false, false]); assert.deepEqual(spans.map(s => s.attrs['git.response.cache']), ['MISS', 'BUST']);
+  // The client's own retry is still there for a cache tier that does not verify: a HIT whose pack the client refuses is
+  // asked for once more with `x-ply-cache: bust`. The tier below serves git's answer with one flipped byte as a HIT.
+  let tierBusts = 0;
+  const tier = async (u, init) => {
+    const res = await fetch(u, init);
+    if (!String(u).endsWith('git-upload-pack') || !isCacheableFetch(init.body)) return res;
+    const h = new Headers(res.headers);
+    if (new Headers(init.headers).get('x-ply-cache') === 'bust') { tierBusts++; h.set('x-ply-pack-cache', 'BUST'); return new Response(res.body, { status: 200, headers: h }); }
+    const bytes = new Uint8Array(await res.arrayBuffer()); bytes[bytes.length - 30] ^= 0xff; h.set('x-ply-pack-cache', 'HIT');
+    return new Response(bytes, { status: 200, headers: h });
+  };
+  const ex2 = arrayExporter();
+  const c2 = unwrap(GitHttp.create(url, { tracer: new Tracer({ exporter: ex2 }), fetchImpl: tier }));
+  const viaTier = await unwrapAsync(c2.fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 }));
+  assert.equal(viaTier.parsed.stats.count, 1); assert.equal(tierBusts, 1);
+  const spans2 = spansOf(ex2).filter(s => s.name === 'git.upload-pack fetch');
+  assert.deepEqual(spans2.map(s => s.attrs['git.pack.cache.bust']), [false, true]); assert.deepEqual(spans2.map(s => s.attrs['git.response.cache']), ['HIT', 'BUST']);
   // the wrapper delegates to the same functions (getters + one of each family)
   assert.equal(c.url, url); assert.equal(c.limits.maxRefs > 0, true); assert.equal(c.tracer instanceof Tracer, true); assert.equal(c.parent, null);
   const o = await unwrapAsync(c.fetchObject({ oid: head, deepen: 1 })); assert.equal(o.oid, head);
@@ -428,4 +448,97 @@ test('cachingFetch verifyBeforeStore: an answer over the cap, a request that is 
   const nan = memoryCache(); const fn = cachingFetch(globalThis.fetch, nan, opts({ limits: { ...DEFAULT_LIMITS, maxPackBytes: Number.NaN } }));
   await run(fn, fetchBody({ wants: [blobOid()] }));
   assert.equal(nan.entries.size, 0); assert.equal(fn.stats.verifyFailed, 1);
+});
+
+// gitprotocol-pack: error-line = PKT-LINE("ERR" SP explanation-text). upload-pack reports its own failures in-band,
+// inside an HTTP 200 with the upload-pack content type. The frame is built by hand: 4 hex digits of length, then the text.
+const ERR_TEXT = 'ERR upload-pack: internal error, try again\n';
+const ERR_ANSWER = te.encode((ERR_TEXT.length + 4).toString(16).padStart(4, '0') + ERR_TEXT);
+const RESULT = { 'content-type': 'application/x-git-upload-pack-result' };
+const rawCall = async (f, body) => new Uint8Array(await (await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body })).arrayBuffer());
+
+test('cachingFetch (default rule): an origin that answers an in-band ERR once and then recovers is not remembered as failed', async () => {
+  const head = headOf();
+  let origin = 0;
+  const flaky = async (u, init) => (origin++ === 0 ? new Response(ERR_ANSWER, { status: 200, headers: RESULT }) : fetch(u, init));
+  const cache = memoryCache(); const pending = [];
+  const f = cachingFetch(flaky, cache, { waitUntil: p => { pending.push(p); } });
+  const c = unwrap(GitHttp.create(url, { tracer: new Tracer(), fetchImpl: f }));
+  const req = { wants: [head], filter: 'tree:0', deepen: 1 };
+  const first = await c.fetchPack(req); await Promise.all(pending.splice(0));
+  assert.equal(first.ok, false); assert.equal(first.error.code, 'remote_error', 'the failure itself is reported honestly');
+  assert.equal(cache.entries.size, 0, 'a failed answer is never stored');
+  assert.equal(f.stats.putOk, 0);
+  const second = await c.fetchPack(req); await Promise.all(pending.splice(0));
+  assert.equal(second.ok, true, 'the recovered origin answers the second call');
+  // tree:0 at depth 1 of one commit is that one commit (git's own answer, as in the buffered fetchPack test above)
+  assert.equal(second.value.parsed.stats.count, 1);
+  assert.equal(origin, 2, 'the second call went to the origin, not to a stored failure');
+  assert.equal(f.stats.hit, 0);
+  // the good answer is what the cache holds now: one entry, and its pack is exactly the wanted commit
+  assert.equal(cache.entries.size, 1);
+  assert.deepEqual(objectSet(cache.entries.values().next().value.body), [head]);
+});
+
+test('cachingFetch: an origin body that fails part way is not stored and does not reject the store; a stored entry with no body is evicted', async () => {
+  const head = headOf();
+  const body = fetchBody({ wants: [head], filter: 'tree:0', deepen: 1 });
+  const pending = [];
+  const waitUntil = p => { pending.push(p); };
+  // the origin sends the first 10 bytes of git's answer, then the connection drops
+  const dropped = async (u, init) => {
+    const whole = new Uint8Array(await (await fetch(u, init)).arrayBuffer());
+    let sent = false;
+    const stream = new ReadableStream({ pull(ctl) { if (sent) { ctl.error(new Error('connection reset')); return; } sent = true; ctl.enqueue(whole.slice(0, 10)); } });
+    return new Response(stream, { status: 200, headers: RESULT });
+  };
+  const cache = memoryCache();
+  const f = cachingFetch(dropped, cache, { waitUntil });
+  await assert.rejects(rawCall(f, body), /connection reset/, 'the caller sees the drop');
+  // every store promise settles without rejecting (an unawaited rejection would take a node process down)
+  assert.deepEqual((await Promise.allSettled(pending.splice(0))).map(s => s.status), ['fulfilled']);
+  assert.equal(cache.entries.size, 0); assert.equal(f.stats.putOk, 0); assert.equal(f.stats.verifyFailed, 1);
+  assert.match(f.stats.verifyError, /the body failed while it was read: .*connection reset/);
+  // a store that answers a match with a bodiless response: not a verified answer, so it is evicted and the origin is asked
+  const deleted = [];
+  const hollow = { match: async () => new Response(null, { status: 200, headers: RESULT }), put: async () => null, delete: async k => { deleted.push(k); return true; } };
+  const g = cachingFetch(globalThis.fetch, hollow, { waitUntil });
+  const before = counts();
+  const res = await g(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body });
+  assert.equal(res.headers.get('x-ply-pack-cache'), 'BUST');
+  assert.deepEqual(objectSet(new Uint8Array(await res.arrayBuffer())), [head]); await Promise.all(pending.splice(0));
+  assert.equal(delta(before, counts()).fetch, 1); assert.equal(deleted.length, 1); assert.equal(g.stats.bust, 1); assert.equal(g.stats.hit, 0);
+  assert.match(g.stats.verifyError, /no body/);
+});
+
+test('cachingFetch: a stored entry is untrusted; an ERR, a cut answer, an empty one and an answer to another request are evicted and refetched', async () => {
+  const head = headOf();
+  const body = fetchBody({ wants: [head], filter: 'tree:0', deepen: 1 });
+  const cache = memoryCache(); const pending = [];
+  const f = cachingFetch(globalThis.fetch, cache, { waitUntil: p => { pending.push(p); } });
+  const settle = async () => { await Promise.all(pending.splice(0)); };
+  const good = await rawCall(f, body); await settle();
+  assert.deepEqual(objectSet(good), [head]); assert.equal(cache.entries.size, 1);
+  const [key] = [...cache.entries.keys()];
+  // a complete, successful answer, but to a different request (the README blob): right shape, wrong key
+  const other = await post(url, fetchBody({ wants: [blobOid()] }));
+  assert.deepEqual(objectSet(other), [blobOid()]);
+  let busts = 0;
+  for (const [name, poison] of [['ERR', ERR_ANSWER], ['cut', good.slice(0, good.length >> 1)], ['empty', new Uint8Array(0)], ['other request', other]]) {
+    cache.entries.set(key, { body: poison.slice(), headers: { ...RESULT } });
+    const before = counts();
+    // oxlint-disable-next-line no-await-in-loop -- one poison at a time
+    const res = await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body });
+    assert.equal(res.headers.get('x-ply-pack-cache'), 'BUST', `${name}: not served as a HIT`);
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    const answer = new Uint8Array(await res.arrayBuffer()); await settle();
+    assert.deepEqual(objectSet(answer), [head], `${name}: the caller gets the origin's answer, not the stored one`);
+    assert.equal(delta(before, counts()).fetch, 1, `${name}: refetched exactly once`);
+    assert.equal(f.stats.bust, ++busts, `${name}: counted as a bust`);
+    assert.deepEqual(objectSet(cache.entries.get(key).body), [head], `${name}: the entry was replaced by a verified answer`);
+    const again = counts();
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    assert.deepEqual(objectSet(await rawCall(f, body)), [head]);
+    assert.equal(delta(again, counts()).fetch, 0, `${name}: the repaired entry is served`);
+  }
 });
