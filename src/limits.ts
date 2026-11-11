@@ -222,9 +222,11 @@ export const WORKER_LIMITS: CheckedLimits = grant({
   maxHarvestBytes: 8 * MIB,
   maxMergeBlobBytes: 2 * MIB,
   maxTreeEntries: 32_768,
-  // A rebase replays one commit at a time and reads each commit's changed trees one request each, and a Worker request
-  // may make 1,000 subrequests (standard plan). 256 commits, each changing a file one directory down, measured at or
-  // under 800 requests with a counting transport (test/rebase.test.js, the WORKER_LIMITS test).
+  // A rebase replays one commit at a time, about one request a commit whatever the depth of the path it changes, and a
+  // Worker request may make 1,000 subrequests (standard plan). 256 commits, each changing one file onto did not touch:
+  // 268 requests with a counting transport, at most 800 asserted (test/rebase.test.js, the WORKER_LIMITS test). A file
+  // that must be line-merged with onto costs about three more requests per commit, and this limit does not bound that
+  // (README, Limits).
   maxRebaseCommits: 256,
 });
 /* oxlint-enable no-magic-numbers */
