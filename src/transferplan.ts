@@ -359,9 +359,10 @@ export function planFitsPack(plan: TransferPlan, pack: ScannedPack, resolved: Re
   const select = getOrElse<readonly number[]>(plan.pack.select === null ? none : some(plan.pack.select), []);
   let k = 0;
   for (let i = 0; i < pack.count; i++) {
-    const e = entryAt(resolved, i);
-    if (!e.ok) return e;
-    if (e.value.type !== OBJ_TREE && e.value.type !== OBJ_BLOB) continue;
+    // the type column alone: no id is built per entry
+    const type = resolved.type(i);
+    if (type.tag !== 'some') return outOfRange(i);
+    if (type.value !== OBJ_TREE && type.value !== OBJ_BLOB) continue;
     if (getOrElse(at(select, k), -1) !== i) return fail('bad_request', `transfer: the plan's selection is not the pack's trees and blobs (entry ${i}); the pack is not the one planned`, { what: 'pack' });
     k++;
   }
