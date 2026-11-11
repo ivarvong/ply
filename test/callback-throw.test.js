@@ -116,3 +116,38 @@ for (const [label, makeDir, errno] of fsRows) {
     assert.equal(head(), before, 'the ref did not move');
   });
 }
+
+// Describing a thrown value never throws, whatever the value. Each value below has no string form, or cannot be read
+// at all. The oracle is the language, not ply: reading `.message` or calling String() on each one throws (asserted per
+// row, so a row is never vacuous), and the contract above still holds: a coded Err that names the callback, carries
+// the very value as `cause` and has a string message, with the ref where git says it was.
+const hostile = {
+  'a null-prototype object': () => Object.create(null),
+  'an object whose message getter throws': () => ({ get message() { throw new Error('getter'); } }),
+  'an object whose toString throws': () => ({ toString() { throw new Error('toString'); } }),
+  'a revoked Proxy': () => { const p = Proxy.revocable({}, {}); p.revoke(); return p.proxy; },
+};
+// [where the value is thrown, run(value, n), expected code, expected `what`]: hand-derived as in the rows above
+const sites = [
+  ['operation() before any request', v => operation('probe', url, {}, async () => { await null; throw v; }), 'bad_request', 'callback'],
+  ['operation() after the push request was handed to the transport', v => operation('probe', url, {}, async ({ t, root: span }) => { await null; t.frames('git-receive-pack', new Uint8Array(0), span, {}); throw v; }), 'ambiguous', 'callback'],
+  ['signer.sign (editFile)', (v, n) => edit({ signer: { sign: () => { throw v; }, publicKey: 'x' } }, `hostile-${n}`), 'bad_request', 'signer'],
+  ['the filesFromDir filter', v => filesFromDir(dir(), { filter: () => { throw v; } }), 'bad_request', 'filter'],
+];
+Object.entries(hostile).forEach(([name, make], i) => {
+  sites.forEach(([where, run, code, what], j) => {
+    test(`${where} throws ${name}: a coded Err (${code}) naming '${what}', never a throw`, async () => {
+      const before = head();
+      const v = make();
+      assert.throws(() => String(v.message ?? v), 'the language: this value cannot be described by reading its message or by String()');
+      let r;
+      try { r = await run(v, `${i}-${j}`); } catch (e) { assert.fail(`the Result API threw/rejected: ${e instanceof Error ? e.message : 'a value with no string form'}`); }
+      assert.equal(r.ok, false, 'a failing callback cannot be ok');
+      assert.equal(r.error.code, code);
+      assert.equal(r.error.what, what, 'the Err names the callback');
+      assert.ok(r.error.cause === v, 'the Err carries the very value the callback threw as its cause');
+      assert.equal(typeof r.error.message, 'string');
+      assert.equal(head(), before, 'git says the ref did not move');
+    });
+  });
+});

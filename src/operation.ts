@@ -18,7 +18,7 @@ import { createTransport, redactUrl } from './http.js';
 import { transportFrom, withParent } from './transport.js';
 import { lsRefs } from './lsrefs.js';
 import type { LsRefsResult } from './lsrefs.js';
-import { callbackFailed, fail, isPlyError, plyError } from './errors.js';
+import { callbackFailed, describeThrown, fail, isPlyError, plyError } from './errors.js';
 import { DEFAULT_LIMITS, parseLimits } from './limits.js';
 import type { Input } from './absent.js';
 import { field, mapGet, withDefaults } from './absent.js';
@@ -48,6 +48,11 @@ const operationDefaults = (): { -readonly [K in keyof OperationConfig]: Operatio
 });
 // The code an `ambiguous` replaced, when the thrown value had one (no key at all when it had none).
 const originalCode = (e: unknown): Pick<Extra, 'original'> => { const c = thrownCode(e); return c.tag === 'some' ? { original: c.value } : {}; };
+// What operation()'s catch needs of a thrown value, read without throwing: is it a PlyError, and the code it carries.
+// A value that cannot be read (a revoked Proxy, a `code` getter that throws) is not a PlyError and has no code.
+const readThrown = (e: unknown): { readonly known: PlyError | null; readonly original: Pick<Extra, 'original'> } => {
+  try { return { known: isPlyError(e) ? e : null, original: originalCode(e) }; } catch { return { known: null, original: {} }; }
+};
 // The service whose request only reads. The protocol has one other, the push service, and it is named only in the push
 // modules (a read-only bundle carries no push string: test/bundle.test.js). Once a request for any service but this
 // one is handed to a transport, a failure is no longer definite.
@@ -109,8 +114,9 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
     // never a throw), with one honest outcome. Once a push request was handed to a transport the ref may have moved:
     // `ambiguous` (retry: read the ref back), carrying the thrown value as `cause`. Before that nothing was pushed: a
     // thrown PlyError is that Err, and anything else is bad_request naming 'callback' with the thrown value as `cause`.
-    if (pushHandedOver && !(isPlyError(e) && e.code === 'ambiguous')) return failed(plyError('ambiguous', `${name}: a caller-supplied callback threw after the push request was handed to the transport, push outcome unknown: ${String(getOrElse<unknown>(thrownMessage(e), e))}`, { what: 'callback', cause: e, ...originalCode(e) }));
-    return failed(isPlyError(e) ? e : callbackFailed('callback', e));
+    const { known, original } = readThrown(e);
+    if (pushHandedOver && !(known !== null && known.code === 'ambiguous')) return failed(plyError('ambiguous', `${name}: a caller-supplied callback threw after the push request was handed to the transport, push outcome unknown: ${describeThrown(e)}`, { what: 'callback', cause: e, ...original }));
+    return failed(known === null ? callbackFailed('callback', e) : known);
   }
   return r.ok ? r : failed(r.error);
 }

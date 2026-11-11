@@ -13,15 +13,15 @@
 import { readdir, readFile, readlink, lstat } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a file's path in the tree throughout this file
 import { join } from 'node:path';
-import { callbackFailed, fail } from './errors.js';
+import { callbackFailed, describeThrown, fail } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf, parseLimits } from './limits.js';
 import type { LimitsInput } from './limits.js';
 import { MODE_BLOB, MODE_EXEC, MODE_LINK } from './format.js';
-import { err, getOrElse, ok } from './result.js';
+import { err, ok } from './result.js';
 import type { Result } from './result.js';
 import type { Input } from './absent.js';
-import { field, withDefaults } from './absent.js';
+import { withDefaults } from './absent.js';
 import { pushTree } from './tree.js';
 import type { PushTreeOptions, PushTreeResult, TreeSpec } from './tree.js';
 
@@ -81,7 +81,7 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
   };
   let walked: Result<null, DirError>;
   try { walked = await walk(''); } catch (e) {
-    return fail('bad_request', `${dir}: the directory could not be read: ${String(getOrElse(field(e, 'message'), e))}`, { what: 'dir', cause: e });
+    return fail('bad_request', `${dir}: the directory could not be read: ${describeThrown(e)}`, { what: 'dir', cause: e });
   }
   return walked.ok ? ok(out) : walked;
 }
