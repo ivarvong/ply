@@ -48,7 +48,8 @@ export type Scope = { readonly name: string; readonly version: string };
 export type ScopeSpans = { readonly scope: Scope; readonly spans: readonly OtlpSpan[] };
 export type ResourceSpans = { readonly resource: { readonly attributes: readonly KeyValue[] }; readonly scopeSpans: readonly ScopeSpans[] };
 export type ExportLine = { readonly resourceSpans: readonly ResourceSpans[] };
-export type Exporter = (line: ExportLine) => void;
+// Returns nothing ply reads. An async exporter's promise is watched: its rejection goes to onTelemetryError.
+export type Exporter = (line: ExportLine) => unknown;
 // A span as it ended, as plain values: exactly what `flattenLine` reads back from the OTLP line `end()` would export for
 // it (attributes and event attributes scrubbed, an int as a number, bytes as base64, null as ''), plus its start and end
 // times. `otlp()` builds that OTLP span on first call and returns the same object after. For an exporter that lives in
@@ -58,7 +59,7 @@ export type EndedSpan = FlatSpan & {
   readonly endTimeUnixNano: string;
   readonly otlp: () => OtlpSpan;
 };
-export type SpanSink = (span: EndedSpan) => void;
+export type SpanSink = (span: EndedSpan) => unknown;
 
 // Platform clocks are probed, not type-checked: newer Workers compatibility dates define a `process` global whose
 // `hrtime`/`cpuUsage` exist but throw "not implemented" (found under workerd 2026-10-18, compat date 2026-10-18).
@@ -159,7 +160,7 @@ export const KIND: Readonly<{ INTERNAL: 1; SERVER: 2; CLIENT: 3; PRODUCER: 4; CO
 // `exporter` (or an overridden `export`) or from an operation's `onFinish` is caught where ply calls it, counted in
 // `tracer.telemetryErrors` and handed to this hook (null: only counted). What the hook itself throws is dropped.
 export type TelemetryHook = 'onEnd' | 'exporter' | 'onFinish';
-export type TelemetryErrorSink = (error: unknown, at: { readonly hook: TelemetryHook; readonly span: string }) => void;
+export type TelemetryErrorSink = (error: unknown, at: { readonly hook: TelemetryHook; readonly span: string }) => unknown;
 export type TracerConfig = { readonly exporter: Exporter; readonly onEnd: SpanSink | null; readonly onTelemetryError: TelemetryErrorSink | null; readonly resource: Attrs; readonly scope: Scope; readonly maxEvents: number };
 export type TracerOptions = Input<TracerConfig>;
 // How a span starts: under `parent`, or following `follows` (never both), with the credential scrubber it inherits.
@@ -319,12 +320,14 @@ export class Span {
     const exports = tracer.exporter !== dropSpans || tracer.export !== Tracer.prototype.export;
     // Every call below into the caller's code (onEnd, the exporter, an overridden export) is guarded: end() never throws.
     if (sink === null) {
+      // oxlint-disable-next-line typescript/no-confusing-void-expression -- an override of export may be async: guard watches what it returns
       if (exports) tracer.guard('exporter', this.name, (): unknown => tracer.export(otlpSpan(this, end.toString())));
       else tracer.count++;
       return this;
     }
     const ended = endedSpan(this, end);
     tracer.guard('onEnd', this.name, (): unknown => sink(ended));
+    // oxlint-disable-next-line typescript/no-confusing-void-expression -- as above
     if (exports) tracer.guard('exporter', this.name, (): unknown => tracer.export(ended.otlp()));
     else tracer.count++;
     return this;
@@ -375,16 +378,17 @@ export class Tracer {
   public guard(hook: TelemetryHook, span: string, call: () => unknown): void {
     try {
       const returned = call();
-      if (returned !== undefined) Promise.resolve(returned).then(undefined, (e: unknown) => { this.telemetryFailed(e, hook, span); });
+      // an async exporter returns a promise (any thenable is an object): its rejection is this hook's failure too
+      if (typeof returned === 'object' && returned !== null) Promise.resolve(returned).catch((e: unknown) => { this.telemetryFailed(e, hook, span); });
     } catch (e) { this.telemetryFailed(e, hook, span); }
   }
-  private telemetryFailed(error: unknown, hook: TelemetryHook, span: string): void {
+  private telemetryFailed(thrown: unknown, hook: TelemetryHook, span: string): void {
     this.telemetryErrors++;
     const report = this.onTelemetryError;
     if (report === null) return;
     try {
-      const returned: unknown = report(error, { hook, span });
-      if (returned !== undefined) Promise.resolve(returned).then(undefined, () => { /* the reporter is telemetry too */ });
+      const returned = report(thrown, { hook, span });
+      if (typeof returned === 'object' && returned !== null) Promise.resolve(returned).catch(() => { /* the reporter is telemetry too */ });
     } catch { /* the reporter is telemetry too: what it throws is dropped */ }
   }
 }
