@@ -285,9 +285,13 @@ test('a stale old oid is cas_conflict, as push reports it', async () => {
 
 test('a lost response after the body went out is ambiguous, and the unfinished source is cancelled', async () => {
   const { url } = repo();
-  const fetchImpl = routed(async () => { throw new TypeError('network gone'); });
+  // the body went out: the transport took its first chunk (the command list) before the connection was lost. A
+  // failure before that first pull is the definite one (test/push-pack-preabort.test.js).
+  let taken = 0;
+  const fetchImpl = routed(async init => { taken += (await init.body.getReader().read()).value.length; throw new TypeError('network gone'); });
   const { stream, state } = streamOf(source.pack);
   const r = await pushPack(transport(url, { fetchImpl }), { ...create(), pack: stream });
+  assert.ok(taken > 0);
   assertAmbiguous(r, 'network');
   assert.equal(state.cancelled, 1);
 });

@@ -112,6 +112,21 @@ export const LIMIT_MERGE_DEPTH = 1024;
  */
 export const LIMIT_REPORT_LINES: number = LIMIT_REFS;
 /**
+ * The bytes kept of one report-status reason: the reason of "ng <ref> <reason>", or the status of "unpack <status>".
+ * git's own are under 50 bytes and the longest host reason observed is 86 (Cloudflare Artifacts), so 4 KiB is room for
+ * a host that explains itself. A longer reason is cut here and its ref keeps its status (push.ts cutReportLine): the cap
+ * bounds what is held (one reason a command), never the outcome. Never below git's own longest (push.ts reportReasonCap).
+ */
+export const LIMIT_REPORT_REASON_BYTES = 4096;
+/** The same for a 128 MiB isolate: 10 000 refused refs hold 10 MiB of reasons (and as much again decoded), not 40 MiB. */
+export const LIMIT_REPORT_REASON_BYTES_WORKER = 1024;
+/**
+ * Band-2 bytes (progress, hook output) decoded from one receive-pack answer. A frame past it is dropped unread and the
+ * report is still read (the answer as a whole is held to maxPackBytes). Only a 4 KiB tail is ever kept, so this bounds
+ * the decoding, not the memory: git's progress is a few KiB and a talkative hook some hundreds; 8 MiB is past both.
+ */
+export const LIMIT_REPORT_PROGRESS_BYTES = 8_388_608;
+/**
  * Parents on one commit. An octopus is a handful; a commit that lists more parents than the ref cap is not
  * a history bestBases will walk.
  */
@@ -200,6 +215,8 @@ export type Limits = {
   readonly maxPathComponent: number;
   readonly maxMergeDepth: number;
   readonly maxReportLines: number;
+  readonly maxReportReasonBytes: number;
+  readonly maxReportProgressBytes: number;
   readonly maxCommitParents: number;
   readonly maxLsRefsBytes: number;
   readonly requestTimeoutMs: number;
@@ -248,6 +265,8 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
   maxPathComponent: LIMIT_PATH_COMPONENT,
   maxMergeDepth: LIMIT_MERGE_DEPTH,
   maxReportLines: LIMIT_REPORT_LINES,
+  maxReportReasonBytes: LIMIT_REPORT_REASON_BYTES,
+  maxReportProgressBytes: LIMIT_REPORT_PROGRESS_BYTES,
   maxCommitParents: LIMIT_COMMIT_PARENTS,
   maxLsRefsBytes: LIMIT_LS_REFS_BYTES,
   requestTimeoutMs: LIMIT_REQUEST_TIMEOUT_MS,
@@ -261,8 +280,9 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
  * 16 MiB and the inflated total, which also pays LIMIT_OBJECT_OVERHEAD per object, is 64 MiB: half the isolate, about
  * 21 000 tiny objects. The wire caps (pack, push, ls-refs) are two objects, as in the defaults. maxHarvestBytes is half an
  * object, maxMergeBlobBytes 2 MiB (the line merger holds each side more than twice), maxMergeWork 2^26 steps per merged
- * file (LIMIT_MERGE_WORK_WORKER: CPU, not memory), and maxTreeEntries 32 768
- * (a listed entry keeps ~150 B of heap, so the 200 000 default is ~30 MiB of the isolate's 128: #140). Every other cap
+ * file (LIMIT_MERGE_WORK_WORKER: CPU, not memory), maxTreeEntries 32 768
+ * (a listed entry keeps ~150 B of heap, so the 200 000 default is ~30 MiB of the isolate's 128: #140), and
+ * maxReportReasonBytes 1 KiB (a push of maxRefs refused refs holds one reason each). Every other cap
  * is the default. The limit sweep runs these at --max-old-space-size=128 (test/sweep/matrix.mjs, `worker.*` cells):
  * each refuses or succeeds, none runs out of memory.
  */
@@ -280,6 +300,7 @@ export const WORKER_LIMITS: CheckedLimits = grant({
   maxMergeBlobBytes: 2 * MIB,
   maxMergeWork: LIMIT_MERGE_WORK_WORKER,
   maxTreeEntries: 32_768,
+  maxReportReasonBytes: LIMIT_REPORT_REASON_BYTES_WORKER,
 });
 /* oxlint-enable no-magic-numbers */
 

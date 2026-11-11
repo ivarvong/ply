@@ -1780,6 +1780,18 @@ test('push holds band 2 to maxPackBytes, counted with its report', async () => {
   const flood = { limits: withLimits({ maxPackBytes: 10_000 }), tracer: tracerStub, parent: null, async *frames() { for (;;) { pulled++; yield band(SIDEBAND_PROGRESS, 999); } } };
   await assert.rejects(unwrapAsync(push(flood, { commands: del, sideband: true })), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes' && e.cause.max === 10_000);
   assert.equal(pulled, 11, 'ten 1,000-byte frames fit, the eleventh crosses the cap');
+  // The report's own caps bound what is kept, never the outcome (owner decision 5; test/push-report-bound.test.js reads
+  // real response bodies): maxPackBytes is the one byte cap on the answer, so an endless band 2 or an endless run of
+  // keepalives (one band byte each) ends there, by that name, under the default reason and progress limits.
+  const endless = frame => ({ limits: withLimits({ maxPackBytes: 100_000 }), tracer: tracerStub, parent: null, async *frames() { for (;;) yield frame; } });
+  const capped = (what, max) => e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === what && e.cause.max === max;
+  await assert.rejects(unwrapAsync(push(endless(band(SIDEBAND_PROGRESS, 60_000)), { commands: del, sideband: true })), capped('report bytes', 100_000));
+  // 100,000 keepalives fit, the next one is over
+  await assert.rejects(unwrapAsync(push(endless(band(SIDEBAND_PACK, 0)), { commands: del, sideband: true })), e => capped('report bytes', 100_000)(e) && e.cause.got === 100_001);
+  // an unpack status past maxReportReasonBytes (4,096) is cut and read as a line, as one under it is: neither is a git
+  // unpack status, and the next copy of it is no ref status
+  const unpackLine = n => ({ kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), unwrap(pkt(`unpack ${'x'.repeat(n - 8)}\n`))]) });
+  for (const n of [4137, 4138, 20_000]) await assert.rejects(unwrapAsync(push(endless(unpackLine(n)), { commands: del, sideband: true })), e => e.code === 'ambiguous' && e.original === undefined && e.message === 'push outcome unknown: a line is not a ref status');
 });
 
 test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and the fields the enumerator does not compare', async () => {

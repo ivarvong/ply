@@ -420,6 +420,15 @@ function pass2(add) {
     id: 'report.refs8.n8', param: 'maxReportLines', op: 'pushRepo', repo: 'empty', local: 'branches-8', spec: { all: true }, writes: true,
     bytes: 8 * 64, entries: 8, limits: { maxRefs: 8, maxReportLines: 8 }, expect: ok,
   });
+  // ---- maxReportReasonBytes, maxReportProgressBytes. Neither can refuse a push: they bound what is kept of the answer
+  // (a reason's bytes, band 2's decoding), not whether the report is read. So the boundary is 0, and a push under it
+  // lands as it does at the default: git's refs after the push are the oracle.
+  for (const key of ['maxReportReasonBytes', 'maxReportProgressBytes']) {
+    add({
+      id: `report.${key}.zero`, param: key, op: 'pushRepo', repo: 'empty', local: 'branches-8', spec: { all: true }, writes: true,
+      bytes: 8 * 64, entries: 8, limits: { [key]: 0 }, expect: ok,
+    });
+  }
   // The default cap equals maxRefs, so the largest push maxRefs allows (10 000 commands) has 10 001 report lines.
   const refCap = DEFAULT_LIMITS.maxRefs;
   for (const n of [refCap - 1, refCap, refCap + 1]) {
