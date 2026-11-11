@@ -38,6 +38,9 @@
 // the runtime has no buffer for is `limit_exceeded`, what: 'local pack buffer bytes'. A packfile the file system will not give (EACCES, EIO,
 // EISDIR, …) is `unsupported`, kind 'filesystem', what: 'local pack', with the path, the operation and the system's
 // code in the message and the thrown error as `cause`: pushRepo never rejects with a node:fs error for a packfile.
+// Not yet bounded before the read (maybeRead / maybeText read the file whole): a loose object file, packed-refs, a
+// loose ref file, config, commondir, a `.git` file and HEAD. maxObjectSize bounds a loose object's inflated bytes,
+// not its file, and a text file of 512 MiB or more makes pushRepo reject with node's ERR_STRING_TOO_LONG.
 //
 // Refused as `bad_request` with `what`: SHA-256 repositories (objectFormat), reftable (refStorage), partial clones
 // (partialClone), objects/info/alternates (alternates) and shallow repositories (shallow).
