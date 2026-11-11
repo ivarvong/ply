@@ -271,7 +271,7 @@ if (!stale.ok) {
 ```js
 import { editFile, Tracer, consoleExporter } from 'ply';
 
-const tracer = new Tracer({ exporter: consoleExporter() });  // logs each OTLP/JSON export line; or your own (line) => …
+const tracer = new Tracer({ exporter: consoleExporter() });  // logs each export as one JSON line; or your own (request) => …, which gets the object: { resourceSpans: [{ resource, scopeSpans: [{ scope, spans: [span] }] }] }
 const cache = new Map();  // trees by oid, reused across edits
 const r = await editFile('https://github.com/o/r.git', {
   ref: 'refs/heads/main', path: 'src/config.ts',
@@ -549,7 +549,7 @@ Span names, kinds, parent/child structure, links and attribute keys (with their 
 
 ### In-process consumers: `onEnd`
 
-An exporter gets each span as an OTLP/JSON line, which is what a file or a collector wants. A consumer in the same
+An exporter gets each span as one OTLP/JSON `ExportTraceServiceRequest` object, `{ resourceSpans: [{ resource, scopeSpans: [{ scope, spans: [span] }] }] }` (an object, not a string: `JSON.stringify` it for a JSONL file or a collector's body; `consoleExporter` does). Telemetry never changes an operation's outcome: a throw or a rejected promise from `exporter` or `onEnd` is caught, counted in `tracer.telemetryErrors` and handed to the optional `onTelemetryError(error, { hook, span })` tracer option; the operation's Result is what it would have been with a healthy tracer. A consumer in the same
 process (a list kept for one request, spans mirrored onto a platform tracer) usually wants plain values instead, and
 would otherwise pay to build the OTLP form and then `flattenLine` it straight back. `new Tracer({ onEnd })` calls
 `onEnd(span)` with an `EndedSpan` as each span ends: exactly the `FlatSpan` that `flattenLine` reads back from the line
