@@ -17,8 +17,12 @@
 //   - a dynamic block whose code-length, literal/length or distance code set is over-subscribed or incomplete is
 //     pack_corrupt with zlib's message (`invalid code lengths set`, `invalid literal/lengths set`, `invalid distances
 //     set`), by zlib's own rule (huffComplete); test/inflate-codesets.test.js holds acceptance to node:zlib;
-//   - a back-reference past the window CINFO declares is pack_corrupt, and CINFO > 7 is `zlib: window size N is not a
-//     zlib window` (after the method check and before the header checksum);
+//   - CINFO > 7 is `zlib: window size N is not a zlib window` (after the method check and before the header checksum),
+//     and a back-reference that reaches before the first byte of output is `distance too far back`. A smaller CINFO is
+//     reported (git.inflate.window) and not enforced, as in stock zlib: inflate.c refuses `len > 15 || len >
+//     state->wbits` (15 under git's inflateInit) and reads dmax = 1 << len only under INFLATE_STRICT, which a stock
+//     build does not define. So git reads a member whose match reaches past its declared window, and so does ply
+//     (test/inflate-zlib-git.test.js: node:zlib and git cat-file on a hand-built loose object);
 //   - a stored block whose declared length is past the output cap is refused at its header, before its bytes arrive;
 //   - a member cut inside its zlib header is a short read of the bytes fed.
 // The Huffman tables, the alphabets and Adler-32 live here too; inflate.ts re-exports them.
@@ -631,7 +635,9 @@ function stepCodes(st: InflateStream): Drive {
     const dbits = DEXT[di] as number;
     if (!fill(st, dbits)) return rewind(st);
     const d = (DBASE[di] as number) + take(st, dbits);
-    if (d > st.emitted || d > st.windowSize) return refuse(st, plyError('pack_corrupt', 'inflate: distance too far back'));
+    // zlib's rule (inflate.c: offset > whave + out - left): only the output produced bounds a distance. The largest
+    // distance deflate spells is the ring's size, so the read stays inside the ring.
+    if (d > st.emitted) return refuse(st, plyError('pack_corrupt', 'inflate: distance too far back'));
     const fits = room(st, len);
     if (!fits.ok) return refuse(st, fits.error);
     st.stats.matches += 1;

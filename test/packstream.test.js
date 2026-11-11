@@ -266,11 +266,16 @@ test('inflate pull and inflate(): the zlib window (the refusals the old decoder 
   assert.equal(refusal(inflate(Uint8Array.of(0x88, 0x00))), 'pack_corrupt: zlib: window size 8 is not a zlib window');
   assert.equal(refusal(inflate(Uint8Array.of(0xf8, 0x00))), 'pack_corrupt: zlib: window size 15 is not a zlib window');
   assert.equal(refusal(inflate(Uint8Array.of(0x89, 0x00))), 'pack_corrupt: zlib: unsupported method 9');
-  // a back-reference past the window CINFO declares: here 256 bytes, the match 5000 back
+  // a back-reference past the window CINFO declares (here 256 bytes, the match 5000 back) is read: stock zlib does not
+  // enforce the declared window (inflate.c reads dmax only under INFLATE_STRICT), so node:zlib and git take the member
+  // and the pull and inflate() answer zlib's bytes (the owner's ruling, 2026-11-11: git is the judge of a member; this
+  // case pinned a refusal before; test/inflate-zlib-git.test.js holds it to git cat-file)
   const small = z.slice(); small[0] = 0x08; small[1] = 31 - ((0x08 * 256) % 31);
   assert.equal(inflateRef(small).ok, true, 'the old decoder took it (it checked only that the distance is inside the output)');
-  assert.equal(refusal(pulled(small, streamOpts())), 'pack_corrupt: inflate: distance too far back');
-  assert.equal(refusal(inflate(small)), 'pack_corrupt: inflate: distance too far back');
+  const smallWant = new Uint8Array(zlib.inflateSync(small));
+  assert.deepEqual(smallWant, new Uint8Array(Buffer.concat([d, d])));
+  assert.deepEqual(pulled(small, streamOpts()).value.out, smallWant);
+  assert.deepEqual(inflate(small).value.out, smallWant);
   // the same member at CINFO 7 is fine
   assert.deepEqual(pulled(z, streamOpts()).value.out, new Uint8Array(Buffer.concat([d, d])));
   // a declared size past the cap: after the zlib header (inflate()'s order), or before anything for a raw stream
