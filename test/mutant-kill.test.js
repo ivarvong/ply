@@ -1127,8 +1127,10 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
 
   const bits = []; const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
   put(1, 1); put(2, 2);
-  put(0, 5); put(0, 5); put(1, 4);
-  put(0, 3); put(0, 3); put(0, 3); put(1, 3); put(1, 3);
+  // the end-of-block code alone at one bit: the one incomplete literal/length set zlib accepts (inftrees.c); any other
+  // is refused at the header (test/inflate-codesets.test.js). Code-length symbols 0 and 1 at one bit: 0 → `0`, 1 → `1`.
+  put(0, 5); put(0, 5); put(14, 4);
+  for (const n of [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]) put(n, 3);
   for (let i = 0; i < 256; i++) put(0, 1);
   put(1, 1);
   put(0, 1);
@@ -1244,15 +1246,21 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
     for (const [v, n] of extras.body) put(v, n);
     return packBits(bits);
   };
-  throws(() => unwrap(inflate(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: repeat with no previous');
-  throws(() => unwrap(inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [127, 7]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: repeat overflow');
-  throws(() => unwrap(inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [120 - 11, 7]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: no end-of-block code');
+  // head: the lengths of the code-length symbols 16, 17, 18, 0. Each set is complete (two 1-bit codes: 0 → `0`, the
+  // other → `1`); zlib refuses a one-code code-length set as `invalid code lengths set` before any symbol is read.
+  throws(() => unwrap(inflate(repeat({ head: [1, 0, 0, 1], body: [[1, 1]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: repeat with no previous');
+  throws(() => unwrap(inflate(repeat({ head: [0, 0, 1, 1], body: [[1, 1], [127, 7], [1, 1], [127, 7]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: repeat overflow');
+  throws(() => unwrap(inflate(repeat({ head: [0, 0, 1, 1], body: [[1, 1], [127, 7], [1, 1], [120 - 11, 7]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: no end-of-block code');
+  // and the one-code set itself is refused as zlib refuses it
+  throws(() => unwrap(inflate(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: invalid code lengths set');
+  assert.throws(() => zlib.inflateRawSync(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] })), /invalid code lengths set/);
 
   // 15 data bits end on the last bit of the buffer, so one more Huffman step has nothing to read.
   const hole = [];
   const putHole = (v, n) => { for (let i = 0; i < n; i++) hole.push((v >> i) & 1); };
-  putHole(1, 1); putHole(2, 2); putHole(0, 5); putHole(0, 5); putHole(6, 4);
-  for (const n of [0, 0, 0, 1, 1, 0, 0, 0, 0, 0]) putHole(n, 3);
+  // the end-of-block code alone at one bit (the incomplete set zlib accepts), read as the unused `1`
+  putHole(1, 1); putHole(2, 2); putHole(0, 5); putHole(0, 5); putHole(14, 4);
+  for (const n of [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]) putHole(n, 3);
   for (let i = 0; i < 256; i++) putHole(0, 1);
   putHole(1, 1); putHole(0, 1);
   for (let i = 0; i < 15; i++) putHole(1, 1);
