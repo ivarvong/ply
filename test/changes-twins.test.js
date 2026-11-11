@@ -116,3 +116,36 @@ for (const [label, changes] of Object.entries(LISTS)) {
     });
   }
 }
+
+// Rewriting a file's content does not change its mode in git: `git add` of new bytes over run.sh (100755) keeps
+// 100755. A `write` with no mode does the same; an explicit mode wins; a path with no regular file there is 100644.
+test('write with no mode keeps the mode of the regular file it replaces, as git add does', async () => {
+  const name = `t${n++}`;
+  const bare = join(root, `${name}.git`);
+  cpSync(templates.get('strict-unpack'), bare, { recursive: true });
+  const work = join(root, `g${n++}`);
+  cpSync(seed, work, { recursive: true });
+  writeFileSync(join(work, 'run.sh'), '#!/bin/sh\necho hi\n');
+  writeFileSync(join(work, 'a/README.md'), 'plain\n');
+  writeFileSync(join(work, 'new.sh'), 'new\n');
+  git(work, ['add', '-A']);
+  git(work, ['commit', '-q', '-m', 'by git']);
+  const want = git(work, ['ls-tree', '-r', 'HEAD']);
+  assert.match(want, /^100755 blob [0-9a-f]{40}\trun\.sh$/mu);
+  const changes = [
+    { kind: 'write', path: 'run.sh', content: '#!/bin/sh\necho hi\n' },
+    { kind: 'write', path: 'a/README.md', content: 'plain\n' },
+    { kind: 'write', path: 'new.sh', content: 'new\n' },
+  ];
+  const r = await commitChanges(`${srv.url}/${name}.git`, { ref: 'refs/heads/main', author: AUTHOR, message: 'modes', changes }, { tracer: new Tracer() });
+  assert.equal(r.ok ? `ok ${r.value.outcome}` : `${r.error.code}: ${r.error.message}`, 'ok commit');
+  assert.equal(git(bare, ['ls-tree', '-r', 'refs/heads/main']), want);
+  // an explicit mode always wins: by hand, run.sh becomes 100644 and a/config.json 100755
+  const again = await commitChanges(`${srv.url}/${name}.git`, {
+    ref: 'refs/heads/main', author: AUTHOR, message: 'explicit',
+    changes: [{ kind: 'write', path: 'run.sh', content: 'x\n', mode: '100644' }, { kind: 'write', path: 'a/config.json', content: '{}\n', mode: '100755' }],
+  }, { tracer: new Tracer() });
+  assert.equal(again.ok, true);
+  assert.equal(git(bare, ['ls-tree', 'refs/heads/main', 'run.sh']).slice(0, 6), '100644');
+  assert.equal(git(bare, ['ls-tree', 'refs/heads/main', 'a/config.json']).slice(0, 6), '100755');
+});

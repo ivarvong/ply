@@ -54,7 +54,9 @@ const HEX40 = /^[0-9a-fA-F]{40}$/u;
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 export type { BlobMode };
-// `mode` left out is a regular file (100644). Paths are plain strings, checked (validatePath) before any I/O.
+// `mode` given always wins. `mode` left out: a `write` over an existing regular file keeps that file's mode (100644
+// or 100755), as rewriting a file's content does in git; a `create`, and a `write` where there is no regular file
+// (a new path, or a symlink being replaced), is 100644. Paths are plain strings, checked (validatePath) before any I/O.
 type Content = { readonly path: string; readonly content: string | Uint8Array } & Input<{ readonly mode: BlobMode }>;
 export type Change =
   | ({ readonly kind: 'create' } & Content)
@@ -86,7 +88,8 @@ export type CommitChangesResult = {
   readonly created: boolean;
 };
 
-type Stored = { readonly path: string; readonly comps: readonly string[]; readonly mode: BlobMode; readonly data: Uint8Array };
+// `mode` null: not given; decided where the change is applied (modeFor), against the tree the earlier changes left.
+type Stored = { readonly path: string; readonly comps: readonly string[]; readonly mode: BlobMode | null; readonly data: Uint8Array };
 type Norm =
   | (Stored & { readonly kind: 'create' })
   | (Stored & { readonly kind: 'write' })
@@ -116,8 +119,8 @@ type Parent = {
 type Applied = { readonly tree: Oid; readonly objects: readonly PackObject[] };
 type BadRequest = ErrorOf<'bad_request'>;
 
-function modeOf(mode: Option<unknown>, path: string): Result<BlobMode, BadRequest> {
-  if (mode.tag === 'none') return ok('100644');
+function modeOf(mode: Option<unknown>, path: string): Result<BlobMode | null, BadRequest> {
+  if (mode.tag === 'none') return ok(null);
   const given = mode.value;
   if (given === '100644' || given === '100755' || given === '120000') return ok(given);
   return fail('bad_request', `${path}: mode ${JSON.stringify(given)} is not 100644, 100755 or 120000`, { what: 'mode', path });
@@ -139,7 +142,7 @@ function normalize(raw: unknown, limits: CheckedLimits): Result<Norm, PlyError> 
     const comps = pathOf(rec['path'], limits);
     if (!comps.ok) return comps;
     const joined = comps.value.join('/');
-    // a mode left out is a regular file; any other value (null included) is the caller's, and checked
+    // a mode left out is decided when the change is applied; any other value (null included) is the caller's, and checked
     const mode = modeOf(fromNullable(rec['mode']), joined);
     if (!mode.ok) return mode;
     const data = bytes(rec['content'], joined, 'content');
@@ -425,6 +428,17 @@ async function applyEdit(walk: Walk, root: Dir, change: Extract<Norm, { readonly
   return putLeaf(walk, root, { comps: change.comps, mode, data: next.value, path: change.path, overwrite: true }, created);
 }
 
+// The mode a create or write stores. Given: that one. Not given: a write over a regular file keeps the file's mode
+// (git: new content does not change a mode); anything else is a plain file. Read after descend, so the parent
+// directory is expanded and the entry is what the earlier changes of this list left there.
+function modeFor(root: Dir, change: Extract<Norm, { readonly kind: 'create' | 'write' }>): BlobMode {
+  if (change.mode !== null) return change.mode;
+  if (change.kind === 'create') return '100644';
+  const there = leafAt(root, change.comps);
+  if (there.ok && there.value.kind === 'lazy' && there.value.mode === '100755') return '100755';
+  return '100644';
+}
+
 // Each change walks the tree the previous change left, so the steps cannot run together.
 /* oxlint-disable no-await-in-loop */
 async function applyChange(walk: Walk, root: Dir, change: Norm, created: Map<string, Uint8Array>): Promise<Result<null, PlyError>> {
@@ -433,7 +447,7 @@ async function applyChange(walk: Walk, root: Dir, change: Norm, created: Map<str
     case 'write': {
       const walked = await descend(walk, root, change.comps.slice(0, -1), true);
       if (!walked.ok) return walked;
-      return putLeaf(walk, root, { comps: change.comps, mode: change.mode, data: change.data, path: change.path, overwrite: change.kind === 'write' }, created);
+      return putLeaf(walk, root, { comps: change.comps, mode: modeFor(root, change), data: change.data, path: change.path, overwrite: change.kind === 'write' }, created);
     }
     case 'edit': return applyEdit(walk, root, change, created);
     case 'delete': {
