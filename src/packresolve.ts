@@ -600,6 +600,7 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Check
     if (!l.ok) return l;
   }
   // every delta that has not resolved is filed: none filed, none left
+  // Stryker disable next-line ConditionalExpression: a shortcut that cannot change the result. When both waiting maps are empty every delta is in memo, so `left` is empty, each loop below runs zero times, and the last return gives this same value
   if (onOffset.size === 0 && onOid.size === 0) return ok({ objects: resolved, stats, unresolved: [] });
   const left = deltas.filter(d => !memo.has(d.offset));
   // What each remaining delta waits on, through its OFS bases, each walked once (the answer is kept per offset). A walk
@@ -616,8 +617,10 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Check
       stats.steps++;
       if (cur.base.tag === 'ref') { found = { oid: cur.base.oid, depth: 1 }; waits.set(cur.offset, found); break; }
       const b = mapGet(byOffset, cur.base.offset);
-      // an unresolved delta's OFS base is an unresolved delta: findBase saw the object, and it would have landed this one
-      if (onPath.has(cur.offset) || b.tag === 'none' || b.value.tag !== 'delta') return null;
+      // the walk came back to a delta already on its path: a cycle of OFS bases
+      if (onPath.has(cur.offset)) return null;
+      // Stryker disable next-line ConditionalExpression,LogicalOperator,StringLiteral: narrows the type only, never true. `cur` is an unresolved delta that passed findBase's byOffset check, so there is an entry at its base offset; whole objects settle before any delta is visited, so a whole object there would have resolved `cur` (or ended the call with patch's error): its OFS base is an unresolved delta
+      if (b.tag === 'none' || b.value.tag !== 'delta') return null;
       onPath.add(cur.offset);
       path.push(cur);
       cur = b.value;
@@ -659,8 +662,7 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Check
   let missing: Oid | null = null;
   for (const d of left) {
     const w = mapGet(waits, d.offset);
-    // every delta in `left` has a wait (the loop above)
-    // Stryker disable next-line ConditionalExpression: see above
+    // Stryker disable next-line ConditionalExpression,StringLiteral: `w.tag === 'none'` narrows the type only, never true. The chain-limit loop above called waitOf for every delta in `left`, and waitOf records a wait at the offset it starts from or the call ended there with limit_exceeded
     if (memo.has(d.offset) || w.tag === 'none') continue;
     unresolved.push({ offset: d.offset, oid: w.value.oid });
     if (missing === null) missing = w.value.oid;
