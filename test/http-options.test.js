@@ -604,7 +604,9 @@ test('a timeout above 2^31-1 ms is refused with a message naming the key and the
 // lowercases the scheme); anything else is a definite bad_request about the url, before any I/O. The message is the
 // fixed text README documents, and the allowUrl rows are the train head's verdicts (607691d1) recorded by the probe in
 // scratch (fix9/http-scheme-mutants-kill/probe-before.txt), not read back from the code under test here.
-import { listRefs } from '../src/index.js';
+// From its module, not the package root: a static import of src/index.js loads every module it re-exports, so each of
+// their module-level mutants is static and runs all 412 mutation tests (errors-doc.ts: 79 of them, #313).
+import { listRefs } from '../src/refops.js';
 const SCHEME_MESSAGE = 'invalid url: only http: and https: remotes are supported';
 const NOT_HTTP = ['file:///etc/passwd', 'data:text/plain,hi', 'blob:nodedata:abc', 'ssh://git@127.0.0.1/repo.git', 'git://127.0.0.1/repo.git', 'ext::sh -c "touch /tmp/pwned"'];
 

@@ -17,11 +17,10 @@ import { execFileSync } from 'node:child_process';
 import { git, gitBuf, gitAsync, tmpRoot, fsckProblems } from './server.js';
 import { encodePackIndex, indexPack, layoutPackIndex } from '../src/packindex.js';
 import { objectsForPack, reachableObjects, mapStore } from '../src/packwalk.js';
-import { planDeltas } from '../src/delta.js';
+import { encodeDelta, planDeltas } from '../src/delta.js';
 import { buildPack, parsePack, resolvePack } from '../src/pack.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { fromHex } from '../src/sha1.js';
-import * as ply from '../src/index.js';
 
 let root, cleanup;
 before(() => { ({ root, cleanup } = tmpRoot()); });
@@ -180,7 +179,7 @@ test('refusals: a malformed index request is bad_request, a thin or duplicated p
   // a thin pack (a REF_DELTA whose base is not in it): git index-pack refuses it without --fix-thin, and so does indexPack
   const base = new TextEncoder().encode('base '.repeat(40));
   const target = new TextEncoder().encode(`${'base '.repeat(40)}and more`);
-  const thin = (await buildPack([{ type: TYPE.BLOB, data: ply.encodeDelta(base, target), base: { tag: 'ref', oid: hashObject('blob', base) } }])).pack;
+  const thin = (await buildPack([{ type: TYPE.BLOB, data: encodeDelta(base, target), base: { tag: 'ref', oid: hashObject('blob', base) } }])).pack;
   writeFileSync(join(d, 'thin.pack'), thin);
   assert.throws(() => git(d, ['index-pack', '-o', join(d, 'thin.idx'), join(d, 'thin.pack')]), /unresolved deltas|fatal/i);
   assert.match(code(indexPack(thin)), /^pack_corrupt/);
@@ -218,11 +217,11 @@ test('end to end: an export with no disk and no git (walk, plan, build, index) c
   // what a Worker has after ls-refs and one fetch: the refs (with peeled tags) and resolvePack's objects
   const objects = objectsOf(source);
   const refs = git(source, ['for-each-ref', '--format=%(objectname) %(refname) %(*objectname)']).trim().split('\n').map(l => { const [oid, name, peeled] = l.split(' '); return { oid, name, peeled: peeled || null }; });
-  // ---- the export: ply's public API and ~10 lines of layout ----
-  const order = unwrap(await ply.objectsForPack(ply.mapStore(objects), refs.map(r => r.oid)));
-  const plan = ply.planDeltas(order);
-  const { pack, entries } = await ply.buildPack(plan.objects);
-  const idx = unwrap(ply.encodePackIndex(pack, order.map((o, i) => ({ oid: o.oid, offset: entries[i].offset }))));
+  // ---- the export: ply's public API (imported from the modules src/index.ts re-exports) and ~10 lines of layout ----
+  const order = unwrap(await objectsForPack(mapStore(objects), refs.map(r => r.oid)));
+  const plan = planDeltas(order);
+  const { pack, entries } = await buildPack(plan.objects);
+  const idx = unwrap(encodePackIndex(pack, order.map((o, i) => ({ oid: o.oid, offset: entries[i].offset }))));
   const name = `pack-${Buffer.from(pack.subarray(pack.length - 20)).toString('hex')}`;
   const files = {
     [`objects/pack/${name}.pack`]: pack,

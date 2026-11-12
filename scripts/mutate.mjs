@@ -22,7 +22,7 @@
 // verdict(); a shard only runs Stryker. The merge recomputes the partition from the commit and
 // refuses a missing, extra, duplicated or partial shard, so a lost artifact cannot pass the gate.
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, statSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const REPORT = 'reports/mutation/mutation.json';
@@ -215,7 +215,7 @@ async function plan(n) {
     }
   }
   const share = costed.reduce((t, u) => t + u.weight, 0) / n;
-  const units = costed.flatMap(u => split(u, Math.ceil(u.weight / share - 1e-9)))
+  const units = costed.flatMap(u => split(u, Math.ceil(u.weight / (share / CUTS_PER_SHARE) - 1e-9)))
     .sort((a, b) => b.weight - a.weight || a.unit.localeCompare(b.unit));
   const shards = Array.from({ length: n }, () => ({ files: [], weight: 0 }));
   for (const { unit, weight } of units) {
@@ -227,6 +227,11 @@ async function plan(n) {
   for (const s of shards) s.files.sort();
   return { full: ranges === null, files, expected, shards };
 }
+
+// A unit is cut into pieces of at most a third of a shard's share, not a whole share: longest-processing-time packing
+// of share-sized pieces left the heaviest of 36 shards at 34.0 planned minutes against a 24.6 mean (#313); thirds bring
+// it to 25.1. Only a function costing more than a third of a share, whose body is one block mutant, stays whole.
+const CUTS_PER_SHARE = 3;
 
 // A unit as k ranges of about equal measured cost, each ending on a line none of its mutants spans past. k <= 1, or a
 // unit with no such line near a cut, stays whole. A slice no mutant lies wholly inside is dropped: line cost counts
@@ -282,14 +287,25 @@ const unitFile = unit => unit.replace(/:\d+-\d+$/, '');
 // its plan and a 57 s one within about 15% of it.
 const REF_DRY_MS = 50_000;
 // A shard's wall minutes from its seconds of mutant time: setup (checkout, npm ci, instrumenting, the dry run) plus
-// the mutants over Stryker's effective parallelism. Least squares over the 20 shards of 43232620788 (measured seconds
-// against job minutes), within 6 min on every shard.
-const WALL_SETUP_MIN = 3.84;
-const WALL_PARALLEL = 3.88;
+// the mutants over Stryker's effective parallelism. Least squares over the 20 shards of 43273467698 (f47bb75): job
+// minutes against each shard's measured mutant seconds on its own runner, a timed-out mutant counted at its duration
+// plus TIMEOUT_RESTART_S. Within 3.4 min on every shard (the timeout-blind fit of 43232620788, 3.84 + s / 3.88 / 60,
+// was 5.6 min short on shard 16 and 4.4 on shard 19, the shards holding the most timeouts).
+const WALL_SETUP_MIN = 2.15;
+const WALL_PARALLEL = 3.76;
+// A timed-out mutant costs more than its recorded duration: Stryker kills the hung test process and starts a new one
+// before its next mutant. The same fit puts that at 10.0 s of runner time per Timeout (85 timeouts on shard 19,
+// 67 min 41 s against 63.3 planned without it). --weights adds it to every Timeout's line.
+const TIMEOUT_RESTART_S = 10;
 const plannedMinutes = seconds => WALL_SETUP_MIN + seconds / WALL_PARALLEL / 60;
-// --budget: the heaviest planned shard of a full run may take at most this share of the job limit on the reference
-// runner, leaving the rest for a slower runner (94 s, 1.9x the reference, was seen once) and for weights gone stale.
-const BUDGET_SHARE = 0.6;
+// --budget: the rule a full run's plan must meet. Its heaviest shard, planned on the reference runner, must still finish
+// within BUDGET_SHARE of mutate.yml's timeout-minutes (60 of 90) on a runner RUNNER_WORST times slower:
+//   plannedMinutes(max) * RUNNER_WORST <= BUDGET_SHARE * timeout-minutes
+// RUNNER_WORST is the slowest runner seen: shard 9 of 43273467698 dry-ran in 99.3 s (1.99x the reference) and took
+// 79 min 17 s; 94.0 s on 43232620788. The whole planned time scales (setup included), which over-counts npm ci and
+// checkout: the margin is on the safe side. The remaining third of the limit is for weights gone stale.
+const RUNNER_WORST = 2;
+const BUDGET_SHARE = 2 / 3;
 const WEIGHTS = 'scripts/mutate-weights.json';
 const WEIGHTS_PR = 'scripts/mutate-weights-pr.json';
 const readWeights = path => (existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {});
@@ -316,7 +332,9 @@ function costModel(pr) {
 // every measured line (holding only a file's first report dropped the rest: inflatestream.ts on main's 16-way plan).
 // seconds and mutants are the totals over the kept lines.
 // Each duration is scaled to the reference runner by the dry-run time of the runner that measured it (a shard report's
-// shard.dryRunNetMs, or a merged report's per-mutant runnerDryMs); a report without one is refused, not guessed.
+// shard.dryRunNetMs, or a merged report's per-mutant runnerDryMs); a report without one is refused, not guessed. A
+// Timeout also carries TIMEOUT_RESTART_S: shards 16 and 19 of 43273467698 held 49 and 85 timeouts and ran 5.6 and 4.4
+// min past a plan that counted only durations.
 function writeWeights(paths, target) {
   const out = {};
   const unscaled = [];
@@ -330,7 +348,9 @@ function writeWeights(paths, target) {
         if (!(dry > 0)) { unscaled.push(`${path}: ${file}:${m.location.start.line}`); continue; }
         const l = m.location.start.line;
         const e = lines.get(l) ?? { s: 0, n: 0 };
-        e.s += ((m.duration ?? 0) / 1000) * (REF_DRY_MS / dry);
+        // a Timeout at its real cost: its duration and the test process restart after it (TIMEOUT_RESTART_S)
+        const runnerSeconds = (m.duration ?? 0) / 1000 + (m.status === 'Timeout' ? TIMEOUT_RESTART_S : 0);
+        e.s += runnerSeconds * (REF_DRY_MS / dry);
         if (m.status !== 'Ignored') e.n += 1;
         lines.set(l, e);
       }
@@ -386,9 +406,23 @@ async function runShard(i, n) {
   const dryRunNetMs = await strykerTimed(['stryker', 'run', cfg, '--mutate', mine.files.join(',')]);
   if (dryRunNetMs === null) console.warn(`mutate: shard ${i}/${n}: no dry-run time in Stryker's output; this report cannot refresh weights`);
   else console.log(`mutate: shard ${i}/${n}: runner dry run ${(dryRunNetMs / 1000).toFixed(1)} s net (reference ${REF_DRY_MS / 1000} s)`);
+  runnerSummary(i, n, mine.weight, dryRunNetMs);
   const report = JSON.parse(readFileSync(shardReport(i), 'utf8'));
   report.shard = { i, n, files: mine.files, dryRunNetMs };
   writeFileSync(shardReport(i), JSON.stringify(report));
+}
+
+// One line in the job summary: this runner's speed against the reference (its dry run over REF_DRY_MS) and the shard's
+// planned minutes at the reference and at that speed, so a slow runner shows on the run page, not only in the log
+// (the factor --budget's RUNNER_WORST must stay above).
+function runnerSummary(i, n, weight, dryRunNetMs) {
+  const path = process.env.GITHUB_STEP_SUMMARY;
+  if (!path) return;
+  const planned = plannedMinutes(weight);
+  const line = dryRunNetMs === null
+    ? `mutate shard ${i}/${n}: no dry-run time in Stryker's output; planned ${planned.toFixed(1)} min on the reference runner`
+    : `mutate shard ${i}/${n}: runner factor ${(dryRunNetMs / REF_DRY_MS).toFixed(2)}x (dry run ${(dryRunNetMs / 1000).toFixed(1)} s, reference ${REF_DRY_MS / 1000} s, budget ${RUNNER_WORST}x); planned ${planned.toFixed(1)} min at the reference, ${(planned * dryRunNetMs / REF_DRY_MS).toFixed(1)} at this runner`;
+  appendFileSync(path, `${line}\n`);
 }
 
 // Stryker run with its output passed through as it comes, returning the runner's speed: the net ms of Stryker's dry run
@@ -416,10 +450,11 @@ function strykerTimed(args) {
   });
 }
 
-// The full run's plan against the job: the heaviest planned shard's minutes on the reference runner (plannedMinutes)
-// at most BUDGET_SHARE of mutate-shard's timeout-minutes, with the shard count and limit read from mutate.yml itself.
-// Cheap (the instrumenter, no test), so CI runs it on every push: a weights refresh, a new src file or a shard count
-// that would plan a shard near the limit fails here, not 85 minutes into a mutation run.
+// The full run's plan against the job: the heaviest planned shard's minutes on the reference runner (plannedMinutes),
+// times RUNNER_WORST, at most BUDGET_SHARE of mutate-shard's timeout-minutes, with the shard count and limit read from
+// mutate.yml itself. Cheap (the instrumenter, no test), so CI runs it on every push: a weights refresh, a new src file or
+// a shard count that would plan a shard past the bar on the slowest runner fails here, not 80 minutes into a mutation
+// run (#313: 79 min 17 s on a 1.99x runner against a plan that allowed 54 at the reference).
 async function budget() {
   const yml = readFileSync('.github/workflows/mutate.yml', 'utf8');
   // the job's own lines, each after a newline: from `  mutate-shard:` up to the next two-space key
@@ -435,11 +470,12 @@ async function budget() {
   const p = await plan(n);
   const minutes = p.shards.map(s => plannedMinutes(s.weight));
   const max = Math.max(...minutes);
+  const worst = max * RUNNER_WORST;
   const cap = BUDGET_SHARE * limit;
   const heaviest = p.shards[minutes.indexOf(max)];
-  console.log(`mutate: full run in ${n} shards; planned minutes on the reference runner (dry run ${REF_DRY_MS / 1000} s) max ${max.toFixed(1)}, mean ${(minutes.reduce((t, m) => t + m, 0) / n).toFixed(1)}; cap ${cap} (${BUDGET_SHARE * 100}% of timeout-minutes ${limit})`);
-  if (max > cap) {
-    console.error(`mutate: shard ${minutes.indexOf(max) + 1}/${n} plans ${max.toFixed(1)} min, over ${cap}: ${heaviest.files.join(', ')}. Add shards (all three 20s of mutate.yml), or refresh weights with --weights`);
+  console.log(`mutate: full run in ${n} shards; planned minutes on the reference runner (dry run ${REF_DRY_MS / 1000} s) max ${max.toFixed(1)}, mean ${(minutes.reduce((t, m) => t + m, 0) / n).toFixed(1)}; on a ${RUNNER_WORST}x runner max ${worst.toFixed(1)}; cap ${cap.toFixed(1)} (${Math.round(BUDGET_SHARE * 100)}% of timeout-minutes ${limit})`);
+  if (worst > cap + 1e-9) {
+    console.error(`mutate: shard ${minutes.indexOf(max) + 1}/${n} plans ${max.toFixed(1)} min, ${worst.toFixed(1)} on a ${RUNNER_WORST}x runner, over ${cap.toFixed(1)}: ${heaviest.files.join(', ')}. Add shards (every ${n} of mutate.yml), or refresh weights with --weights`);
     process.exit(1);
   }
 }

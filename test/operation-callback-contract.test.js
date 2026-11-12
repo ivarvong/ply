@@ -12,7 +12,10 @@
 // No server: fetchImpl refuses every request, so nothing can reach a network; the hand-over is the frames() call.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { operation, plyError } from '../src/index.js';
+// From their modules, not the package root (src/index.ts re-exports both): a static import of src/index.js makes every
+// module-level mutant of every module it re-exports static, run against all 412 mutation tests (#313).
+import { operation } from '../src/operation.js';
+import { plyError } from '../src/errors.js';
 
 const url = 'https://example.invalid/r.git';
 const opts = { fetchImpl: async () => { await null; throw new Error('no network in this test'); } };

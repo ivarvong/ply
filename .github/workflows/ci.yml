@@ -109,8 +109,9 @@ jobs:
       # lint ends with the regex gate (scripts/regex-gate.mjs): every regex in src/ has an inventory row and no refused
       # shape. The rows' ratio test is test/regex-linear.test.js, which runs in the test shards.
       - run: npm run lint
-      # The full mutation run fits its job: the heaviest planned shard at most 60% of mutate.yml's mutate-shard
-      # timeout-minutes on the reference runner (scripts/mutate.mjs --budget, #313). The instrumenter only, about 2 s.
+      # The full mutation run fits its job: the heaviest planned shard, on a runner twice as slow as the reference
+      # (RUNNER_WORST), at most 2/3 of mutate.yml's mutate-shard timeout-minutes, 60 of 90 (scripts/mutate.mjs --budget,
+      # #313). The instrumenter only, about 2 s.
       - name: mutation plan fits the shard job limit
         run: node scripts/mutate.mjs --budget
       # The same command as the last step of `npm run check` (test/workflows.test.js holds the two equal). It builds

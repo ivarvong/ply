@@ -16,7 +16,6 @@ import { buildPack, makeDelta } from '../src/pack.js';
 import { inflateInit, inflateFeed, inflatePull, inflateEnd, cappedBound, declaredBound, zlibWrap, rawWrap } from '../src/inflatestream.js';
 import { parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, WORK_BUDGET } from '../src/packstream.js';
 import { scanPack, pktFrames, inflateChunks } from '../src/pullstream.js';
-import * as index from '../src/index.js';
 import { isPlyError } from '../src/errors.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { withLimits } from '../src/limits.js';
@@ -354,7 +353,11 @@ test('inflateChunks agrees with the pull API on the same member (same chunks, by
   assert.deepEqual(await collect(inflateChunks(recorded([member]).stream)), want);
 });
 
-test('the adapters are exported from the package root', () => {
+// The package root is imported here, inside the test, not at the top of the file: a static import would load every module
+// src/index.ts re-exports before any test runs, making each of their module-level mutants static, run against all 412
+// mutation tests (errors-doc.ts alone: 79 mutants, a 26-80 min shard, #313). Inside the test they are covered by it.
+test('the adapters are exported from the package root', async () => {
+  const index = await import('../src/index.js');
   assert.equal(index.scanPack, scanPack);
   assert.equal(index.pktFrames, pktFrames);
   assert.equal(index.inflateChunks, inflateChunks);

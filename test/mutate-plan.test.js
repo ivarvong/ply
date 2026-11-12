@@ -126,21 +126,22 @@ test('--weights stores seconds on the reference runner, scaled by each report\'s
   }
 }, 60_000);
 
-test('--budget fails when the heaviest planned shard passes 60% of mutate.yml\'s timeout-minutes', () => {
+test('--budget fails when the heaviest planned shard, on a runner twice as slow as the reference, passes 2/3 of mutate.yml\'s timeout-minutes', () => {
   const dir = scratch();
   try {
     const yml = limit => `jobs:\n  mutate-shard:\n    timeout-minutes: ${limit}\n    strategy:\n      matrix:\n        shard: [1, 2]\n  mutate:\n    timeout-minutes: 5\n`;
-    // src/a.ts at 3,000 s (all on line 2) on the reference runner is 3.84 + 3000 / 3.88 / 60 = 16.7 min in one
-    // shard (a unit is cut only at a line no mutant spans past, and the function's block mutant spans lines 1-3)
+    // src/a.ts at 3,000 s (all on line 2) on the reference runner is 2.15 + 3000 / 3.76 / 60 = 15.45 min in one shard
+    // (a unit is cut only at a line no mutant spans past, and the function's block mutant spans lines 1-3), 30.9 min on
+    // a 2x runner (RUNNER_WORST)
     writeFileSync(join(dir, 'scripts/mutate-weights.json'), JSON.stringify({ 'src/a.ts': { seconds: 3000, mutants: 6, byLine: { 1: 0, 2: 3000, 3: 0 } } }));
-    writeFileSync(join(dir, '.github/workflows/mutate.yml'), yml(28)); // cap 16.8 min
+    writeFileSync(join(dir, '.github/workflows/mutate.yml'), yml(47)); // cap 2/3 of 47 = 31.3 min
     const fits = run(dir, '--budget');
     assert.equal(fits.status, 0, fits.stderr);
-    assert.match(fits.stdout, /in 2 shards; .* max 16\.7, .* cap 16\.8 \(60% of timeout-minutes 28\)/);
-    writeFileSync(join(dir, '.github/workflows/mutate.yml'), yml(27)); // cap 16.2 min
+    assert.match(fits.stdout, /in 2 shards; .* max 15\.4, .* on a 2x runner max 30\.9; cap 31\.3 \(67% of timeout-minutes 47\)/);
+    writeFileSync(join(dir, '.github/workflows/mutate.yml'), yml(46)); // cap 30.7 min
     const over = run(dir, '--budget');
     assert.equal(over.status, 1, over.stdout);
-    assert.match(over.stderr, /plans 16\.7 min, over 16\.2: src\/a\.ts/);
+    assert.match(over.stderr, /plans 15\.4 min, 30\.9 on a 2x runner, over 30\.7: src\/a\.ts/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
