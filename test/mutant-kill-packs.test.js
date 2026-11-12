@@ -599,3 +599,23 @@ test('planDeltas gives each delta its tagged base and counts them: ofs against a
   const whole = planDeltas([{ type: TYPE.BLOB, data: v2, path: 'a' }]);
   assert.deepEqual([whole.ofs, whole.ref, whole.objects[0].base], [0, 0, undefined]);
 });
+
+// #299 item 5, in a MUTATION_FILES file: decodeSavedIndex's readHeader holds the header count to maxPackObjects
+// (`n <= maxObjects`). A pack of three blobs built here (count 3 by construction) is limit_exceeded under 2 (got 3,
+// max 2) and decodes under 3 (the bound itself); a header claiming 1,000,000 entries is refused under the default,
+// which the README states as maxPackObjects 100_000.
+test('decodeSavedIndex: header count over maxPackObjects is limit_exceeded, at it decodes, default 100_000', async () => {
+  const { scanPackIndex } = await import('../src/packscanindex.js');
+  const { encodeSavedIndex, decodeSavedIndex } = await import('../src/packsaved.js');
+  const { pack } = await buildPack(['a', 'b', 'c'].map(s => ({ type: TYPE.BLOB, data: te.encode(s) })));
+  const scanned = unwrap(await scanPackIndex((async function* () { yield pack; })(), {}));
+  const bytes = unwrap(encodeSavedIndex(scanned, { tag: 'none' }));
+  const id = { trailer: toHex(pack.subarray(pack.length - 20)), bytes: pack.length };
+  assert.deepEqual(decodeSavedIndex(bytes, id, 64, 2), { ok: false, error: { tag: 'limit_exceeded', what: 'pack objects', got: 3, max: 2 } });
+  const at = decodeSavedIndex(bytes, id, 64, 3);
+  assert.equal(at.ok, true);
+  assert.equal(at.value.pack.count, 3);
+  const head = Uint8Array.from(bytes.subarray(0, 84));
+  new DataView(head.buffer).setUint32(16, 1_000_000, true);
+  assert.deepEqual(decodeSavedIndex(head, id), { ok: false, error: { tag: 'limit_exceeded', what: 'pack objects', got: 1_000_000, max: 100_000 } });
+});
