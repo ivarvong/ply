@@ -219,6 +219,11 @@ export type InflateStream = {
   // so a feed after a chunk joins the carry behind them. After a need they stay: the step that needed more input
   // rewound to the start of a symbol whose bits run past them, so the bits are all used before the next boundary.
   carry: Uint8Array;
+  // an unread tail a need took out of a fed buffer (parkLen bytes of park, the record's own), ahead of the next feed
+  park: Uint8Array;
+  parkLen: number;
+  // parkViews[k] is park.subarray(0, k), made once with the record, so parking and unparking allocate nothing
+  parkViews: readonly Uint8Array[];
   p: number;
   base: number;
   bitbuf: number;
@@ -698,14 +703,38 @@ function truncated(st: InflateStream): ErrorOf<'pack_corrupt'> {
   return assertNever(st.phase);
 }
 
+// park's size. Every need leaves at most 10 bytes unread, whatever the input: a need from a fill or a stored copy has
+// read the carry to its end (nothing unread); the zlib header, a stored block header and the Adler-32 each need at most
+// 4 bytes and are read only when whole (at most 3 unread); a need that rewinds to a mark (a code-length symbol, or a
+// literal/length symbol with its extra bits, distance and extra bits) put back only the bytes that step pulled into the
+// bit buffer, which holds at most 31 bits beyond the at most 15+5+15+13 = 48 bits the step took, so at most
+// ceil(79 / 8) = 10 bytes. 64 leaves room, and a feed that keeps the whole within it stays in park.
+const PARK_BYTES = 64;
 const NEED_PIECE: InflatePiece = { kind: 'need' };
-// Before a pull asks for input, the unread tail (the few bytes of a symbol, a block header or the Adler-32 that the
-// chunk cut) becomes the record's own copy: once a pull has answered `need` the record holds no view of anything it
-// was fed, so a reader may refill the same buffer for its next chunk. `base + p` (consumedOf) is unchanged.
-function own(st: InflateStream): void {
-  st.base += st.p;
-  st.carry = st.p < st.carry.length ? st.carry.slice(st.p) : EMPTY;
+// Every `need` answer is this one value (it carries nothing of the record's).
+const NEED_RESULT: Result<InflatePiece, InflateError> = ok(NEED_PIECE);
+// The parked tail back in the carry (a pull or a read of the unread bytes before the next feed): a view of park, the
+// record's own. carry is EMPTY and p 0 while a tail is parked.
+function unpark(st: InflateStream): void {
+  st.carry = st.parkViews[st.parkLen] as Uint8Array;
+  st.parkLen = 0;
+}
+// Before a pull asks for input, the record lets go of every buffer it was fed: once a pull has answered `need` it holds
+// no view of anything fed, so a reader may refill the same buffer for its next chunk. `base + p` (consumedOf) is
+// unchanged. With nothing unread the carry is dropped. A short unread tail (the few bytes of a symbol, a block header or
+// the Adler-32 that the chunk cut) is parked in park, the record's own fixed buffer, so a need allocates nothing and a
+// feed that fits behind it allocates no bytes either (main joined the tail and the feed into a new buffer each time).
+function needInput(st: InflateStream): Result<InflatePiece, InflateError> {
+  const c = st.carry;
+  const at = st.p;
+  const rest = c.length - at;
+  // the tail (at most 10 bytes, see PARK_BYTES) moves to the front of park, where the next feed can join it in place
+  for (let i = 0; i !== rest; i++) st.park[i] = c[at + i] as number;
+  st.parkLen = rest;
+  st.base += at;
   st.p = 0;
+  st.carry = EMPTY;
+  return NEED_RESULT;
 }
 // The next piece: a chunk when one is full (or the input ran out with output pending), the end, or a request for input.
 // A refusal (FAILED) is on the record: the loop goes round once more and returns it.
@@ -713,6 +742,7 @@ function own(st: InflateStream): void {
 // then INFLATE_CHUNK bytes or the member's last, so where the chunks fall is the member's own, not the feeding's (the
 // pack scan weighs its work budget at them, packstream.ts chargeWork). The pending output is the record's own buffer.
 export function inflatePull(st: InflateStream, whole = false): Result<InflatePiece, InflateError> {
+  if (st.parkLen > 0) unpark(st);
   for (;;) {
     if (st.halt.tag === 'failed') return err(st.halt.error);
     const d = dispatch(st);
@@ -724,11 +754,8 @@ export function inflatePull(st: InflateStream, whole = false): Result<InflatePie
     }
     if (d === END) return ok({ kind: 'end', consumed: consumedOf(st), stats: { ...st.stats } });
     if (d === NEED) {
-      if (st.outLen > 0 && (st.ended || !whole)) return ok({ kind: 'chunk', bytes: takeChunk(st) });
-      if (!st.ended) {
-        own(st);
-        return ok(NEED_PIECE);
-      }
+      if (st.outLen > 0 && (!whole || st.ended)) return ok({ kind: 'chunk', bytes: takeChunk(st) });
+      if (!st.ended) return needInput(st);
       refuse(st, truncated(st));
     }
   }
@@ -742,6 +769,23 @@ export function inflateEnd(st: InflateStream): Result<InflatePiece, InflateError
 // Append input. An exhausted carry is replaced by `bytes` itself (no copy); a leftover tail (at most the few bytes one
 // step needs) is copied in front of it once, so the caller may drop what it fed before.
 export function inflateFeed(st: InflateStream, bytes: Uint8Array): void {
+  if (st.parkLen > 0) {
+    // the parked tail and a feed that fits behind it stay in park (a view of the record's own buffer, no new bytes)
+    const n = st.parkLen;
+    const all = n + bytes.length;
+    if (all <= PARK_BYTES) {
+      const park = st.park;
+      for (let i = n; i !== all; i++) park[i] = bytes[i - n] as number;
+      st.carry = st.parkViews[all] as Uint8Array;
+    } else {
+      const joined = new Uint8Array(all);
+      joined.set(st.park.subarray(0, n));
+      joined.set(bytes, n);
+      st.carry = joined;
+    }
+    st.parkLen = 0;
+    return;
+  }
   if (st.p >= st.carry.length) {
     st.base += st.p;
     st.carry = bytes;
@@ -758,11 +802,13 @@ export function inflateFeed(st: InflateStream, bytes: Uint8Array): void {
 }
 // Bytes fed and not consumed: after the end, what follows the member. A view, valid until the next feed or reset.
 export function inflateUnread(st: InflateStream): Uint8Array {
+  if (st.parkLen > 0) unpark(st);
   return st.carry.subarray(st.p);
 }
 // The same bytes, handed over: the record keeps no view of them (the pack scan takes what follows a member this way,
 // so an ended member does not hold the chunk it ended in). `base + p` (consumedOf) is unchanged.
 export function inflateTakeUnread(st: InflateStream): Uint8Array {
+  if (st.parkLen > 0) unpark(st);
   const rest = st.carry.subarray(st.p);
   st.base += st.p;
   st.carry = EMPTY;
@@ -774,11 +820,12 @@ const freshStats = (): InflateStats => ({ blocks: 0, stored: 0, fixed: 0, dynami
 // The record's buffers. inflateReset sets every other field a member reads before its first pull (blank's values are
 // placeholders, so Stryker's changes to them are equivalent).
 function blank(): InflateStream {
+  const park = new Uint8Array(PARK_BYTES);
   return {
     // Stryker disable next-line all: placeholders, see above
     phase: 'header', halt: RUNNING, bound: cappedBound(), wrap: rawWrap(), maxOutput: 0, declared: 0, maxInput: 0,
     // Stryker disable next-line all: placeholders, see above
-    windowSize: INFLATE_WINDOW, ended: false, carry: EMPTY, p: 0, base: 0, bitbuf: 0, bitcnt: 0, markP: 0, markBuf: 0, markCnt: 0,
+    windowSize: INFLATE_WINDOW, ended: false, carry: EMPTY, park, parkLen: 0, parkViews: Array.from({ length: PARK_BYTES + 1 }, (_, k) => park.subarray(0, k)), p: 0, base: 0, bitbuf: 0, bitcnt: 0, markP: 0, markBuf: 0, markCnt: 0,
     window: new Uint8Array(INFLATE_WINDOW), w: 0, out: new Uint8Array(INFLATE_CHUNK), outLen: 0, summed: 0, adler: 1, emitted: 0,
     // Stryker disable next-line all: placeholders, see above (a block header sets `final` and the counts before they are read)
     stats: freshStats(), final: false, storedLeft: 0, nlen: 0, ndist: 0, ncode: 0, lensI: 0,
@@ -809,6 +856,7 @@ export function inflateReset(st: InflateStream, opts: InflateStreamOpts): Result
   st.windowSize = INFLATE_WINDOW;
   st.ended = false;
   st.carry = EMPTY;
+  st.parkLen = 0;
   st.p = 0;
   st.base = 0;
   st.bitbuf = 0;

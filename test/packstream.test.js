@@ -1599,9 +1599,8 @@ test('a reused chunk buffer: the tail is copied only by the pull that answers ne
   const one = Uint8Array.of(pack[want[1].offset + want[1].headerBytes], 0xee, 0xee);
   parsePackFeed(cut, one.subarray(0, 1));
   assert.deepEqual(must(parsePackPull(cut)), { kind: 'need' });
-  assert.notEqual(cut.inflate.carry.buffer, one.buffer);
-  assert.deepEqual([...cut.inflate.carry.subarray(cut.inflate.p)], [one[0]]);
-  assert.equal(cut.inflate.carry.buffer.byteLength, 1, 'the tail alone, not the chunk');
+  assert.deepEqual(viewsOf(cut.inflate, one.buffer), [], 'the pending tail is not a view of the fed chunk');
+  assert.deepEqual([...inflateUnread(cut.inflate)], [one[0]], 'the tail alone, not the chunk');
 });
 
 test('inflateTakeUnread hands over what follows the member: the record keeps no view, and its consumed count stands', () => {
@@ -1671,4 +1670,104 @@ test('inflate: a pos that is not a position in the buffer is bad_request, never 
   const at0 = inflate(z, 0);
   assert.equal(at0.ok, true);
   assert.deepEqual([...at0.value.out], [...te.encode('pos')]);
+});
+
+// The bare inflater fed one byte at a time (inflateChunks, the fetch member reader and packrangeresolve feed it so):
+// a need that leaves a tail pending costs one buffer (the tail and the next byte, joined), as on main, not a copy at
+// the need and then the join; a need with nothing pending costs none (the fed byte becomes the carry). Counted by identity: every carry the record holds that is not a buffer the caller fed is one the record allocated.
+// The member is node:zlib's (a dynamic block, a stored block and noise), so the expected output is the input itself.
+test('inflatePull fed byte at a time: at most one record buffer per byte fed, and no view of a fed byte after a need', () => {
+  let x = 7;
+  const noise = Uint8Array.from({ length: 3000 }, () => { x = (x * 1103515245 + 12345) >>> 0; return x >>> 24; });
+  const data = concat([te.encode('byte at a time\n'.repeat(400)), noise]);
+  for (const level of [0, 1, 6, 9]) {
+    const z = new Uint8Array(zlib.deflateSync(data, { level }));
+    const st = must(inflateInit(streamOpts()));
+    const fed = new Set();
+    const seen = new Set();
+    let allocs = 0;
+    let tails = 0;
+    let last = null;
+    // a record buffer is a backing store the record holds that no fed byte lives in (the carry's, or park's while a
+    // tail is parked there); a view of one already counted is not another
+    const fedBufs = new Set();
+    const note = () => {
+      const held = [st.carry];
+      if ((st.parkLen ?? 0) > 0) held.push(st.park);
+      for (const c of held) if (c.length > 0 && !fedBufs.has(c.buffer) && !seen.has(c.buffer)) { seen.add(c.buffer); allocs++; }
+    };
+    const out = [];
+    let at = 0;
+    for (;;) {
+      const p = must(inflatePull(st));
+      if (p.kind === 'end') break;
+      if (p.kind === 'chunk') { out.push(p.bytes.slice()); note(); continue; }
+      if (st.carry.length - st.p + (st.parkLen ?? 0) > 0) tails++;
+      note();
+      if (last !== null) assert.deepEqual(viewsOf(st, last.buffer), [], `level ${level}, need after byte ${at}: the record views the byte fed last`);
+      const b = z.slice(at, at + 1);
+      last = b;
+      fed.add(b);
+      fedBufs.add(b.buffer);
+      inflateFeed(st, b);
+      at++;
+      note();
+    }
+    assert.deepEqual(Buffer.from(concat(out)), Buffer.from(data), `level ${level}: the output is the member's input`);
+    assert.ok(tails > 0, `level ${level}: some need leaves a tail pending`);
+    // main 8e3939db allocates exactly one (inflateFeed's join of the tail and the byte) per need with a tail pending
+    assert.ok(allocs <= tails, `level ${level}: ${allocs} record buffers for ${tails} needs with a tail pending (${at} bytes fed)`);
+  }
+});
+
+// Where a need's tail goes (PARK_BYTES is 64): every need leaves at most 10 bytes unread (the bound inflatestream.ts
+// derives at PARK_BYTES; hand-derived from RFC 1951's longest match step, 15+5+15+13 bits, plus a 31-bit bit buffer),
+// and the tail is parked in the record's own park buffer, never a view of the fed chunk; a feed that keeps the whole
+// within 64 bytes joins it there, a feed that does not is a new joined buffer. The member is node:zlib's, so the
+// expected bytes are the fed bytes themselves.
+test('inflatePull: a need parks its tail (at most 10 bytes); a feed stays in park only while the whole fits in 64', () => {
+  let x = 11;
+  const data = Uint8Array.from({ length: 4000 }, () => { x = (x * 1103515245 + 12345) >>> 0; return 33 + ((x >>> 24) % 60); });
+  const byLen = new Map();
+  let longest = 0;
+  for (const level of [0, 1, 9]) {
+    const z = new Uint8Array(zlib.deflateSync(data, { level }));
+    for (let cut = 1; cut <= z.length; cut += cut < 600 ? 1 : 37) {
+      const st = must(inflateInit(streamOpts()));
+      const chunk = z.slice(0, cut);
+      inflateFeed(st, chunk);
+      let p = must(inflatePull(st));
+      while (p.kind === 'chunk') p = must(inflatePull(st));
+      if (p.kind === 'end') continue;
+      assert.equal(p.kind, 'need');
+      assert.deepEqual(viewsOf(st, chunk.buffer), [], `level ${level} cut ${cut}: the record views the fed chunk`);
+      const n = st.parkLen;
+      assert.equal(st.carry.length - st.p, 0, `level ${level} cut ${cut}: nothing unread outside park`);
+      const tail = inflateUnread(st);
+      assert.equal(tail.length, n);
+      assert.deepEqual([...tail], [...z.subarray(cut - n, cut)], `level ${level} cut ${cut}: the tail is the last unread bytes fed`);
+      assert.equal(n === 0 || tail.buffer === st.park.buffer, true, `level ${level} cut ${cut}: a ${n}-byte tail is in park`);
+      longest = Math.max(longest, n);
+      if (!byLen.has(n)) byLen.set(n, [z, cut]);
+    }
+  }
+  assert.ok(longest <= 10, `longest tail ${longest}`);
+  assert.ok(longest >= 2, `some cut leaves a tail of several bytes (longest ${longest})`);
+  // a tail of t bytes then a feed of 64 - t (fits: park) or 65 - t (does not: a new joined buffer of 65)
+  for (const [t, [z, cut]] of byLen) {
+    if (t === 0) continue;
+    for (const extra of [64 - t, 65 - t]) {
+      const st = must(inflateInit(streamOpts()));
+      inflateFeed(st, z.slice(0, cut));
+      let p = must(inflatePull(st));
+      while (p.kind === 'chunk') p = must(inflatePull(st));
+      const more = z.slice(cut, cut + extra);
+      assert.equal(more.length, extra);
+      inflateFeed(st, more);
+      const all = inflateUnread(st);
+      assert.deepEqual([...all], [...z.subarray(cut - t, cut + extra)], `tail ${t} + ${extra}: the unread bytes are the fed bytes`);
+      assert.equal(all.buffer === st.park.buffer, t + extra <= 64, `tail ${t} + ${extra}: in park iff the whole fits in 64`);
+      assert.deepEqual(viewsOf(st, more.buffer), [], `tail ${t} + ${extra}: the joined carry is not a view of the feed`);
+    }
+  }
 });
