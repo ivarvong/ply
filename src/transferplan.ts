@@ -43,6 +43,7 @@ const MODE_TREE = '40000';
 
 export const TRANSFER_VERSION = 1;
 export const TRANSFER_REF_PREFIX = 'refs/ply/transfer/';
+export { sweepPrefix, isTempKey } from './transfernames.js';
 export const TRANSFER_IDENT = 'ply transfer <ply-transfer@invalid> 0 +0000';
 // Generated objects per batch at most: 256 subtrees, the root tree, the temp commit.
 export const TRANSFER_GENERATED_OBJECTS = 258;
