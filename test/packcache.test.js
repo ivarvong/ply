@@ -15,6 +15,7 @@ import { te, concat } from '../src/bytes.js';
 import { DEFAULT_LIMITS, LIMIT_MEMORY_CACHE_BYTES, LIMIT_MEMORY_CACHE_ENTRIES } from '../src/limits.js';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
 import { fetchBody as fetchBodyR, GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap, unwrapAsync } from './unwrap.js';
@@ -528,9 +529,10 @@ test('cachingFetch verifyBeforeStore: an answer over the cap, a request that is 
   assert.equal(small.entries.size, 0); assert.equal(fs.stats.verifyFailed, 1); assert.match(fs.stats.verifyError, /exceeds limit 8/);
   const ls = memoryCache(); const fl = cachingFetch(globalThis.fetch, ls, opts({ shouldCache: () => true }));
   await run(fl, unwrap(lsRefsBodyR([])));
-  // ls-refs under a caller's own rule: framed to its flush and no ERR, so it is stored (as on main), and replayed
-  assert.equal(ls.entries.size, 1); assert.equal(fl.stats.verifyOk, 1); assert.equal(fl.stats.verifyFailed, 0);
-  await run(fl, unwrap(lsRefsBodyR([]))); assert.equal(fl.stats.hit, 1);
+  // ls-refs under a caller's own rule: verifyBeforeStore stores only what verifyFetchAnswer accepted, and ls-refs is no
+  // fetch, so it is never stored under the flag (README "cachingFetch"; without the flag it is, see the gate cells)
+  assert.equal(ls.entries.size, 0); assert.equal(fl.stats.verifyOk, 0); assert.equal(fl.stats.verifyFailed, 1); assert.match(fl.stats.verifyError, /no fetch/);
+  await run(fl, unwrap(lsRefsBodyR([]))); assert.equal(fl.stats.hit, 0);
   const nan = memoryCache(); const fn = cachingFetch(globalThis.fetch, nan, opts({ limits: { ...DEFAULT_LIMITS, maxPackBytes: Number.NaN } }));
   await run(fn, fetchBody({ wants: [blobOid()] }));
   assert.equal(nan.entries.size, 0); assert.equal(fn.stats.verifyFailed, 1);
@@ -568,7 +570,7 @@ test('cachingFetch: the store gate refuses an ERR packet, a missing flush, a cut
   const run = async (answer, body) => {
     let origin = 0;
     const cache = memoryCache();
-    const f = cachingFetch(async () => { origin++; return new Response(answer.slice(), { status: 200, headers: RESULT }); }, cache, { verifyBeforeStore: true, shouldCache: () => true, waitUntil: p => { pending.push(p); } });
+    const f = cachingFetch(async () => { origin++; return new Response(answer.slice(), { status: 200, headers: RESULT }); }, cache, { shouldCache: () => true, waitUntil: p => { pending.push(p); } });
     const got = [];
     for (let i = 0; i < 2; i++) { got.push(await rawCall(f, body)); await Promise.all(pending.splice(0)); }
     return { origin, cache, f, got };
@@ -971,4 +973,131 @@ test('memoryCache: a byte budget and an entry cap; the least recently used entry
   const dflt = memoryCache({ maxBytes: Number.POSITIVE_INFINITY, maxEntries: Number.NaN });
   for (let i = 0; i < 1030; i++) await put(dflt, `n${i}`, 1); // oxlint-disable-line no-await-in-loop -- in order
   assert.equal(dflt.entries.size, 1024);
+});
+
+// ply#270. The whole answer is built by hand from the protocol docs: gitformat-pack (a 12-byte header "PACK", version 2,
+// object count; one entry whose first byte is (type 3 = blob) << 4 | size for a size under 16, then the zlib stream of
+// the content; the SHA-1 of everything before as the trailer) and gitprotocol-v2 (`packfile LF`, band-1 pkt-lines, a
+// flush-pkt). The pack is well formed and its trailer valid; it holds one blob that is not the want.
+const handPack = content => {
+  const head = Uint8Array.of(0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 1);
+  assert.ok(content.length < 16);
+  const entry = concat([Uint8Array.of((3 << 4) | content.length), new Uint8Array(deflateSync(content))]);
+  const body = concat([head, entry]);
+  return concat([body, new Uint8Array(createHash('sha1').update(body).digest())]);
+};
+const framed = bytes => concat([te.encode((bytes.length + 4).toString(16).padStart(4, '0')), bytes]);
+const packAnswer = pack => concat([framed(te.encode('packfile\n')), framed(concat([Uint8Array.of(1), pack])), te.encode('0000')]);
+
+test('cachingFetch verifyBeforeStore (#270): an answer whose pack has a valid trailer but lacks the want is not stored; with a want it holds it is', async () => {
+  const content = te.encode('hi\n');
+  const answer = packAnswer(handPack(content));
+  // the blob it holds is git's hash of `blob 3\0hi\n`, never the want
+  const held = createHash('sha1').update(concat([te.encode('blob 3\0'), content])).digest('hex');
+  const want = 'f'.repeat(40);
+  assert.notEqual(held, want);
+  const body = fetchBody({ wants: [want] });
+  assert.deepEqual(verifyFetchAnswer(unwrap(parseUploadPackRequest(body)), answer).error?.message, `answer: want ${want} is not in the pack (1 objects)`, 'the store-time check refuses it');
+  const pending = [];
+  const cache = memoryCache();
+  const f = cachingFetch(async () => new Response(answer.slice(), { status: 200, headers: RESULT }), cache, { verifyBeforeStore: true, waitUntil: p => { pending.push(p); } });
+  const got = await rawCall(f, body); await Promise.all(pending.splice(0));
+  assert.deepEqual(got, answer, 'the caller still gets every byte');
+  assert.deepEqual({ ...f.stats, verifyError: '', putError: '' }, { hit: 0, miss: 1, bust: 0, bypass: 0, putOk: 0, putFailed: 0, putError: '', verifyOk: 0, verifyFailed: 1, verifyError: '' });
+  assert.match(f.stats.verifyError, new RegExp(`want ${want} is not in the pack`));
+  assert.equal(cache.entries.size, 0, 'entries 0');
+  // a want the pack does hold: the same bytes verify and are stored
+  const right = cachingFetch(async () => new Response(answer.slice(), { status: 200, headers: RESULT }), cache, { verifyBeforeStore: true, waitUntil: p => { pending.push(p); } });
+  await rawCall(right, fetchBody({ wants: [held] })); await Promise.all(pending.splice(0));
+  assert.deepEqual([right.stats.verifyOk, right.stats.putOk, right.stats.verifyFailed, cache.entries.size], [1, 1, 0, 1], right.stats.verifyError);
+});
+
+test('cachingFetch verifyBeforeStore: a put that throws after verification is putFailed 1, and the caller\'s fetch is unaffected', async () => {
+  const content = te.encode('hi\n');
+  const answer = packAnswer(handPack(content));
+  const held = createHash('sha1').update(concat([te.encode('blob 3\0'), content])).digest('hex');
+  const body = fetchBody({ wants: [held] });
+  // the oracle that this answer passes verification: verifyFetchAnswer itself, before any cachingFetch
+  assert.equal(verifyFetchAnswer(unwrap(parseUploadPackRequest(body)), answer).ok, true);
+  for (const [how, put] of [['throws', () => { throw thrown; }], ['rejects', async () => { await null; throw thrown; }]]) {
+    const pending = []; let calls = 0;
+    const cache = { ...memoryCache(), put: (...a) => { calls++; return put(...a); } };
+    const f = cachingFetch(async () => new Response(answer.slice(), { status: 200, headers: RESULT }), cache, { verifyBeforeStore: true, waitUntil: p => { pending.push(p); } });
+    // the fetch resolves, and the caller reads every byte, before the put is ever called
+    const got = await rawCall(f, body);
+    assert.deepEqual(got, answer, how);
+    await Promise.all(pending.splice(0));
+    assert.equal(calls, 1, `${how}: the put was called once, after verification`);
+    assert.deepEqual([f.stats.miss, f.stats.verifyOk, f.stats.verifyFailed, f.stats.putOk, f.stats.putFailed], [1, 1, 0, 0, 1], how);
+    // README cachingFetch: a put that throws is the 'cache.put' Err's message (naming the thrown value); one that rejects, its own
+    assert.equal(f.stats.putError, how === 'throws' ? `caller-supplied cache.put threw: ${thrown.message}` : thrown.message, how);
+  }
+});
+const thrown = new Error('boom after verification');
+
+test('cachingFetch: a NAK-only answer to a request without done is refused by the store gate, as verifyFetchAnswer refuses it (#270)', async () => {
+  // git's own bytes for a round that ends on its acknowledgments (asserted against git upload-pack above)
+  const nak = te.encode('0014acknowledgments\n0008NAK\n0000');
+  const body = fetchBody({ wants: ['1'.repeat(40)], haves: ['2'.repeat(40)], done: false });
+  assert.equal(verifyFetchAnswer(unwrap(parseUploadPackRequest(body)), nak).error?.message, 'answer: no packfile section');
+  const pending = [];
+  const cache = memoryCache();
+  const f = cachingFetch(async () => new Response(nak.slice(), { status: 200, headers: RESULT }), cache, { shouldCache: () => true, waitUntil: p => { pending.push(p); } });
+  assert.deepEqual(await rawCall(f, body), nak, 'the caller still gets every byte');
+  await Promise.all(pending.splice(0));
+  assert.deepEqual([f.stats.miss, f.stats.verifyOk, f.stats.verifyFailed, f.stats.putOk, cache.entries.size], [1, 0, 1, 0, 0]);
+  assert.equal(f.stats.verifyError, 'answer: no packfile section');
+});
+
+
+test('cachingFetch verifyBeforeStore (#270): an answer the streaming gate refuses is counted with the gate\'s own reason, not the whole-answer read\'s', async () => {
+  const content = te.encode('hi\n');
+  const held = createHash('sha1').update(concat([te.encode('blob 3\0'), content])).digest('hex');
+  const pack = handPack(content);
+  // a flipped last trailer byte: the trailer is no longer the SHA-1 of the pack bytes before it
+  const badTrailer = Uint8Array.from(pack); badTrailer[badTrailer.length - 1] ^= 0xff;
+  const run = async answer => {
+    const pending = []; const cache = memoryCache();
+    const f = cachingFetch(async () => new Response(answer.slice(), { status: 200, headers: RESULT }), cache, { verifyBeforeStore: true, waitUntil: p => { pending.push(p); } });
+    assert.deepEqual(await rawCall(f, fetchBody({ wants: [held] })), answer, 'the caller still gets every byte');
+    await Promise.all(pending.splice(0));
+    return { stats: f.stats, attrs: f.attrs(), entries: cache.entries.size };
+  };
+  // README "cachingFetch": the reason is in stats.verifyError and on the span as git.pack.cache.verify.error. The gate's
+  // message is the reason; the cache branch read only failed because the gate errored it, so its prefix is not.
+  // the expected reasons are derived here: an ERR on a fetch is the remote's text after `ERR ` (gitprotocol-v2), and a
+  // wrong trailer names the trailer sent and node:crypto's SHA-1 of the pack bytes before it
+  const sent = Buffer.from(badTrailer.subarray(badTrailer.length - 20)).toString('hex');
+  const real = createHash('sha1').update(badTrailer.subarray(0, badTrailer.length - 20)).digest('hex');
+  const cases = [['ERR packet', ERR_ANSWER, `remote: ${ERR_TEXT.slice(4).trimEnd()}`], ['wrong pack trailer', packAnswer(badTrailer), `answer: the pack trailer ${sent} is not the SHA-1 of the pack (${real})`]];
+  for (const [name, answer, reason] of cases) {
+    const r = await run(answer);
+    assert.deepEqual([r.stats.verifyOk, r.stats.verifyFailed, r.stats.putOk, r.entries], [0, 1, 0, 0], name);
+    assert.doesNotMatch(r.stats.verifyError, /the body failed while it was read/, name);
+    assert.equal(r.stats.verifyError, reason, name);
+    assert.equal(r.attrs['git.pack.cache.verify.error'], r.stats.verifyError, name);
+  }
+});
+test('cachingFetch verifyBeforeStore (#270): the whole-answer read is capped at three times maxPackBytes; an answer over it is not stored, one under it is', async () => {
+  const content = te.encode('hi\n');
+  const held = createHash('sha1').update(concat([te.encode('blob 3\0'), content])).digest('hex');
+  const pack = handPack(content);
+  // band-2 progress in 1-byte frames: each is 6 bytes on the wire (4 of length, the band, the byte) and 1 of progress
+  const progress = n => concat(Array.from({ length: n }, () => framed(Uint8Array.of(2, 0x2e))));
+  const answerWith = n => concat([framed(te.encode('packfile\n')), progress(n), framed(concat([Uint8Array.of(1), pack])), te.encode('0000')]);
+  const maxPackBytes = 64;
+  const run = async answer => {
+    const pending = []; const cache = memoryCache();
+    const f = cachingFetch(async () => new Response(answer.slice(), { status: 200, headers: RESULT }), cache, { verifyBeforeStore: true, limits: { ...DEFAULT_LIMITS, maxPackBytes }, waitUntil: p => { pending.push(p); } });
+    await rawCall(f, fetchBody({ wants: [held] })); await Promise.all(pending.splice(0));
+    return { f, cache };
+  };
+  // the pack is 12 + 1 + 11 (zlib of 'hi\n', node:zlib) + 20 = 44 bytes; the answer is (4 + 9) + 6n + (4 + 1 + 44) + 4 bytes:
+  // n = 21 is 192, exactly 3 * 64 (stored); n = 22 is 198, over it (pack 44 and progress 22 bytes, each under 64)
+  assert.equal(pack.length, 44); assert.equal(answerWith(21).length, 192); assert.equal(answerWith(22).length, 198);
+  const under = await run(answerWith(21));
+  assert.deepEqual([under.f.stats.verifyOk, under.f.stats.putOk, under.cache.entries.size], [1, 1, 1], under.f.stats.verifyError);
+  const over = await run(answerWith(22));
+  assert.deepEqual([over.f.stats.verifyOk, over.f.stats.verifyFailed, over.cache.entries.size], [0, 1, 0]);
+  assert.match(over.f.stats.verifyError, /cached answer bytes 198 exceeds limit 192/);
 });

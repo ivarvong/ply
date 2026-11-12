@@ -67,9 +67,10 @@ const rows = [
   ['cachingFetch: waitUntil throws (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, memoryCache(), { shouldCache: () => true, waitUntil: () => { throw boom; } }) }), 'bad_request', 'waitUntil', 'definite'],
   // the put of a miss is called inside the fetch that missed, before it answers
   ['cachingFetch: cache.put throws synchronously (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, { ...memoryCache(), put: () => { throw boom; } }) }), 'bad_request', 'cache.put', 'definite'],
-  // main's split store calls the put inside the fetch on every miss, verifyBeforeStore or not (the verified bytes are
-  // streamed to it as the client reads), so a put or waitUntil that throws when called is this read's own named Err
-  ['cachingFetch verifyBeforeStore: cache.put throws synchronously (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, { ...memoryCache(), put: () => { throw boom; } }, { verifyBeforeStore: true }) }), 'bad_request', 'cache.put', 'definite'],
+  // under verifyBeforeStore the put is called only after verifyFetchAnswer accepted the answer, after the fetch
+  // answered (README cachingFetch), so a put that throws is counted in stats.putFailed and the read is unaffected;
+  // waitUntil is still called inside the fetch, so one that throws is this read's own named Err
+  ['cachingFetch verifyBeforeStore: cache.put throws synchronously (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, { ...memoryCache(), put: () => { throw boom; } }, { verifyBeforeStore: true }) }), 'ok', null, 'ok'],
   ['cachingFetch verifyBeforeStore: waitUntil throws (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, memoryCache(), { verifyBeforeStore: true, waitUntil: () => { throw boom; } }) }), 'bad_request', 'waitUntil', 'definite'],
   // operation()'s own edge, for any callback not wrapped where it is called: the body stands in for one
   ['operation(): a foreign throw before any request', () => operation('probe', url, {}, async () => { await null; throw boom; }), 'bad_request', 'callback', 'definite'],
