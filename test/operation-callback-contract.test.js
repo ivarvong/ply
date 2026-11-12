@@ -7,6 +7,8 @@
 //                                                      (a thrown PlyError's code goes to `original`), except that a
 //                                                      thrown `ambiguous` PlyError is returned as itself (no what, no cause)
 //   4. a returned value (Ok, or the caller's own discriminated union inside it) passes through unchanged
+//   5. outside body: a tracer whose start() throws, or a link whose span is null/undefined (or whose traceId/spanId
+//      getter throws), rejects before body runs (README, same section, first paragraph)
 // No server: fetchImpl refuses every request, so nothing can reach a network; the hand-over is the frames() call.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
@@ -89,4 +91,20 @@ test('4. a returned value passes through: expected outcomes as a discriminated u
   const returned = await operation('probe', url, opts, async ({ t, root }) => { await null; t.frames('git-receive-pack', empty, root, {}); return { ok: false, error: mine }; });
   assert.equal(returned.ok, false);
   assert.equal(returned.error, mine);
+});
+
+test('5. outside body: a tracer whose start() throws, or a link whose span is null or undefined, rejects before body runs', async () => {
+  const boom = new Error('start failed');
+  let ran = 0;
+  const body = async () => { await null; ran++; return { ok: true, value: 'ran' }; };
+  const tracer = { start() { throw boom; } };
+  await assert.rejects(operation('probe', url, { ...opts, tracer }, body), e => e === boom);
+  // link() reads span.traceId and span.spanId before body's try: null or undefined (or a throwing getter) rejects there.
+  for (const span of [null, undefined]) {
+    await assert.rejects(operation('probe', url, { ...opts, link: { span, kind: 'retry' } }, body), TypeError);
+  }
+  const getterBoom = new Error('traceId getter');
+  const span = { get traceId() { throw getterBoom; }, spanId: 'x' };
+  await assert.rejects(operation('probe', url, { ...opts, link: { span, kind: 'retry' } }, body), e => e === getterBoom);
+  assert.equal(ran, 0);
 });

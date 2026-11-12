@@ -343,9 +343,9 @@ outcome at all (see `onTelemetryError`).
 
 **Breaking change since #277.** In `operation(op, url, opts, body)`, a throw from `body` (or from any callback
 reached from it) never reaches you as a throw or a rejection. This covers `body` only: a caller tracer whose `start()`
-throws, or an `opts.link` whose `span` is not a span, still rejects before `body` runs. What you get back depends only
-on what was thrown and on whether a push request had been handed to the transport (the first `t.frames()` call for a
-service other than `git-upload-pack`) when it was thrown:
+throws, or an `opts.link` whose `span` is null or undefined (or whose `traceId`/`spanId` getter throws), still rejects
+before `body` runs. What you get back depends only on what was thrown and on whether a push request had been handed to
+the transport (the first `t.frames()` call for a service other than `git-upload-pack`) when it was thrown:
 
 | `body` … | before the push request was handed over | after |
 | --- | --- | --- |
