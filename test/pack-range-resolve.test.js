@@ -64,9 +64,14 @@ function assertMatchesGit(pack, idx, res) {
   }
 }
 // This repository's history up to a fixed commit, not HEAD: the work a pack costs to resolve grows with the history
-// packed while the default work limit (256 MiB) does not, so a pack of HEAD turns these tests red at some length of
-// history. Measured with git 2.50: at this commit (318 commits, 3846 objects) the 64 KiB cache below does 239.8 MB of
-// work and the default cache 69.2 MB; 17 commits later (3969 objects) they do 272.5 MB, past the limit, and 71.5 MB.
+// packed while the work bound does not grow past its ceiling, so a pack of HEAD turns these tests red at some length of
+// history. The bound (src/packrangeresolve.ts) is LIMIT_RESOLVE_FACTOR x the floor, never under maxInflatedTotal and
+// never over maxResolveWork. On DEFAULT_LIMITS: maxInflatedTotal = LIMIT_OBJECT x LIMIT_INFLATED_OBJECTS = 64 MiB x 4
+// = 256 MiB (268.4 MB); maxResolveWork = LIMIT_RESOLVE_WORK = 256 MiB x LIMIT_RESOLVE_TOTALS (8) = 2 GiB (2147.5 MB).
+// Measured with git 2.50, when the bound was a flat 256 MiB: at this commit (318 commits, 3846 objects) the 64 KiB cache
+// below does 239.8 MB of work and the default cache 69.2 MB; 17 commits later (3969 objects) they do 272.5 MB, past that
+// old flat 268.4 MB, and 71.5 MB. 272.5 MB is under today's 2147.5 MB ceiling (about 7.9x short of it), so the pin is now
+// what keeps the test's cost fixed, not the limit.
 // Every full clone has the commit. A clone without it (a shallow one) packs its tip commit alone, which is all a
 // depth-1 clone holds and does not grow with the history either.
 const PACKED_COMMIT = 'ec337c5258839576e354ca9ea12d4f2404a3a75f';

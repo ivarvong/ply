@@ -235,6 +235,12 @@ test('transition: every state and event pair', () => {
   }
 });
 
+// A state outside ClockState (a new one added without its arm, or a value from nowhere) is a bug, not `held` (#276):
+// the switch is exhaustive and its default throws, whatever the event.
+test('transition: a state the machine does not know throws instead of taking another state\'s semantics', () => {
+  for (const event of EVENTS.filter(e => e !== 'ended')) assert.throws(() => transition('paused', event), /unreachable: paused/u, event);
+});
+
 test('transition: no event moves a state backwards', () => {
   // the order of an exchange; `streaming` and `held` alternate, so they share a rank
   const rank = { connecting: 0, uploading: 1, awaiting_first_byte: 2, streaming: 3, held: 3, done: 4 };

@@ -24,6 +24,7 @@
 // taken after the I/O that made it.
 import { field } from './absent.js';
 import { MAX_TIMER_MS } from './limits.js';
+import { assertNever } from './result.js';
 
 export type TimeoutKey = 'firstByteTimeoutMs' | 'idleTimeoutMs' | 'requestTimeoutMs';
 // connecting: the request is out (a byte body), no headers yet. uploading: a streamed body is going out.
@@ -55,25 +56,26 @@ const stay = (state: ClockState): ClockStep => STAY[state];
 const go = (state: ClockState): ClockStep => GO[state];
 // The whole machine. An event a state has no use for leaves it as it is: nothing moves a state backwards.
 export function transition(state: ClockState, event: ClockEvent): ClockStep {
-  if (state === 'done' || event === 'ended') return stay('done');
-  if (state === 'connecting') {
-    if (event === 'request_sent') return go('connecting');
-    if (event === 'upload_started') return go('uploading');
-    return event === 'headers' ? go('streaming') : stay(state);
+  if (event === 'ended') return stay('done');
+  switch (state) {
+    case 'done': return stay('done');
+    case 'connecting':
+      if (event === 'request_sent') return go('connecting');
+      if (event === 'upload_started') return go('uploading');
+      return event === 'headers' ? go('streaming') : stay(state);
+    case 'uploading':
+      if (event === 'upload_bytes') return go('uploading');
+      if (event === 'upload_ended') return go('awaiting_first_byte');
+      return event === 'headers' ? go('streaming') : stay(state);
+    case 'awaiting_first_byte': return event === 'headers' ? go('streaming') : stay(state);
+    case 'streaming':
+      // bytes moved either way; an upload that ends here ends nothing the clock waits for
+      if (event === 'upload_bytes' || event === 'body_chunk') return go('streaming');
+      return event === 'consumer_took' ? stay('held') : stay(state);
+    // only the consumer's ask puts ply back on the network, and the wait starts then
+    case 'held': return event === 'consumer_asked' ? go('streaming') : stay(state);
   }
-  if (state === 'uploading') {
-    if (event === 'upload_bytes') return go('uploading');
-    if (event === 'upload_ended') return go('awaiting_first_byte');
-    return event === 'headers' ? go('streaming') : stay(state);
-  }
-  if (state === 'awaiting_first_byte') return event === 'headers' ? go('streaming') : stay(state);
-  if (state === 'streaming') {
-    // bytes moved either way; an upload that ends here ends nothing the clock waits for
-    if (event === 'upload_bytes' || event === 'body_chunk') return go('streaming');
-    return event === 'consumer_took' ? stay('held') : stay(state);
-  }
-  // held: only the consumer's ask puts ply back on the network, and the wait starts then
-  return event === 'consumer_asked' ? go('streaming') : stay(state);
+  return assertNever(state);
 }
 
 // Node's timer has unref (the DOM lib types it as a number); a Worker's has none.
