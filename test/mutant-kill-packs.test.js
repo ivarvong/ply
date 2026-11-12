@@ -14,6 +14,10 @@ import { hashObject, TYPE } from '../src/objects.js';
 import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
 import { PACK_HEADER_BYTES, OBJ_CONTINUE } from '../src/format.js';
 import { unwrap } from './unwrap.js';
+import { loadTransferPack } from '../src/transferload.js';
+import { rangeFromBytes } from '../src/rangesource.js';
+import { createTransport } from '../src/http.js';
+import { some, none } from '../src/result.js';
 
 const errOf = (r, code, message) => {
   assert.equal(r.ok, false, 'an Err');
@@ -618,4 +622,21 @@ test('decodeSavedIndex: header count over maxPackObjects is limit_exceeded, at i
   const head = Uint8Array.from(bytes.subarray(0, 84));
   new DataView(head.buffer).setUint32(16, 1_000_000, true);
   assert.deepEqual(decodeSavedIndex(head, id), { ok: false, error: { tag: 'limit_exceeded', what: 'pack objects', got: 1_000_000, max: 100_000 } });
+});
+
+// #310 review (1): loadTransferPack parses scan.limits before anything is read, as the scan parses them, so a limit that
+// does not parse is bad_request (the README contract) with or without a saved index, and never a throw. Mutating the
+// guard away (`if (false)`) reaches scanLimits.value on an Err and throws on the saved path.
+test('loadTransferPack: unparseable scan.limits are bad_request, saved index or not', async () => {
+  const { pack } = await buildPack([{ type: TYPE.BLOB, data: te.encode('x') }]);
+  const t = unwrap(createTransport('http://127.0.0.1:9/none.git', {}));
+  const first = unwrap(await loadTransferPack(t, rangeFromBytes(pack), none));
+  assert.equal(first.loaded.tag, 'scanned');
+  for (const saved of [none, some(first.saved)]) {
+    const bad = await loadTransferPack(t, rangeFromBytes(pack), saved, { scan: { limits: { maxPackObjects: -1 } } });
+    assert.equal(bad.ok, false, `saved ${saved.tag}`);
+    assert.equal(bad.error.code, 'bad_request');
+    assert.match(bad.error.message, /limits\.maxPackObjects/u);
+  }
+  assert.equal(unwrap(await loadTransferPack(t, rangeFromBytes(pack), some(first.saved))).loaded.tag, 'saved');
 });

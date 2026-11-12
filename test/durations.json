@@ -74,7 +74,7 @@
   "test/pack-range-resolve-honest.test.js": 5,
   "test/pack-range-resolve.test.js": 4,
   "test/pack-resolve-linear.test.js": 4,
-  "test/pack-saved.test.js": 2,
+  "test/pack-saved.test.js": 4,
   "test/pack-subset.test.js": 3,
   "test/packcache.test.js": 7,
   "test/packindex.test.js": 1,

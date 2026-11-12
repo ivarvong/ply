@@ -466,6 +466,13 @@ test('loadTransferPack: a pack chained deeper than 64 is used from its saved ind
     assert.equal(bad.error.code, 'bad_request');
     assert.match(bad.error.message, /limits\.maxDeltaChain/u);
   }
+  // and so are scan.limits, the cap the saved index's entry count is held to (#310 review)
+  for (const saved of [none, some(first.saved)]) {
+    const bad = await loadTransferPack(t, source, saved, { scan: { limits: { maxPackObjects: -1 } } });
+    assert.equal(bad.ok, false);
+    assert.equal(bad.error.code, 'bad_request');
+    assert.match(bad.error.message, /limits\.maxPackObjects/u);
+  }
   // a direct caller of decodeSavedIndex passes the same limit; without it the default 64 applies
   const id = { trailer: first.from.pack.trailer, bytes: first.from.pack.bytes };
   assert.ok(decodeSavedIndex(first.saved, id, 200).ok);
