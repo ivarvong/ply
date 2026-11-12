@@ -212,7 +212,8 @@ test('watchedUpload: no buffer of its own, the source locked only from the first
 //   - headers seen (from any state before them) is `streaming`: the first byte is satisfied for good
 //   - `restart` (the wait starts again) only on network progress: the request sent again, upload bytes while uploading
 //     or streaming, the upload's end before the headers, the headers, a body chunk, the consumer asking for more
-//   - consumer_took parks the clock (`held`) and starts the hold (#273); only consumer_asked resumes it; `ended` and `done` are final
+//   - consumer_took parks the clock (`held`) without a restart: the hold runs from the last network mark (#273 review);
+//     only consumer_asked resumes it; `ended` and `done` are final
 const STATES = ['connecting', 'uploading', 'awaiting_first_byte', 'streaming', 'held', 'done'];
 const EVENTS = ['request_sent', 'upload_started', 'upload_bytes', 'upload_ended', 'headers', 'body_chunk', 'consumer_took', 'consumer_asked', 'ended'];
 // next state per event, in EVENTS order; a trailing `!` is a restart
@@ -220,7 +221,7 @@ const TABLE = {
   connecting: ['connecting!', 'uploading!', 'connecting', 'connecting', 'streaming!', 'connecting', 'connecting', 'connecting', 'done'],
   uploading: ['uploading', 'uploading', 'uploading!', 'awaiting_first_byte!', 'streaming!', 'uploading', 'uploading', 'uploading', 'done'],
   awaiting_first_byte: ['awaiting_first_byte', 'awaiting_first_byte', 'awaiting_first_byte', 'awaiting_first_byte', 'streaming!', 'awaiting_first_byte', 'awaiting_first_byte', 'awaiting_first_byte', 'done'],
-  streaming: ['streaming', 'streaming', 'streaming!', 'streaming', 'streaming', 'streaming!', 'held!', 'streaming', 'done'],
+  streaming: ['streaming', 'streaming', 'streaming!', 'streaming', 'streaming', 'streaming!', 'held', 'streaming', 'done'],
   held: ['held', 'held', 'held', 'held', 'held', 'held', 'held', 'streaming!', 'done'],
   done: ['done', 'done', 'done', 'done', 'done', 'done', 'done', 'done', 'done'],
 };
@@ -437,7 +438,7 @@ test('frames(): a consumer that holds a chunk past heldTimeoutMs is cut as timeo
     assert.match(e.message, /held a chunk for 1000 ms .*limits\.heldTimeoutMs/);
   });
 });
-test('exchangeClock: heldTimeoutMs runs from consumer_took and stops at consumer_asked; 0 turns it off', async () => {
+test('exchangeClock: heldTimeoutMs runs from the last network mark before the take and stops at consumer_asked; 0 turns it off', async () => {
   await manualTimers(({ advance, time }) => {
     const run = (t, script) => {
       const t0 = time();
@@ -457,9 +458,23 @@ test('exchangeClock: heldTimeoutMs runs from consumer_took and stops at consumer
       for (let i = 1; i <= 5; i++) { c.feed('body_chunk'); c.feed('consumer_took'); at(10 + i * 3990); c.feed('consumer_asked'); }
       at(200_000);
     }), 'idleTimeoutMs@20960');
-    // held shorter than idle: the held limit is earlier than the pending idle timer and still fires on time
-    assert.equal(run({ ...lim, heldMs: 200 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'heldTimeoutMs@220');
+    // held shorter than idle: the held limit is earlier than the pending idle timer and still fires on time. The take
+    // at 20 reads no clock: the hold runs from the last network mark (the headers at 10), so 10 + 200, a delivery time
+    // (10 ms) early, as README Limits states
+    assert.equal(run({ ...lim, heldMs: 200 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'heldTimeoutMs@210');
     // 0 turns it off: only the total cap bounds the hold
     assert.equal(run({ ...lim, heldMs: 0, totalMs: 9000 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'requestTimeoutMs@9000');
   });
+});
+// #273 review (owner decision): the hold adds no clock read per chunk. A chunk's cycle in frames() is consumer_took then
+// consumer_asked; on main (8e3939db) that is one Date.now (the ask's restart), and it must stay one: the hold runs from
+// the mark the clock already took (the ask, or the headers for the first chunk), not from a new read at the take.
+test('exchangeClock: a chunk (consumer_took + consumer_asked) reads the clock once, as on main', () => {
+  let reads = 0;
+  const c = exchangeClock({ firstByteMs: 60_000, idleMs: 60_000, heldMs: 240_000, totalMs: 0 }, null, () => {}, () => { reads++; return 0; });
+  c.feed('headers');
+  const before = reads;
+  for (let i = 0; i < 1000; i++) { c.feed('consumer_took'); c.feed('consumer_asked'); }
+  c.cancel();
+  assert.equal(reads - before, 1000);
 });

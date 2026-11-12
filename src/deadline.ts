@@ -13,7 +13,8 @@
 // says. Two rules it cannot break: a state never moves backwards (headers seen means the first byte is satisfied for
 // good, whatever the upload does after), and time is charged only while ply waits on the network: while the consumer
 // holds a chunk, or has not asked for the next one (`held`), neither the first-byte nor the idle limit runs: the held
-// limit does, from the take, so network idle and a stalled consumer are distinct limits with distinct names.
+// limit does, from the last network mark before the take (the take reads no clock), so network idle and a stalled
+// consumer are distinct limits with distinct names.
 //
 // One timer. An event moves the mark; the timer is set again only when none is pending or the new deadline is earlier
 // than the pending one, and when it fires it re-arms for what is left: a body chunk costs no setTimeout and no
@@ -25,6 +26,7 @@
 // taken after the I/O that made it.
 import { field } from './absent.js';
 import { MAX_TIMER_MS } from './limits.js';
+import { assertNever } from './result.js';
 
 export type TimeoutKey = 'firstByteTimeoutMs' | 'idleTimeoutMs' | 'heldTimeoutMs' | 'requestTimeoutMs';
 // connecting: the request is out (a byte body), no headers yet. uploading: a streamed body is going out.
@@ -56,26 +58,29 @@ const stay = (state: ClockState): ClockStep => STAY[state];
 const go = (state: ClockState): ClockStep => GO[state];
 // The whole machine. An event a state has no use for leaves it as it is: nothing moves a state backwards.
 export function transition(state: ClockState, event: ClockEvent): ClockStep {
-  if (state === 'done' || event === 'ended') return stay('done');
-  if (state === 'connecting') {
-    if (event === 'request_sent') return go('connecting');
-    if (event === 'upload_started') return go('uploading');
-    return event === 'headers' ? go('streaming') : stay(state);
+  if (event === 'ended') return stay('done');
+  switch (state) {
+    case 'done': return stay('done');
+    case 'connecting':
+      if (event === 'request_sent') return go('connecting');
+      if (event === 'upload_started') return go('uploading');
+      return event === 'headers' ? go('streaming') : stay(state);
+    case 'uploading':
+      if (event === 'upload_bytes') return go('uploading');
+      if (event === 'upload_ended') return go('awaiting_first_byte');
+      return event === 'headers' ? go('streaming') : stay(state);
+    case 'awaiting_first_byte': return event === 'headers' ? go('streaming') : stay(state);
+    case 'streaming':
+      // bytes moved either way; an upload that ends here ends nothing the clock waits for
+      if (event === 'upload_bytes' || event === 'body_chunk') return go('streaming');
+      // the take does not read the clock (#273 review: no clock read per chunk added): the hold runs from the mark
+      // already taken, the last network progress before the chunk was handed over
+      return event === 'consumer_took' ? stay('held') : stay(state);
+    case 'held':
+      // only the consumer's ask puts ply back on the network, and the wait starts then
+      return event === 'consumer_asked' ? go('streaming') : stay(state);
   }
-  if (state === 'uploading') {
-    if (event === 'upload_bytes') return go('uploading');
-    if (event === 'upload_ended') return go('awaiting_first_byte');
-    return event === 'headers' ? go('streaming') : stay(state);
-  }
-  if (state === 'awaiting_first_byte') return event === 'headers' ? go('streaming') : stay(state);
-  if (state === 'streaming') {
-    // bytes moved either way; an upload that ends here ends nothing the clock waits for
-    if (event === 'upload_bytes' || event === 'body_chunk') return go('streaming');
-    return event === 'consumer_took' ? go('held') : stay(state);
-  }
-  // held: the hold runs from the take (go above); only the consumer's ask puts ply back on the network, and the wait
-  // starts then
-  return event === 'consumer_asked' ? go('streaming') : stay(state);
+  return assertNever(state);
 }
 
 // Node's timer has unref (the DOM lib types it as a number); a Worker's has none.
