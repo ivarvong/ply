@@ -1026,6 +1026,35 @@ test('cachingFetch: a NAK-only answer to a request without done is refused by th
   assert.equal(f.stats.verifyError, 'answer: no packfile section');
 });
 
+
+test('cachingFetch verifyBeforeStore (#270): an answer the streaming gate refuses is counted with the gate\'s own reason, not the whole-answer read\'s', async () => {
+  const content = te.encode('hi\n');
+  const held = createHash('sha1').update(concat([te.encode('blob 3\0'), content])).digest('hex');
+  const pack = handPack(content);
+  // a flipped last trailer byte: the trailer is no longer the SHA-1 of the pack bytes before it
+  const badTrailer = Uint8Array.from(pack); badTrailer[badTrailer.length - 1] ^= 0xff;
+  const run = async answer => {
+    const pending = []; const cache = memoryCache();
+    const f = cachingFetch(async () => new Response(answer.slice(), { status: 200, headers: RESULT }), cache, { verifyBeforeStore: true, waitUntil: p => { pending.push(p); } });
+    assert.deepEqual(await rawCall(f, fetchBody({ wants: [held] })), answer, 'the caller still gets every byte');
+    await Promise.all(pending.splice(0));
+    return { stats: f.stats, attrs: f.attrs(), entries: cache.entries.size };
+  };
+  // README "cachingFetch": the reason is in stats.verifyError and on the span as git.pack.cache.verify.error. The gate's
+  // message is the reason; the cache branch read only failed because the gate errored it, so its prefix is not.
+  // the expected reasons are derived here: an ERR on a fetch is the remote's text after `ERR ` (gitprotocol-v2), and a
+  // wrong trailer names the trailer sent and node:crypto's SHA-1 of the pack bytes before it
+  const sent = Buffer.from(badTrailer.subarray(badTrailer.length - 20)).toString('hex');
+  const real = createHash('sha1').update(badTrailer.subarray(0, badTrailer.length - 20)).digest('hex');
+  const cases = [['ERR packet', ERR_ANSWER, `remote: ${ERR_TEXT.slice(4).trimEnd()}`], ['wrong pack trailer', packAnswer(badTrailer), `answer: the pack trailer ${sent} is not the SHA-1 of the pack (${real})`]];
+  for (const [name, answer, reason] of cases) {
+    const r = await run(answer);
+    assert.deepEqual([r.stats.verifyOk, r.stats.verifyFailed, r.stats.putOk, r.entries], [0, 1, 0, 0], name);
+    assert.doesNotMatch(r.stats.verifyError, /the body failed while it was read/, name);
+    assert.equal(r.stats.verifyError, reason, name);
+    assert.equal(r.attrs['git.pack.cache.verify.error'], r.stats.verifyError, name);
+  }
+});
 test('cachingFetch verifyBeforeStore (#270): the whole-answer read is capped at three times maxPackBytes; an answer over it is not stored, one under it is', async () => {
   const content = te.encode('hi\n');
   const held = createHash('sha1').update(concat([te.encode('blob 3\0'), content])).digest('hex');

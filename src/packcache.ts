@@ -20,7 +20,8 @@
 // holds O(chunk) state and errors the stream at the first violation or at the end, so the put never commits an answer
 // that failed: pkt-line framing complete to the final flush, no ERR packet, no sideband channel-3 message, and when
 // there is a packfile section, a valid pack header and a trailing SHA-1 equal to a running SHA-1 of the pack bytes (no
-// inflate, no delta resolution). Nothing on the cache path holds a whole answer. A store whose put cannot be aborted
+// inflate, no delta resolution). Without verifyBeforeStore nothing on the cache path holds a whole answer; with it a
+// MISS holds the cache branch whole, up to 3 x maxPackBytes, for verifyFetchAnswer. A store whose put cannot be aborted
 // by an errored body gets a delete after the failed verification (stats.verifyFailed / verifyError).
 // What is served: the store is untrusted, and a HIT is streamed with no pass of its own. The check is the client's
 // parse of the replayed answer (pack checksum, every object hashed); a HIT the client refuses is deleted and asked for
@@ -210,8 +211,11 @@ export type CachingConfig = {
 export type CachingOptions = Input<CachingConfig>;
 const isPureFetchBody = (body: Uint8Array): boolean => pureFetchOf(body) !== null;
 const cachingDefaults = (verify: boolean): CachingConfig => ({ waitUntil: null, namespace: NAMESPACE, shouldCache: verify ? isPureFetchBody : isCacheableFetch, maxAge: 31_536_000, verifyBeforeStore: verify, limits: DEFAULT_LIMITS });
-// verifyOk: answers the streaming verifier passed to the end. verifyFailed / verifyError: answers it refused (the put's
-// body was errored and the key deleted), with the last refusal's message. bust: evictions asked for by the client.
+// verifyOk: answers handed to cache.put that the streaming verifier passed to the end (under verifyBeforeStore, only
+// those verifyFetchAnswer accepted first; whether the put then succeeded is putOk / putFailed). verifyFailed / verifyError: answers refused, with the last refusal's message:
+// by the streaming verifier (the put's body was errored and the key deleted) or, under verifyBeforeStore, by
+// verifyFetchAnswer or the 3 x maxPackBytes read cap before any put (nothing put, no key deleted). bust: evictions
+// asked for by the client.
 export type CacheStats = { hit: number; miss: number; bust: number; bypass: number; putOk: number; putFailed: number; putError: string; verifyOk: number; verifyFailed: number; verifyError: string };
 // The fetch ply's HTTP transport calls (http.ts FetchLike), with the cache's counters. `init` and `prefix` may be left out.
 export type CachingFetch = ((url: string | URL, ...init: [] | [RequestInit]) => Promise<Response>) & { stats: CacheStats; counters: { parsed: number }; attrs: (...prefix: [] | [string]) => Attrs };
@@ -330,7 +334,8 @@ type Fate = { readonly kind: 'ok' } | { readonly kind: 'refused'; readonly error
 type Split = { readonly client: ReadableStream<Uint8Array>; readonly cache: ReadableStream<Uint8Array>; readonly fate: Promise<Fate>; readonly unread: () => void };
 // The most the cache branch may queue for a store that reads slower than the client. Past it the put is given up
 // (errored, the key deleted, counted in putFailed): the client is never paced or stalled by the store, and what ply
-// holds for the store is bounded by this, never by the answer.
+// holds for the store is bounded by this, never by the answer, without verifyBeforeStore (with it, the store reads the
+// branch whole, up to 3 x maxPackBytes, before the put).
 export const CACHE_LAG_BYTES: number = 1024 * 1024;
 // One reader on the origin, driven by the client's reads. Each chunk goes to the client, then through the gate into
 // the cache stream's queue (bounded by CACHE_LAG_BYTES). Unlike ReadableStream.tee, whose slower branch queues without
