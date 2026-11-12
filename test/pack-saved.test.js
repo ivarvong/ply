@@ -30,6 +30,7 @@ import { Sha1 } from '../src/sha1.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { some, none } from '../src/result.js';
 import { unwrap } from './unwrap.js';
+import { settledWithin, stallAt, abortedBefore, codeOf } from './abortcells.js';
 
 const must = r => { if (r.ok) return r.value; throw Object.assign(new Error(r.error.message ?? JSON.stringify(r.error)), { code: r.error.code }); };
 const streamOf = bytes => new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } });
@@ -530,4 +531,30 @@ test('a resumed transfer that loads the saved index every request reaches the fr
     const scanned = await fresh(bytes);
     assert.equal(must(planTransfer(scanned.pack, scanned.resolved, { budget: BUDGET, ref: REF, commit: src.commit })).head, plan.head);
   }
+});
+
+// The Abort contract (README) for packIdentity, whose one read is the spool's last 20 bytes: aborted before the call
+// (nothing asked of the storage), while that read never opens, and while its range is open and never serves a byte.
+// Expected values are the contract's: the code `aborted`, and on the test's own counters no read for the first, the one
+// read told through its signal for the others, and the open range cancelled.
+test('packIdentity aborted before the call, at the trailer read, and in the trailer range settles aborted', async () => {
+  const bytes = src.packs.ofs;
+  const seen = {};
+  const before = stallAt(bytes, 0, 'never');
+  seen.before = { code: codeOf(await packIdentity(before, abortedBefore())), ...before.state };
+  for (const how of ['never', 'stall']) {
+    const source = stallAt(bytes, 0, how);
+    const ac = new AbortController();
+    const op = packIdentity(source, ac.signal);
+    assert.equal(await settledWithin(source.parked), 'settled', how);
+    assert.equal(await settledWithin(op, 20), 'pending', how);
+    ac.abort(new Error('stop'));
+    assert.equal(await settledWithin(op), 'settled', how);
+    seen[how] = { code: codeOf(await op), ...source.state };
+  }
+  assert.deepEqual(seen, {
+    before: { code: 'aborted', reads: 0, cancelled: 0, aborted: 0 },
+    never: { code: 'aborted', reads: 1, cancelled: 0, aborted: 1 },
+    stall: { code: 'aborted', reads: 1, cancelled: 1, aborted: 1 },
+  });
 });

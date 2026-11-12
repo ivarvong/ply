@@ -18,6 +18,7 @@ import { concat, te } from '../src/bytes.js';
 import { withLimits } from '../src/limits.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, UINT32_BYTES, OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK, OBJ_SIZE_NEXT_BASE } from '../src/format.js';
 import { buildPacks } from './space/pack-fixtures.js';
+import { settledWithin } from './abortcells.js';
 
 const must = r => { if (r.ok) return r.value; throw Object.assign(new Error(r.error.message), { code: r.error.code }); };
 
@@ -316,4 +317,38 @@ test('maxPackObjects refuses at the header; the columns never exceed the count t
   // oids on by default: 31 bytes of columns and a 20-byte oid per entry
   assert.equal(idx.heldBytes, 3000 * (SCAN_INDEX_ENTRY_BYTES + 20));
   assert.equal(idx.columns.size.length, 3000);
+});
+
+// The Abort contract (README): an aborted scan settles `aborted` when its signal fires, whichever of the caller's
+// awaits it is parked on: its source (a stream that served the pack header and then never another byte) or its content
+// sink (a take() that never settles). Expected values are the contract's: the code `aborted`, the stream cancelled
+// once, and take() called once (the first selected object) and never again.
+test('an aborted scan settles aborted while its source stalls mid-pack and while content.take never settles', async () => {
+  const { packs } = buildPacks();
+  const bytes = packs.full.bytes;
+  let cancelled = 0, reached;
+  let parked = new Promise(r => { reached = r; });
+  let served = false;
+  const stalled = new ReadableStream({
+    pull(c) { if (!served) { served = true; c.enqueue(bytes.subarray(0, 12)); return undefined; } reached(); return new Promise(() => {}); },
+    cancel() { cancelled++; },
+  }, { highWaterMark: 0 });
+  const a = new AbortController();
+  const scanA = scanPackIndex(stalled, { signal: a.signal });
+  await parked;
+  assert.equal(await settledWithin(scanA, 20), 'pending', 'parked on the source');
+  a.abort(new Error('stop'));
+  assert.equal(await settledWithin(scanA), 'settled', 'the source stalls');
+  const ra = await scanA;
+  assert.deepEqual({ code: ra.ok ? 'ok' : ra.error.code, cancelled }, { code: 'aborted', cancelled: 1 });
+  let takes = 0;
+  parked = new Promise(r => { reached = r; });
+  const b = new AbortController();
+  const scanB = scanPackIndex(streamOf([bytes]), { signal: b.signal, content: { select: () => true, take: () => { takes++; reached(); return new Promise(() => {}); } } });
+  await parked;
+  assert.equal(await settledWithin(scanB, 20), 'pending', 'parked on take');
+  b.abort(new Error('stop'));
+  assert.equal(await settledWithin(scanB), 'settled', 'take never settles');
+  const rb = await scanB;
+  assert.deepEqual({ code: rb.ok ? 'ok' : rb.error.code, takes }, { code: 'aborted', takes: 1 });
 });

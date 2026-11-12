@@ -15,6 +15,8 @@ import { pushPack } from '../../src/receivecaps.js';
 import { hashObject, encodeTree, encodeCommit, TYPE } from '../../src/objects.js';
 import { measurePack, streamPack } from '../../src/packwrite.js';
 import { buildPack } from '../../src/pack.js';
+import { packSubset } from '../../src/packsubset.js';
+import { scanPackIndex } from '../../src/packscanindex.js';
 import { failure, fetchOps } from '../sweep/ops.mjs';
 
 // module-scoped in-memory pack cache for workerd tests (never caches.default — Workers Cache is ply-web).
@@ -116,6 +118,52 @@ export default {
       const t = unwrap(createTransport(body.url, { fetchImpl, limits: withLimits({ maxPackBytes: 4 * body.size + 4096 }) }));
       const r = await pushPack(t, { ref: 'refs/heads/main', oldOid: ZERO_OID, newOid: oid, pack, length: body.mode === 'short' ? whole.length + 1 : whole.length });
       return Response.json({ ok: r.ok, code: r.ok ? null : r.error.code, original: r.ok ? null : r.error.original ?? null, message: r.ok ? null : r.error.message, commit: oid, packBytes: r.ok ? r.value.packBytes : null, whole: whole.length, seen });
+    }
+    if (u.pathname === '/cancel-pending-read') { // packSubset's chunk path: the platform's reader on an internal stream (a fetch body, as an R2 body is)
+      const body = await req.json();
+      const res = await fetch(body.url);
+      const reader = ReadableStream.prototype.getReader.call(res.body);
+      const unhandled = [];
+      const onRejection = e => { unhandled.push(String(e.reason?.stack ?? e.reason).slice(0, 300)); };
+      addEventListener('unhandledrejection', onRejection);
+      let got = 0;
+      while (got < body.bytes) { const r = await reader.read(); if (r.done) break; got += r.value.length; }
+      // the server has sent all it will: this read is in flight, and stays so for 20 turns
+      let state = 'pending';
+      reader.read().then(r => { state = r.done ? 'done' : 'value'; }, () => { state = 'rejected'; });
+      for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 0));
+      const before = state;
+      reader.cancel(new Error('stop')).catch(() => null);
+      let turns = 0;
+      for (; turns < 200 && state === 'pending'; turns++) await new Promise(r => setTimeout(r, 0));
+      for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 0));
+      removeEventListener('unhandledrejection', onRejection);
+      return Response.json({ got, before, after: state, turns, unhandled });
+    }
+    if (u.pathname === '/subset-cancel') { // packSubset over a range that is an internal stream (a fetch body that stalls), cancelled mid-read
+      const body = await req.json();
+      const turn = () => new Promise(r => setTimeout(r, 0));
+      const data = new Uint8Array(65536);
+      crypto.getRandomValues(data);
+      const pack = (await buildPack([{ type: TYPE.BLOB, data }])).pack;
+      const idx = unwrap(await scanPackIndex(new Response(pack).body));
+      const rejections = [];
+      const onRejection = e => { rejections.push(String(e.reason?.stack ?? e.reason).slice(0, 600)); };
+      addEventListener('unhandledrejection', onRejection);
+      const source = { size: pack.length, read: async () => ({ ok: true, value: (await fetch(body.url)).body }) };
+      const reader = unwrap(await packSubset(source, idx, [0])).stream.getReader();
+      let got = 0;
+      while (got < body.bytes) { const r = await reader.read(); if (r.done) break; got += r.value.length; }
+      let read = 'pending';
+      reader.read().then(r => { read = r.done ? 'done' : 'value'; }, () => { read = 'rejected'; });
+      for (let i = 0; i < 20; i++) await turn();
+      const before = read;
+      let cancel = 'pending';
+      reader.cancel(new Error('stop')).then(() => { cancel = 'settled'; }, () => { cancel = 'rejected'; });
+      for (let i = 0; i < 200 && (read === 'pending' || cancel === 'pending'); i++) await turn();
+      for (let i = 0; i < 20; i++) await turn(); // a rejection nobody handled is reported by now
+      removeEventListener('unhandledrejection', onRejection);
+      return Response.json({ got, before, read, cancel, rejections });
     }
     if (u.pathname === '/timeouts') { // #255 under workerd: {url, mode, limits}; frames over a POST whose server drips, stalls or is slow
       const body = await req.json();
