@@ -6,7 +6,7 @@ import { test, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { commitChanges, editFile, pushTree, readCommit, readFile, Tracer } from '../src/index.js';
+import { commitChanges, createTransport, editFile, lsRefs, pushTree, readCommit, readFile, Tracer } from '../src/index.js';
 import { operation } from '../src/operation.js';
 import { tmpRoot, makeBareRepo, git, commitFiles, startGitServer } from './server.js';
 
@@ -166,4 +166,35 @@ test("a failure building the span is reported as 'internal', never as the export
     assert.deepEqual(lines.map(l => l.resourceSpans[0].scopeSpans[0].spans[0].name), ['good']);
     if (withOnEnd) assert.deepEqual(ended, ['good']);
   }
+});
+
+// The step functions (lsRefs, push, discover, ...) take a Transport whose `tracer` operation()'s entry check never saw.
+// A tracer there with no start() function is the README's default (no tracer: spans are dropped), not a TypeError
+// (the regression: spanOn called tracer.start unconditionally, and every { span }-only transport double on main threw
+// 'tracer.start is not a function'). A caller's span() is still never called. At the public entry the same value is a
+// coded refusal: bad_request naming 'tracer'.
+test('a transport tracer without start(): the step functions drop its spans (README default); operation() refuses it', async () => {
+  let spanCalls = 0;
+  const notTracers = [
+    ['a { span }-only double', { span: async (_n, _o, fn) => { spanCalls++; return fn({ set() {}, event() {}, error() {}, end() {} }); } }],
+    ['an empty object', {}],
+    ['a start that is not a function', { start: 'nope' }],
+  ];
+  for (const [label, tracer] of notTracers) {
+    const made = createTransport(url, { tracer });
+    assert.ok(made.ok, label);
+    let r;
+    try { r = await lsRefs(made.value, ['refs/heads/main']); } catch (e) { assert.fail(`${label}: lsRefs threw ${String(e)}`); }
+    assert.ok(r.ok, `${label}: ${r.ok ? '' : r.error.message}`);
+    assert.deepEqual([...r.value.refs].map(([n, x]) => [n, x.oid]), [['refs/heads/main', head()]], label);
+    const refused = await readCommit(url, { ref: 'main' }, { tracer });
+    assert.equal(refused.ok, false, label);
+    assert.deepEqual([refused.error.code, refused.error.what], ['bad_request', 'tracer'], label);
+  }
+  assert.equal(spanCalls, 0, "ply never calls a caller's span()");
+  // no tracer at all, at either level: the default, spans dropped, outcome ok
+  const plain = await lsRefs(createTransport(url).value, ['refs/heads/main']);
+  assert.ok(plain.ok);
+  const read = await readCommit(url, { ref: 'main' }, {});
+  assert.ok(read.ok);
 });

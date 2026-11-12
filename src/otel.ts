@@ -375,8 +375,15 @@ export class Span {
 // fn(span) under a span that is ended for it, as a function of start() alone: how ply runs a body on a caller's
 // tracer. opts.tracer is duck-typed and operation()'s entry check guarantees start() and nothing else, so ply never
 // calls a caller's span(). The body's value passes through; what it throws is recorded, the span ended, and rethrown.
+// Not every caller comes through that check: push(t), lsRefs(t), discover(t) and the other step functions take a
+// Transport whose `tracer` nothing has checked (a caller's transport record, a test double with only span()). A tracer
+// with no start() function there is the documented default, a tracer with no exporter (README: without one spans are
+// dropped; http.ts gives a transport made without one the same): the body runs on a dropped span, never a TypeError.
+// The refusal for a non-tracer stays where the README puts it, at operation()'s entry (bad_request, what: 'tracer').
 export async function spanOn<T>(tracer: { readonly start: (name: string, options: StartOptions) => Span }, name: string, opts: StartOptions, fn: (s: Span) => T | PromiseLike<T>): Promise<T> {
-  const s = tracer.start(name, opts);
+  const start = getOrElse(field(tracer, 'start'), null);
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, no-use-before-define -- a start() is the caller's Span factory (the duck-typed contract above); Tracer is defined below and exists when this runs
+  const s = (typeof start === 'function' ? Reflect.apply(start, tracer, [name, opts]) : new Tracer().start(name, opts)) as Span;
   try { const r = await fn(s); s.end(); return r; }
   catch (e) { s.error(e); s.end(); throw e; }
 }
