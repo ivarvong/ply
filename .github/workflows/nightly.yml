@@ -190,8 +190,14 @@ jobs:
           npx vitest run test/space/failsites.test.js || { echo "NIGHTLY-FAIL gate-c reproduce: npm test (gate c runs after the full vitest run)"; exit 1; }
       - name: pinned fuzz lines
         run: |
-          # npm test's unseeded fuzz lines print their own `repro: ... --case <seed>` on a failure
-          npm run test:fuzz-pinned || { echo "NIGHTLY-FAIL npm-test fuzz reproduce: npm run test:fuzz-pinned (unseeded fuzz lines: see the repro: lines above)"; exit 1; }
+          # the gate's list: every seed and case is a constant in test/fuzz/pinned.mjs, which prints
+          # `FUZZ-PINNED FAIL <fuzzer> seed=<n>` and a `replay:` command on a failure or a hang
+          npm run test:fuzz-pinned || { echo "NIGHTLY-FAIL npm-test fuzz reproduce: npm run test:fuzz-pinned (see the FUZZ-PINNED FAIL and replay: lines above)"; exit 1; }
+      - name: pinned fuzz lines, fresh seed (discovery)
+        run: |
+          # the same list with one seed drawn for this run; the first line printed is the seed and
+          # `replay: node test/fuzz/pinned.mjs --seed <n>`, and a failure repeats it
+          npm run test:fuzz-random || { echo "NIGHTLY-FAIL fuzz-random reproduce: node test/fuzz/pinned.mjs --seed <n> (the seed is on the 'fuzz-pinned: random mode' lines above)"; exit 1; }
 
   pack-cut-full:
     # every ply path already runs every cut on each PR; this adds git index-pack --strict on every cut (~9,600 runs,

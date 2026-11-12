@@ -116,8 +116,13 @@ there, with the reason written down.
 were run against the previous code to confirm they catch it.
 
 **Property tests and fuzzers over random inputs, with seeds and repro commands.** Every fuzzer prints a one-line repro
-(`--seed`, `--case`). `npm test` uses clock seeds for some fuzzers on purpose (discovery — the wanted-tree finding came
-from one); `npm run coverage` pins every seed so the coverage number is reproducible.
+(`--seed`, `--case`). `npm test`'s fuzz stage (`npm run test:fuzz-pinned`, test/fuzz/pinned.mjs) is seeded by constants:
+the same cases every run, each entry printing its seed when it starts and, with a replay command, when it fails or hangs
+past the per-entry timeout. Discovery by a fresh seed (the wanted-tree finding came from a clock seed) runs in the nightly
+workflow only, through `npm run test:fuzz-random`, which prints its seed first; `npm run coverage` pins every seed so
+the coverage number is reproducible. A fuzzer feeds its git oracle from a file, not through `execFileSync`'s `input`
+pipe, and gives the call a timeout: on node 24.18 / macOS under load that pipe call sometimes never returns for a 250 kB
+input (9 of about 36 000 calls with no ply code loaded, 0 of 13 000 from a file), which hung test/fuzz/codec.mjs.
 
 **Measure what is exercised.** Fuzzers report what they reached (coverage buckets, "exercised" counters: union-resolved
 files, merge-attribute conflicts, Myers heuristic splits, mxcost cutoffs), so a green run is known not to be vacuous.
