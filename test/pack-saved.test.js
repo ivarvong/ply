@@ -147,7 +147,8 @@ test('refusals: not a saved index, another version, every truncation, every corr
   for (let i = 6; i < bytes.length; i++) {
     const b = Uint8Array.from(bytes); b[i] ^= 0x01;
     const e = count(decodeSavedIndex(b, want));
-    assert.ok(['corrupt', 'truncated'].includes(e.tag), `byte ${i}: ${e.tag}`);
+    // a flip in the count's top bytes (16-19) claims more entries than maxPackObjects: refused by count first (#299)
+    assert.ok(['corrupt', 'truncated'].includes(e.tag) || (e.tag === 'limit_exceeded' && i >= 16 && i < 20), `byte ${i}: ${e.tag}`);
     if (i >= 20) assert.equal(e.tag, 'corrupt', `byte ${i}`);
   }
   // another pack: the trailer, the length
@@ -155,7 +156,7 @@ test('refusals: not a saved index, another version, every truncation, every corr
   assert.equal(count(decodeSavedIndex(bytes, idOf(other))).tag, 'other_pack');
   assert.deepEqual(count(decodeSavedIndex(bytes, { ...want, bytes: want.bytes + 1 })), { tag: 'other_pack', saved: want, want: { ...want, bytes: want.bytes + 1 } });
   assert.ok(tags.truncated >= bytes.length, `${tags.truncated} truncations`);
-  assert.equal(tags.corrupt + (tags.truncated - bytes.length), bytes.length - 6);
+  assert.equal(tags.corrupt + (tags.truncated - bytes.length) + (tags.limit_exceeded || 0), bytes.length - 6);
 });
 
 test('malformed with a valid check: each field a scan could not produce is refused by name', async () => {
@@ -559,37 +560,75 @@ test('packIdentity aborted before the call, at the trailer read, and in the trai
   });
 });
 
-// #299 item 5: a saved index larger than limits.maxSavedIndexBytes is refused from its header, before any column is
-// built; one at the bound decodes. Sizes by hand: 64 B header + 20 B check + 51 B per entry with oids (31 + 20).
-test('maxSavedIndexBytes: refused from the header with got/max, at the bound decodes, a 1M-entry header refused before its body is read', async () => {
+// #299 item 5: a saved index is held to maxPackObjects, the cap a scan holds the pack's header count to, from its
+// header, before any column is built: one entry over is limit_exceeded (got = the header's count, max = the limit),
+// at the bound it decodes. The count comes from git (rev-list --objects of the packed commit), not from ply.
+test('maxPackObjects: a saved index over it is refused from the header with got/max, at the bound decodes, a 1M-entry header refused before its body is read', async () => {
   const from = await fresh(src.packs.ref);
   const bytes = must(encodeSavedIndex(from.pack, some(from.resolved)));
-  const L = sizeOf(from.pack.count, { refs: true });
-  assert.equal(bytes.length, L);
-  const r = decodeSavedIndex(bytes, idOf(from), 64, L - 1);
-  assert.deepEqual(r, { ok: false, error: { tag: 'limit_exceeded', what: 'saved index bytes', got: L, max: L - 1 } });
-  assert.match(describeRefusal(r.error), new RegExp(`${L} bytes.*${L - 1}`, 'u'));
-  assertSame(from, must(decodeSavedIndex(bytes, idOf(from), 64, L)));
-  // a header claiming 1,000,000 entries (flags 1: oids) and nothing after it: 64 + 1e6 * 51 + 20 bytes by the header
+  const n = git(work, ['rev-list', '--objects', '--no-walk', src.head]).trim().split('\n').length;
+  assert.equal(from.pack.count, n);
+  const r = decodeSavedIndex(bytes, idOf(from), 64, n - 1);
+  assert.deepEqual(r, { ok: false, error: { tag: 'limit_exceeded', what: 'pack objects', got: n, max: n - 1 } });
+  assert.equal(describeRefusal(r.error), `saved index has ${n} entries by its header, over limits.maxPackObjects ${n - 1}`);
+  assertSame(from, must(decodeSavedIndex(bytes, idOf(from), 64, n)));
+  // a header claiming 1,000,000 entries (flags 1: oids) and nothing after it: refused by count, not truncated
   const head = Uint8Array.from(bytes.subarray(0, 84));
   const v = new DataView(head.buffer);
   v.setUint16(6, 1, true);
   v.setUint32(16, 1_000_000, true);
-  assert.deepEqual(decodeSavedIndex(head, idOf(from), 64, 32 * 1024 * 1024), { ok: false, error: { tag: 'limit_exceeded', what: 'saved index bytes', got: 51_000_084, max: 32 * 1024 * 1024 } });
-  // the default bound is 2 GiB: the same header is only truncated
+  assert.deepEqual(decodeSavedIndex(head, idOf(from), 64, 100_000), { ok: false, error: { tag: 'limit_exceeded', what: 'pack objects', got: 1_000_000, max: 100_000 } });
+  // the default bound is DEFAULT_LIMITS.maxPackObjects, 100 000 (README): the same header is refused, 100 000 is truncated
+  assert.deepEqual(decodeSavedIndex(head, idOf(from)).error, { tag: 'limit_exceeded', what: 'pack objects', got: 1_000_000, max: 100_000 });
+  v.setUint32(16, 100_000, true);
   assert.equal(decodeSavedIndex(head, idOf(from)).error.tag, 'truncated');
 });
 
+// The bound on the consumer path: loadTransferPack refuses an over-cap saved index with limit_exceeded from the
+// caller's resolve limits, without a scan (no spool byte past the trailer is read).
+test('loadTransferPack: a saved index over the caller\'s maxPackObjects is limit_exceeded, not rescanned', async () => {
+  const { t } = traced();
+  const first = must(await loadTransferPack(t, rangeFromBytes(src.packs.ref), none));
+  const n = first.from.pack.count;
+  const over = counted(src.packs.ref);
+  const r = await loadTransferPack(t, over.source, some(first.saved), { resolve: { limits: { maxPackObjects: n - 1 } } });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'limit_exceeded');
+  assert.deepEqual([r.error.what, r.error.got, r.error.max], ['pack objects', n, n - 1]);
+  assert.deepEqual(over.c, { reads: 1, bytes: 20 }, 'only the trailer is read: no scan');
+  const at = must(await loadTransferPack(t, rangeFromBytes(src.packs.ref), some(first.saved), { resolve: { limits: { maxPackObjects: n } } }));
+  assert.deepEqual(at.loaded, { tag: 'saved' });
+});
+
 // #299 items 5 and 6: decoded columns are views into the saved bytes (one copy, not two), the same for a Node Buffer
-// and a Uint8Array; the bytes are the caller's to keep unchanged while the index is used (documented in packsaved.ts).
-test('decodeSavedIndex: columns view the saved bytes, a Buffer and a Uint8Array alike', async () => {
+// and a Uint8Array (README 'Saved pack index'): a byte the caller changes after the decode shows in the column.
+test('decodeSavedIndex: columns view the saved bytes, a Buffer and a Uint8Array alike; number columns too', async () => {
   const from = await fresh(src.packs.ref);
   const bytes = must(encodeSavedIndex(from.pack, some(from.resolved)));
   for (const input of [Uint8Array.from(bytes), Buffer.from(bytes)]) {
     const back = must(decodeSavedIndex(input, idOf(from)));
     assertSame(from, back);
     assertSameResolved(from.resolved, back.resolved.value);
-    for (const k of ['oids', 'refs', 'storedType', 'type', 'headerBytes']) assert.equal(back.pack.columns[k].buffer, input.buffer, k);
-    for (const k of ['oid', 'type']) assert.equal(back.resolved.value.columns[k].buffer, input.buffer, k);
+    for (const k of [...COLS.filter(c => c !== 'baseIndex'), 'baseIndex']) {
+      const col = back.pack.columns[k];
+      if (col.length === 0) continue;
+      assert.equal(col.buffer, input.buffer, k);
+      const at = col.byteOffset - input.byteOffset;
+      const was = col[0];
+      input[at] ^= 0xff;
+      assert.notEqual(col[0], was, `${k} sees a write to the saved bytes`);
+      input[at] ^= 0xff;
+      assert.equal(col[0], was, k);
+    }
+    // base is rebuilt from the pack's baseIndex on decode, not read from the bytes; the others are views
+    for (const k of RCOLS.filter(c => c !== 'base')) {
+      const col = back.resolved.value.columns[k];
+      assert.equal(col.buffer, input.buffer, k);
+      const at = col.byteOffset - input.byteOffset;
+      const was = col[0];
+      input[at] ^= 0xff;
+      assert.notEqual(col[0], was, `resolved ${k} sees a write to the saved bytes`);
+      input[at] ^= 0xff;
+    }
   }
 });

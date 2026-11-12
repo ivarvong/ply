@@ -33,6 +33,7 @@ import type { Span } from './otel.js';
 import { KIND } from './otel.js';
 import type { Transport } from './transport.js';
 import { spanned } from './transport.js';
+import { limitExceeded } from './limits.js';
 
 export type Loaded = { readonly tag: 'saved' } | { readonly tag: 'resolved' } | { readonly tag: 'scanned'; readonly refused: Option<SavedIndexRefusal> };
 export type LoadedPack = { readonly from: TransferPack; readonly loaded: Loaded; readonly saved: Uint8Array };
@@ -62,6 +63,8 @@ async function scanned(source: RangeSource, cfg: LoadConfig, refused: Option<Sav
 // A saved index read back: used as it is, resolved again when it has no resolved columns, or refused (a scan, and why).
 async function fromSaved(source: RangeSource, cfg: LoadConfig, span: Span, bytes: Uint8Array, decoded: Result<SavedIndex, SavedIndexRefusal>): Promise<Result<LoadedPack, PlyError>> {
   if (!decoded.ok) {
+    // over maxPackObjects: refused, not scanned (a scan of the same pack under the same cap is refused the same way)
+    if (decoded.error.tag === 'limit_exceeded') return err(limitExceeded(decoded.error.what, decoded.error.got, decoded.error.max));
     span.set({ 'git.transfer.load.refused': decoded.error.tag, 'git.transfer.load.refused_reason': describeRefusal(decoded.error) });
     const again = await scanned(source, cfg, some(decoded.error));
     return again;
@@ -87,7 +90,7 @@ export async function loadTransferPack(dst: Transport, source: RangeSource, save
     const id = await packIdentity(source, cfg.signal);
     if (!id.ok) return id;
     span.set({ 'git.pack.trailer': id.value.trailer });
-    const out = saved.tag === 'none' ? await scanned(source, cfg, none) : await fromSaved(source, cfg, span, saved.value, decodeSavedIndex(saved.value, id.value, resolve.value.limits.maxDeltaChain, resolve.value.limits.maxSavedIndexBytes));
+    const out = saved.tag === 'none' ? await scanned(source, cfg, none) : await fromSaved(source, cfg, span, saved.value, decodeSavedIndex(saved.value, id.value, resolve.value.limits.maxDeltaChain, resolve.value.limits.maxPackObjects));
     if (out.ok) span.set({ 'git.transfer.load.from': out.value.loaded.tag, 'git.transfer.load.saved_bytes': out.value.saved.length, 'git.transfer.load.entries': out.value.from.pack.count });
     return out;
   });
