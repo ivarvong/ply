@@ -46,5 +46,6 @@ export function sweepPrefix(prefix: unknown, root: string): Result<string, PlyEr
   const refuse = (why: string): Result<string, PlyError> => fail('bad_request', `sweepTransfers: prefix ${JSON.stringify(prefix)} ${why}`, { what: 'prefix' });
   if (typeof prefix !== 'string') return refuse('is not a string');
   if (!prefix.startsWith(root) || !prefix.endsWith('/')) return refuse(`is not ${root} or a namespace ending in '/' below it`);
+  // Stryker disable next-line BooleanLiteral: every prefix reaching here starts with root (refs/ply/transfer/), so the name has a '/' and deleting's only effect (allowing a slashless name) never applies
   return validatePushRef(`${prefix}${'0'.repeat(40)}`, false).ok ? ok(prefix) : refuse('is not a ref namespace git would push');
 }
