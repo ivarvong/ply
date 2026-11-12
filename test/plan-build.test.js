@@ -131,6 +131,24 @@ test('a REF_DELTA selected before its delta base is written after it: git, alrea
   gitBuf(dst, ['index-pack', '--strict', '--fix-thin', '--stdin'], out);
 });
 
+test('with `resolved`, a base at entry 0 selected after its delta is moved first (the base-first walk starts at index 0)', async () => {
+  // a one-delta pack whose base is entry 0: an OFS delta on a whole object, the two written base first
+  const base = src.resolved.columns.base;
+  const d = [...Array(src.idx.count).keys()].find(i => src.idx.columns.storedType[i] === TYPE.OFS_DELTA && base[i] >= 0 && src.idx.columns.storedType[base[i]] !== TYPE.OFS_DELTA);
+  assert.ok(d !== undefined, 'an OFS delta on a whole object');
+  const two = unwrap(await packSubset(rangeFromBytes(src.bytes), src.idx, [base[d], d], {}));
+  const bytes = new Uint8Array(await drain(two.stream));
+  const idx = unwrap(await scanPackIndex(streamOf(bytes)));
+  const resolved = unwrap(await resolvePackRange(idx, rangeFromBytes(bytes)));
+  assert.deepEqual([idx.columns.storedType[1], resolved.columns.base[1]], [TYPE.OFS_DELTA, 0], 'entry 1 rests on entry 0');
+  // the delta selected first: base first puts entry 0 before it, so the OFS base is written earlier and nothing is refused
+  const built = unwrap(await packSubset(rangeFromBytes(bytes), idx, [1, 0], { resolved }));
+  const out = await drain(built.stream);
+  assert.equal(out.length, built.length);
+  assert.deepEqual(Buffer.from(out), Buffer.from(bytes), 'the same two entries in the same order as the source pack');
+  gitBuf(makeBareRepo(root, `z${n++}`), ['index-pack', '--strict', '--stdin'], out);
+});
+
 test('a resolved index that cannot name a cut base fails the plan (nothing is pushed), as the builder refuses it', async () => {
   const type = src.resolved.columns.type;
   const blobs = [...Array(src.idx.count).keys()].filter(i => type[i] === TYPE.BLOB);
