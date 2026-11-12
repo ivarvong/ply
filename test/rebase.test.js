@@ -8,7 +8,7 @@ import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems, initRepo } from './server.js';
-import { rebaseBranch, cherryPick, revertCommit, linearChain, carriedExtra } from '../src/rebase.js';
+import { rebaseBranch, cherryPick, revertCommit, linearChain, carriedExtra, squashMessage } from '../src/rebase.js';
 import { mergeBranch } from '../src/merge.js';
 import { editFile } from '../src/edit.js';
 import { generateSigner } from '../src/sign.js';
@@ -209,3 +209,310 @@ test('end to end: edit on a branch, main moves, rebase, fast-forward land, delet
   assert.equal(ok(sh(r.bare, ['log', '--format=%s', '-3', 'main'])).split('\n').join('|'), 'edit|main moved|base', 'linear history');
   assert.deepEqual(fsckProblems(r.bare), []);
 });
+
+// The default squash message is built from commit messages, which whoever can push to the branch writes.
+test('squash message: exact values worked by hand; interior blank lines are the commit\'s own and stay', () => {
+  // each message loses only its trailing newlines; null and all-newline messages contribute nothing; one blank line
+  // between the rest; one final newline
+  assert.equal(squashMessage(['a\n', 'b\n\n\n', null, '\n\n', '', 'c']), 'a\n\nb\n\nc\n');
+  assert.equal(squashMessage(['subject\n\nbody 1\n\n\n\nbody 2\n']), 'subject\n\nbody 1\n\n\n\nbody 2\n');
+  assert.equal(squashMessage(['\n\nlead\n', ' \n']), '\n\nlead\n\n \n');
+  assert.equal(squashMessage([]), '\n'); assert.equal(squashMessage([null, '\n']), '\n');
+  assert.equal(squashMessage(['x\r\n']), 'x\r\n', 'only LF is stripped: CR LF keeps its CR, then one LF is added');
+});
+
+test('squash message: time is linear in the message (64x the newlines costs under 300x the time, best of 5)', () => {
+  // 'feat' + N newlines + 'tail' + N newlines: the interior run is where `\n+$` went quadratic (the engine retries the
+  // run from every newline in it), the trailing run is the work a linear strip does. A quadratic step costs 4096x.
+  const msg = n => `feat${'\n'.repeat(n)}tail${'\n'.repeat(n)}`;
+  // by hand: each of the two copies keeps 'feat' + n newlines + 'tail' (n + 8 chars), '\n\n' between, '\n' after
+  const best = (n) => { const m = msg(n); let b = Infinity; for (let i = 0; i < 5; i++) { const t0 = performance.now(); const out = squashMessage([m, m]); b = Math.min(b, performance.now() - t0); assert.equal(out.length, 2 * (n + 8) + 3); } return b; };
+  for (let i = 0; i < 50; i++) squashMessage([msg(200), msg(200)]); // warm the JIT on a size neither measurement uses
+  const ts = best(500); const tb = best(32_000);
+  assert.ok(tb < 300 * ts, `64x the input cost ${(tb / ts).toFixed(0)}x the time (${ts.toFixed(4)} ms -> ${tb.toFixed(4)} ms)`);
+});
+
+test('limits: maxRebaseCommits governs a rebase above maxMergeDepth too: a chain of exactly the limit rebases as git does, one more is refused as the rebase chain', async () => {
+  const { DEFAULT_LIMITS } = await import('../src/limits.js');
+  const r = repo();
+  commitFiles(r.work, r.bare, { 'a.txt': 'a\n' }, 'base');
+  for (let i = 1; i <= 13; i++) commitOn(r, 'feat', i === 1 ? 'main' : 'feat', { [`f${i}.txt`]: `${i}\n` }, `feat ${i}`);
+  ok(sh(r.work, ['push', '-q', r.bare, 'HEAD~1:refs/heads/feat12'])); // the same branch without its last commit: 12 above the base
+  const tip13 = ok(sh(r.bare, ['rev-parse', 'feat']));
+  commitOn(r, 'main', 'main', { 'e.txt': 'e\n' }, 'main moved');
+  // git's answer: it rebases both; 12 and 13 are the counts of commits made above
+  const d = clone(r.bare);
+  ok(sh(d, ['checkout', '-q', 'feat'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); assert.equal(ok(sh(d, ['rev-list', '--count', 'origin/main..HEAD'])), '13');
+  ok(sh(d, ['checkout', '-q', 'feat12'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitLog = log(d, 'origin/main..HEAD'); rmSync(d, { recursive: true, force: true });
+  assert.equal(gitLog.length, 12);
+  const refused = (ref, limits, what, got, max) => assert.rejects(unwrapAsync(rebaseBranch(r.url, { ref, onto: 'refs/heads/main', committer }, { ...T(), limits: { ...DEFAULT_LIMITS, ...limits } })), e => { assert.deepEqual({ code: e.code, what: e.what, got: e.got, max: e.max }, { code: 'limit_exceeded', what, got, max }); return true; });
+  // the rebase limit below, at and above the merge depth: each time it is the bound that fires, one commit over
+  await refused('refs/heads/feat', { maxMergeDepth: 64, maxRebaseCommits: 12 }, 'rebase chain', 13, 12);
+  await refused('refs/heads/feat', { maxMergeDepth: 12, maxRebaseCommits: 12 }, 'rebase chain', 13, 12);
+  await refused('refs/heads/feat', { maxMergeDepth: 4, maxRebaseCommits: 12 }, 'rebase chain', 13, 12);
+  assert.equal(ok(sh(r.bare, ['rev-parse', 'feat'])), tip13, 'a refused rebase leaves the branch');
+  const res = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat12', onto: 'refs/heads/main', committer }, { ...T(), limits: { ...DEFAULT_LIMITS, maxMergeDepth: 4, maxRebaseCommits: 12 } }));
+  assert.equal(res.outcome, 'rebase'); assert.equal(res.commits, 12);
+  assert.deepEqual(log(r.bare, 'main..feat12'), gitLog, 'tree, author and subject of every replayed commit == git rebase');
+  assert.deepEqual(fsckProblems(r.bare), []);
+});
+
+// A stale short branch in a long linear history: 40 commits, a 3-commit branch on the 40th, main 20 commits further.
+// The base is 21 commits from onto, past maxMergeDepth 8, and the branch's own history (43 commits) is longer than
+// the branch walk (maxRebaseCommits + 2). Both walks end cut and share no commit, so nothing shows the chain to be
+// over its limit: git counts 3. The refusal is the merge-base search's, with the fields that search has always
+// reported for this repository (max: the caller's maxMergeDepth; got: the doubling it would have needed next, 2 x 8).
+test('limits: a short branch whose onto is further than maxMergeDepth is refused by maxMergeDepth, never as a rebase chain it does not have; raising the limit named rebases it as git does', async () => {
+  const { DEFAULT_LIMITS } = await import('../src/limits.js');
+  const r = repo();
+  const L = []; let at = 1_700_000_000; let mark = 0;
+  const commit = (ref, from, path, body) => { mark++; L.push(`commit ${ref}`, `mark :${mark}`, `committer s <s@x> ${at++} +0000`, 'data 1', 'c', ...(from ? [`from :${from}`] : []), `M 100644 inline ${path}`, `data ${body.length}`, body); return mark; };
+  let base = 0; for (let i = 1; i <= 40; i++) base = commit('refs/heads/main', base, 'a.txt', `a${i}`);
+  let prev = base; for (let i = 1; i <= 3; i++) prev = commit('refs/heads/short', prev, 's.txt', `${i}`);
+  prev = base; for (let i = 1; i <= 20; i++) prev = commit('refs/heads/main', prev, 'm.txt', `${i}`);
+  prev = base; for (let i = 1; i <= 10; i++) prev = commit('refs/heads/long', prev, 'l.txt', `${i}`);
+  commit('refs/heads/main1', base, 'm.txt', '1');
+  ok(sh(r.bare, ['fast-import', '--quiet'], `${L.join('\n')}\n`));
+  const tip = ok(sh(r.bare, ['rev-parse', 'short']));
+  // git: the chain is 3 commits, onto is 20 past the base, the branch's history is 43 commits
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main..short'])), '3');
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'short..main'])), '20');
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'short'])), '43');
+  const run = async (limits) => { const e = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/short', onto: 'refs/heads/main', committer }, { ...T(), limits: { ...DEFAULT_LIMITS, ...limits } })).then(() => null, x => x); return { code: e?.code, what: e?.what, got: e?.got, max: e?.max }; };
+  // the chain limit above the chain (12), exactly the chain (3), and far above the history (5000): never the limit named
+  for (const maxRebaseCommits of [12, 3, 5000]) assert.deepEqual(await run({ maxMergeDepth: 8, maxRebaseCommits }), { code: 'limit_exceeded', what: 'merge-base search depth', got: 16, max: 8 }, `maxRebaseCommits ${maxRebaseCommits}`);
+  assert.equal(ok(sh(r.bare, ['rev-parse', 'short'])), tip, 'a refused rebase leaves the branch');
+  // following the error (a merge depth that reaches the base, 21 from onto) rebases the 3 commits; the tree is git's
+  const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'short'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitTree = treeOf(d, 'HEAD'); rmSync(d, { recursive: true, force: true });
+  const res = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/short', onto: 'refs/heads/main', committer }, { ...T(), limits: { ...DEFAULT_LIMITS, maxMergeDepth: 32, maxRebaseCommits: 12 } }));
+  assert.equal(res.outcome, 'rebase'); assert.equal(res.commits, 3); assert.equal(treeOf(r.bare, 'short'), gitTree);
+  // The other side of the same cut: a chain that is over its limit (git counts 10, the limit is 4) on an onto whose
+  // history is cut at maxMergeDepth 16. The base is 11 commits from the tip: inside a merge-base search of 16, past a
+  // branch walk of only maxRebaseCommits + 2 = 6. The branch is walked as deep as that search, so the base is found
+  // and the limit named is the chain's (got = max + 1, the documented one-past), as before the walks were separated.
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main1..long'])), '10');
+  const over = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/long', onto: 'refs/heads/main1', committer }, { ...T(), limits: { ...DEFAULT_LIMITS, maxMergeDepth: 16, maxRebaseCommits: 4 } })).then(() => null, x => x);
+  assert.deepEqual({ code: over?.code, what: over?.what, got: over?.got, max: over?.max }, { code: 'limit_exceeded', what: 'rebase chain', got: 5, max: 4 });
+});
+
+// What a refusal costs in requests where onto's history is deeper than maxMergeDepth, so the onto walk is not whole
+// after one request (as it is in the tests below, whose onto history is two commits): 10,100 linear commits, a
+// 10,001-commit branch on the last of them, onto one commit past it. Bounds by hand, from the walks (both double
+// from 8 to their cap):
+//   the merge-base search alone, what a refusal cost before the chain limit governed it: ls-refs + two walks at each
+//     of the 8 depths 8, 16, ... 1024 = 17
+//   WORKER_LIMITS: the branch walk is max(256 + 2, 1024) = 1024 deep, the same 8 depths: 1 + 8 + 8 = 17, no more
+//   DEFAULT_LIMITS: the branch walk goes on at 2048, 4096, 8192 and 10,002 (12 depths), the onto walk stops at 1024
+//     (8 depths): 1 + 12 + 8 = 21, four more (accepted; README, Limits)
+test('limits: refusing an over-long chain on a deep onto history costs no more requests than the merge-base search under WORKER_LIMITS (17), and 26 under DEFAULT_LIMITS (17 + 9 windows)', async () => {
+  const { DEFAULT_LIMITS, WORKER_LIMITS } = await import('../src/limits.js');
+  const r = repo();
+  const L = []; let at = 1_700_000_000; let mark = 0;
+  const commit = (ref, from, path, body) => { mark++; L.push(`commit ${ref}`, `mark :${mark}`, `committer s <s@x> ${at++} +0000`, 'data 1', 'c', ...(from ? [`from :${from}`] : []), `M 100644 inline ${path}`, `data ${body.length}`, body); return mark; };
+  let base = 0; for (let i = 1; i <= 10_100; i++) base = commit('refs/heads/main', base, 'a.txt', `a${i}`);
+  let prev = base; for (let i = 1; i <= 10_001; i++) prev = commit('refs/heads/long', prev, 'l.txt', `${i}`);
+  commit('refs/heads/main', base, 'm.txt', '1');
+  ok(sh(r.bare, ['fast-import', '--quiet'], `${L.join('\n')}\n`));
+  // git: the chain is 10,001 commits (over both presets' limits), and onto's history is deeper than maxMergeDepth
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main..long'])), '10001');
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main'])), '10101');
+  assert.ok(DEFAULT_LIMITS.maxMergeDepth < 10_101 && WORKER_LIMITS.maxMergeDepth < 10_101);
+  const run = async (limits) => { const c = counting(); const e = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/long', onto: 'refs/heads/main', committer }, { ...T(), fetchImpl: c.fetchImpl, limits })).then(() => null, x => x); return { code: e?.code, what: e?.what, got: e?.got, max: e?.max, requests: c.n }; };
+  // WORKER_LIMITS: the base is 10,002 commits from the tip, past a walk of 1024, and the onto walk is cut, so the
+  // chain is not known to be over 256: the refusal is the merge-base search's, with its fields
+  const w = await run(WORKER_LIMITS);
+  assert.deepEqual({ code: w.code, what: w.what, got: w.got, max: w.max }, { code: 'limit_exceeded', what: 'merge-base search depth', got: 2048, max: 1024 });
+  assert.ok(w.requests <= 17, `WORKER_LIMITS refusal took ${w.requests} requests`);
+  // DEFAULT_LIMITS: the branch walk reaches the base at 10,002 commits; the chain is one over 10,000. Requests, by hand:
+  // the merge-base search to maxMergeDepth 1024 as under WORKER_LIMITS (17), then the branch walk past it in windows
+  // of 1024 from the cut frontier at position 1025 to the base at 10,002: ceil((10002 - 1024) / 1024) = 9; 17 + 9 = 26
+  const d = await run(DEFAULT_LIMITS);
+  assert.deepEqual({ code: d.code, what: d.what, got: d.got, max: d.max }, { code: 'limit_exceeded', what: 'rebase chain', got: 10_001, max: 10_000 });
+  assert.ok(d.requests <= 26, `DEFAULT_LIMITS refusal took ${d.requests} requests`);
+  console.log(`refusing a 10,001-commit chain on a 10,101-commit onto history: WORKER_LIMITS ${w.requests} requests, DEFAULT_LIMITS ${d.requests}`);
+}, 120_000);
+
+// git rebase leaves out a commit whose patch id equals an upstream commit's before it replays anything (its default,
+// --no-reapply-cherry-picks). ply has no patch ids: it replays every commit and drops the ones that come out empty.
+// The two agree while the upstream copy is in place and differ once upstream has reverted it; this pins both, each
+// against the git command it equals, so the day patch ids are ported the second half changes knowingly.
+test('rebase of a commit whose patch is already upstream: dropped as git rebase drops it while the copy stands; after an upstream revert ply is git rebase --reapply-cherry-picks', async () => {
+  const r = repo();
+  commitFiles(r.work, r.bare, { f: 'base\n' }, 'base');
+  const t1 = commitOn(r, 'topic', 'main', { f: 'base\nfeature\n' }, 'T1');
+  ok(sh(r.work, ['push', '-q', r.bare, `${t1}:refs/heads/topic2`]));
+  commitOn(r, 'main', 'main', { g: 'g\n' }, 'unrelated');
+  ok(sh(r.work, ['cherry-pick', t1])); ok(sh(r.work, ['push', '-q', r.bare, 'HEAD:refs/heads/main']));
+  assert.notEqual(ok(sh(r.work, ['rev-parse', 'HEAD'])), t1, 'the upstream copy is another commit, so the branch is not simply behind');
+  const gitRebase = (branch, flags) => { const d = clone(r.bare); ok(sh(d, ['checkout', '-q', branch])); ok(sh(d, ['rebase', '-q', ...flags, 'origin/main'])); const out = { tree: treeOf(d, 'HEAD'), commits: log(d, 'origin/main..HEAD') }; rmSync(d, { recursive: true, force: true }); return out; };
+  // the copy stands: git rewrites nothing and the branch is main
+  const g1 = gitRebase('topic', []); assert.deepEqual(g1.commits, []);
+  const p1 = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/topic', onto: 'refs/heads/main', committer }, T()));
+  assert.equal(p1.outcome, 'rebase'); assert.deepEqual(p1.dropped, [t1]); assert.deepEqual(p1.replayed, []);
+  assert.equal(treeOf(r.bare, 'topic'), g1.tree); assert.deepEqual(log(r.bare, 'main..topic'), g1.commits); assert.equal(p1.oid, ok(sh(r.bare, ['rev-parse', 'main'])));
+  // upstream reverts the copy and moves on
+  ok(sh(r.work, ['revert', '--no-edit', 'HEAD'])); ok(sh(r.work, ['push', '-q', r.bare, 'HEAD:refs/heads/main'])); commitOn(r, 'main', 'main', { h: 'h\n' }, 'later');
+  const gDefault = gitRebase('topic2', []); const gReapply = gitRebase('topic2', ['--reapply-cherry-picks']);
+  assert.deepEqual(gDefault.commits, [], 'git by default: T1 is left out (its patch id is upstream)'); assert.equal(gReapply.commits.length, 1);
+  const p2 = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/topic2', onto: 'refs/heads/main', committer }, T()));
+  assert.deepEqual(p2.dropped, []); assert.deepEqual(p2.replayed.map(x => x.from), [t1]);
+  assert.equal(treeOf(r.bare, 'topic2'), gReapply.tree); assert.deepEqual(log(r.bare, 'main..topic2'), gReapply.commits);
+  assert.notEqual(gReapply.tree, gDefault.tree, 'the known difference from git\'s default (README: rebase)');
+  assert.deepEqual(fsckProblems(r.bare), []);
+});
+
+test('squash message equals the one git rebase -i (pick, squash, squash) writes, byte for byte', async () => {
+  const r = repo();
+  commitFiles(r.work, r.bare, { 'a.txt': 'a\n' }, 'base');
+  commitOn(r, 'feat', 'main', { 'b.txt': 'b\n' }, 'feat 1: subject only');
+  commitOn(r, 'feat', 'feat', { 'c.txt': 'c\n' }, 'feat 2: with a body\n\nfirst paragraph\nsecond line\n\nsecond paragraph');
+  commitOn(r, 'feat', 'feat', { 'd.txt': 'd\n' }, 'feat 3');
+  commitOn(r, 'main', 'main', { 'e.txt': 'e\n' }, 'main moved');
+  // git's answer: squash every commit after the first into it; the editor accepts the prepared message as it is
+  const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'feat']));
+  const rb = spawnSync('git', ['-C', d, 'rebase', '-q', '-i', 'origin/main'], { encoding: 'utf8', env: { ...ENV, GIT_SEQUENCE_EDITOR: 'sed -i.bak -e "2,\\$s/^pick/squash/"', GIT_EDITOR: 'true' } });
+  assert.equal(rb.status, 0, rb.stderr); assert.equal(ok(sh(d, ['rev-list', '--count', 'origin/main..HEAD'])), '1');
+  const body = (cwd, rev) => { const raw = sh(cwd, ['cat-file', 'commit', rev]); assert.equal(raw.status, 0, raw.stderr); return raw.stdout.slice(raw.stdout.indexOf('\n\n') + 2); };
+  const gitMessage = body(d, 'HEAD'); const gitTree = treeOf(d, 'HEAD'); rmSync(d, { recursive: true, force: true });
+  assert.equal(gitMessage, 'feat 1: subject only\n\nfeat 2: with a body\n\nfirst paragraph\nsecond line\n\nsecond paragraph\n\nfeat 3\n', 'what git writes (pinned so a git that words it otherwise is noticed)');
+  const s = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer, squash: true }, T()));
+  assert.equal(s.outcome, 'squash'); assert.equal(body(r.bare, 'feat'), gitMessage); assert.equal(treeOf(r.bare, 'feat'), gitTree);
+});
+
+// A linear branch of `n` commits above a one-commit base, and main moved one commit, by fast-import (commitOn costs
+// four git processes a commit). Each branch commit rewrites one file in a directory, so a replay reads the commit's
+// root tree and that directory's tree.
+const longBranch = (r, n) => {
+  const L = []; let at = 1_700_000_000;
+  const commit = (ref, mark, msg, from, path, body) => [`commit ${ref}`, `mark :${mark}`, `committer s <s@x> ${at++} +0000`, `data ${msg.length}`, msg, ...(from ? [`from :${from}`] : []), `M 100644 inline ${path}`, `data ${body.length}`, body];
+  L.push(...commit('refs/heads/main', 1, 'base', 0, 'a.txt', 'a'));
+  for (let i = 2; i <= n + 1; i++) L.push(...commit('refs/heads/feat', i, `f${i}`, i - 1, 'd/f.txt', `${i}`));
+  L.push(...commit('refs/heads/main', n + 2, 'moved', 1, 'e.txt', 'e'));
+  ok(sh(r.bare, ['fast-import', '--quiet'], `${L.join('\n')}\n`));
+};
+// the transport's requests, counted where they leave: every HTTP request of the operation
+const counting = () => { const c = { n: 0, fetchImpl: (u, i) => { c.n++; return fetch(u, i); } }; return c; };
+
+test('limits: a chain over maxRebaseCommits is refused as the rebase chain (max the limit, got one past it) however far over, at no more requests than the merge-base search cost before; maxMergeDepth still bounds the onto walk', async () => {
+  const { DEFAULT_LIMITS } = await import('../src/limits.js');
+  const r = repo(); longBranch(r, 30);
+  const tip = ok(sh(r.bare, ['rev-parse', 'feat']));
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main..feat'])), '30'); // git: the chain is 30 commits
+  const run = async (limits) => { const c = counting(); const e = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { ...T(), fetchImpl: c.fetchImpl, limits: { ...DEFAULT_LIMITS, ...limits } })).then(() => null, x => x); return { code: e?.code, what: e?.what, got: e?.got, max: e?.max, requests: c.n }; };
+  // ten over the limit, the merge depth below, at and above it: the chain limit is the one named, and max is the
+  // caller's own number. Requests, by hand: ls-refs, the branch walk at 8, 16 and 22 (the limit + 2), and the onto
+  // walk once (main is two commits: whole at the first depth). Before: ls-refs + two walks at each of 8, 16, 22 = 7.
+  for (const maxMergeDepth of [16, 20, 1024]) assert.deepEqual(await run({ maxMergeDepth, maxRebaseCommits: 20 }), { code: 'limit_exceeded', what: 'rebase chain', got: 21, max: 20, requests: 5 }, `maxMergeDepth ${maxMergeDepth}`);
+  // maxMergeDepth 0 allows no merge-base search: refused after ls-refs alone, as mergeBranch is
+  assert.deepEqual(await run({ maxMergeDepth: 0, maxRebaseCommits: 40 }), { code: 'limit_exceeded', what: 'merge-base search depth', got: 1, max: 0, requests: 1 });
+  assert.equal(ok(sh(r.bare, ['rev-parse', 'feat'])), tip, 'a refused rebase leaves the branch');
+});
+
+test('limits: WORKER_LIMITS.maxRebaseCommits, the cheapest shape of chain (every commit changes one file onto did not touch): at the limit the rebase equals git and takes at most 800 requests; one commit over is refused as the rebase chain', async () => {
+  const { WORKER_LIMITS } = await import('../src/limits.js');
+  const N = WORKER_LIMITS.maxRebaseCommits;
+  assert.ok(N <= 800, `WORKER_LIMITS.maxRebaseCommits is ${N}: a replay costs at least one request a commit`);
+  const r = repo(); longBranch(r, N + 1);
+  ok(sh(r.bare, ['update-ref', 'refs/heads/atlimit', 'feat~1']));
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main..atlimit'])), String(N));
+  const over = counting();
+  const e = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { ...T(), fetchImpl: over.fetchImpl, limits: WORKER_LIMITS })).then(() => null, x => x);
+  assert.deepEqual({ code: e?.code, what: e?.what, got: e?.got, max: e?.max }, { code: 'limit_exceeded', what: 'rebase chain', got: N + 1, max: N });
+  // 17: ls-refs + two walks at each of 8 depths (8 … 1024), what the search cost before the chain limit governed it
+  assert.ok(over.n <= 17, `refusing took ${over.n} requests`);
+  // git's answer for the chain at the limit
+  const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'atlimit'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitTree = treeOf(d, 'HEAD'); const gitCount = ok(sh(d, ['rev-list', '--count', 'origin/main..HEAD'])); rmSync(d, { recursive: true, force: true });
+  const at = counting();
+  const res = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/atlimit', onto: 'refs/heads/main', committer }, { ...T(), fetchImpl: at.fetchImpl, limits: WORKER_LIMITS }));
+  assert.equal(res.outcome, 'rebase'); assert.equal(String(res.commits), gitCount); assert.equal(treeOf(r.bare, 'atlimit'), gitTree);
+  // a Worker request may make 1,000 subrequests (standard plan); 800 leaves the caller room for its own
+  assert.ok(at.n <= 800, `a ${N}-commit rebase took ${at.n} requests`);
+  console.log(`WORKER_LIMITS rebase: ${N} commits, ${at.n} requests; refusing ${N + 1}: ${over.n} requests`);
+}, 300_000);
+
+// The windowed branch walk (rebaseBaseOf, capA > 2 * maxMergeDepth) at a size worked by hand: maxMergeDepth 4 and
+// maxRebaseCommits 20 put the branch cap at 22 and the windows at 4 commits. A fast-import graph: `main` is `base`
+// plus `mainLen` commits; `feat` is `n` single-parent commits on `base` (or on a new root when unrelated), with a merge
+// of a side commit at `mergeAt` commits above its foot when given.
+const windowedGraph = (r, { n, mainLen = 1, mergeAt = 0, unrelated = false }) => {
+  const L = []; let at = 1_700_000_000; let mark = 0;
+  const commit = (ref, from, path, body, merge = 0) => { mark++; L.push(`commit ${ref}`, `mark :${mark}`, `committer s <s@x> ${at++} +0000`, 'data 1', 'c', ...(from ? [`from :${from}`] : []), ...(merge ? [`merge :${merge}`] : []), `M 100644 inline ${path}`, `data ${body.length}`, body); return mark; };
+  const base = commit('refs/heads/main', 0, 'a.txt', 'a');
+  let m = base; for (let i = 1; i <= mainLen; i++) m = commit('refs/heads/main', m, 'm.txt', `${i}`);
+  const side = mergeAt ? commit('refs/heads/side', base, 's.txt', 's') : 0;
+  if (unrelated) L.push('reset refs/heads/feat');
+  let f = unrelated ? 0 : base; for (let i = 1; i <= n; i++) f = commit('refs/heads/feat', f, 'f.txt', `${i}`, i === mergeAt ? side : 0);
+  ok(sh(r.bare, ['fast-import', '--quiet'], `${L.join('\n')}\n`));
+};
+const W = { maxMergeDepth: 4, maxRebaseCommits: 20 };
+const windowedRun = async (r, limits, fetchImpl) => {
+  const { DEFAULT_LIMITS } = await import('../src/limits.js');
+  const c = counting(); const f = fetchImpl ? fetchImpl(c) : c.fetchImpl;
+  const e = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { ...T(), fetchImpl: f, limits: { ...DEFAULT_LIMITS, ...limits } })).then(() => null, x => x);
+  return { code: e?.code ?? null, what: e?.what, got: e?.got, max: e?.max, requests: c.n };
+};
+
+test('limits: windowed branch walk, cap reached: onto whole is the rebase chain, onto cut is the merge-base search depth; requests by hand', async () => {
+  // ls-refs 1; the search at depth 8 walks both sides to maxMergeDepth 4 (2); windows of 4 from positions 5, 9, 13,
+  // 17 and 21 (the last cut to capA - 21 + 1 = 2): 5; position 23 is past capA 22. 1 + 2 + 5 = 8.
+  const whole = repo(); windowedGraph(whole, { n: 30 });
+  assert.equal(ok(sh(whole.bare, ['rev-list', '--count', 'main..feat'])), '30');
+  assert.deepEqual(await windowedRun(whole, W), { code: 'limit_exceeded', what: 'rebase chain', got: 21, max: 20, requests: 8 });
+  // onto is base + 10: cut at 4, so the chain is not known to be over; the same 8 requests
+  const cut = repo(); windowedGraph(cut, { n: 30, mainLen: 10 });
+  assert.deepEqual(await windowedRun(cut, W), { code: 'limit_exceeded', what: 'merge-base search depth', got: 8, max: 4, requests: 8 });
+  // a chain of 21 reaches base (in onto) at position 22 = capA: hit, 21 > 20. Windows at 5, 9, 13, 17, 21: 8 requests
+  const over = repo(); windowedGraph(over, { n: 21 });
+  assert.deepEqual(await windowedRun(over, W), { code: 'limit_exceeded', what: 'rebase chain', got: 21, max: 20, requests: 8 });
+}, 60_000);
+
+test('limits: windowed branch walk, a transport error inside a window is the operation\'s error, after the windows before it', async () => {
+  const r = repo(); windowedGraph(r, { n: 30 });
+  // request 1 ls-refs, 2-3 the search, 4 the first window (position 5): it fails
+  const failing = (c) => (u, i) => { c.n++; if (c.n === 4) return Promise.reject(new TypeError('network down')); return fetch(u, i); };
+  const e = await windowedRun(r, W, failing);
+  assert.notEqual(e.code, 'limit_exceeded'); assert.notEqual(e.code, null);
+  assert.equal(e.requests, 4);
+  console.log(`window transport error: ${e.code}`);
+}, 60_000);
+
+test('limits: windowed branch walk, a chain at the limit with its base past maxMergeDepth rebases as git does, at 4 window requests over the unwindowed walk', async () => {
+  const r = repo(); windowedGraph(r, { n: 20 });
+  const tip = ok(sh(r.bare, ['rev-parse', 'feat']));
+  const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'feat'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitTree = treeOf(d, 'HEAD'); rmSync(d, { recursive: true, force: true });
+  // unwindowed (maxMergeDepth 16, capA 22 <= 32): ls-refs, the search at 8 (2), 16 (branch only: main is whole), 22.
+  // windowed: ls-refs, the search at 8 (2), windows at 5, 9, 13, 17 (base hit at 21, held), the search again at 22
+  // (both sides: the onto walk was dropped for the windows): 2. 5 vs 9 before an identical replay: +4.
+  const plain = await windowedRun(r, { maxMergeDepth: 16, maxRebaseCommits: 20 });
+  assert.equal(plain.code, null);
+  ok(sh(r.bare, ['update-ref', 'refs/heads/feat', tip]));
+  const win = await windowedRun(r, W);
+  assert.equal(win.code, null); assert.equal(treeOf(r.bare, 'feat'), gitTree);
+  assert.equal(win.requests, plain.requests + 4);
+  // capA exactly twice maxMergeDepth is not windowed: maxRebaseCommits 6 at maxMergeDepth 4 (capA 8) costs what it
+  // costs at maxMergeDepth 8 (one search round at 8, both walks whole)
+  const six = repo(); windowedGraph(six, { n: 6 });
+  const sixTip = ok(sh(six.bare, ['rev-parse', 'feat']));
+  const at4 = await windowedRun(six, { maxMergeDepth: 4, maxRebaseCommits: 6 });
+  ok(sh(six.bare, ['update-ref', 'refs/heads/feat', sixTip]));
+  const at8 = await windowedRun(six, { maxMergeDepth: 8, maxRebaseCommits: 6 });
+  assert.deepEqual([at4.code, at8.code], [null, null]); assert.equal(at4.requests, at8.requests);
+  console.log(`chain 20 at the limit: unwindowed ${plain.requests} requests, windowed ${win.requests}; chain 6: ${at4.requests}`);
+}, 60_000);
+
+test('limits: windowed branch walk, a chain ending at a merge or a root within capA goes on to the full search', async () => {
+  // a merge 10 commits above base, 20 commits in all: from the tip it is at position 11. Windows at 5 and 9 (9-12
+  // holds it): break; the search resumes at 16 >= 12 (2 walks) and settles at 22 (the branch walk; main is whole),
+  // as the unwindowed search does (ls-refs, 8 (2), 16, 22: 5): 1 + 2 + 2 + 2 + 1 = 8, refused as a non-linear branch
+  const m = repo(); windowedGraph(m, { n: 20, mergeAt: 10 });
+  const mTip = ok(sh(m.bare, ['rev-parse', 'feat']));
+  assert.deepEqual(await windowedRun(m, { maxMergeDepth: 16, maxRebaseCommits: 20 }), { code: 'not_linear', what: undefined, got: undefined, max: undefined, requests: 5 });
+  assert.equal(ok(sh(m.bare, ['rev-parse', 'feat'])), mTip);
+  assert.deepEqual(await windowedRun(m, W), { code: 'not_linear', what: undefined, got: undefined, max: undefined, requests: 8 });
+  // an unrelated branch of 22 commits: its root at position 22 = capA is a break, not a cap. Windows at 5, 9, 13, 17,
+  // 21; the search resumes at 22 (2): 1 + 2 + 5 + 2 = 10, and the answer is the unrelated search's, not a limit
+  const u = repo(); windowedGraph(u, { n: 22, unrelated: true });
+  const got = await windowedRun(u, W);
+  assert.notEqual(got.code, 'limit_exceeded'); assert.equal(got.requests, 10);
+  console.log(`unrelated 22 at capA: ${got.code}`);
+}, 60_000);
