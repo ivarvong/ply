@@ -119,7 +119,8 @@ jobs:
         run: node --import ./test/ts-resolve.mjs test/fuzz/liar.mjs --op mergebase --n 40 --seed 1
 
   fuzz:
-    # Deterministic fuzz, fixed seeds and sizes, in parallel with `test`, so it adds no PR wall time. The deep,
+    # Deterministic fuzz, fixed seeds and sizes, in parallel with the shards and gated by `test`; it finishes before the
+    # slowest shard (154-305 s against 653-760 s on main, Nov 2026), so gating it adds no PR wall time. The deep,
     # date-seeded runs are in nightly.yml. hostile --case 2366521731 is the pinned case npm test also runs.
     # Each command names the .js -> .ts resolve hook (see lint-fuzz).
     name: fuzz
@@ -159,8 +160,8 @@ jobs:
 
   # Cells at or under 16 MiB and 65_536 entries, each in its own process on the default heap and at 128 MiB (workerd
   # cells once, in their own workerd process: workerd is a devDependency).
-  # The full matrix (past those sizes, and the long delta chains) is the nightly job. Not part of the `test` gate:
-  # a sweep failure is its own check, and the vitest shards do not run this file.
+  # The full matrix (past those sizes, and the long delta chains) is the nightly job. `test` gates on it (the vitest
+  # shards do not run this file); it finishes before the slowest shard (160-250 s on main, Nov 2026).
   sweep:
     name: limit sweep
     runs-on: ubuntu-latest
@@ -192,9 +193,8 @@ jobs:
   # require('ply') compared with README Install, under Node 22 and then the same tarball under Node 20 and 24
   # (scripts/pack-check.mjs). On Node 22 it also runs the setup command examples/README.md documents in a fresh export
   # and starts each example. The tarball is uploaded as the artifact `ply-tarball`.
-  # It runs on every pull request and every push to main, and it does not gate: it is not in `test`'s needs, because it
-  # has not yet been seen green on a GitHub runner. The repository owner adds it to `test`'s needs after seeing it green
-  # in the merge train's pull request.
+  # It runs on every pull request and every push to main, and `test` gates on it: a tarball that misses a file, breaks a
+  # subpath export or fails under Node 20 or 24 fails `test`.
   pack:
     name: pack + install
     runs-on: ubuntu-latest
@@ -228,25 +228,29 @@ jobs:
           if-no-files-found: error
 
   # The gate. Its name stays `test` so anything waiting on that check still works. It runs even when a shard fails or
-  # is cancelled (a skipped check would count as passing), and fails unless every shard and lint + fuzz succeeded.
+  # is cancelled (a skipped check would count as passing), and fails unless every shard, lint + fuzz, fuzz, limit sweep
+  # and pack + install succeeded.
   test:
     name: test
-    needs: [test-shard, lint-fuzz]
+    needs: [test-shard, lint-fuzz, fuzz, sweep, pack]
     if: always()
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read # the shards' fail-site records
     steps:
-      - name: every shard succeeded
+      - name: every needed job succeeded
         env:
           SHARDS: ${{ needs.test-shard.result }}
           LINT_FUZZ: ${{ needs.lint-fuzz.result }}
+          FUZZ: ${{ needs.fuzz.result }}
+          SWEEP: ${{ needs.sweep.result }}
+          PACK: ${{ needs.pack.result }}
         run: |
-          if [ "$SHARDS" != success ] || [ "$LINT_FUZZ" != success ]; then
-            echo "test-shard: $SHARDS, lint-fuzz: $LINT_FUZZ"
-            exit 1
-          fi
+          echo "test-shard: $SHARDS, lint-fuzz: $LINT_FUZZ, fuzz: $FUZZ, sweep: $SWEEP, pack: $PACK"
+          for r in "$SHARDS" "$LINT_FUZZ" "$FUZZ" "$SWEEP" "$PACK"; do
+            if [ "$r" != success ]; then exit 1; fi
+          done
       # gate c over every shard's records: each fail site reached by a cell, each merged space's claims reached by it, and
       # every merged CI space's runners recorded on Linux (test/space/failsites.test.js)
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
