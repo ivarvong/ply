@@ -2,6 +2,11 @@
 // single-valued headers and orders commit-tree would not write are illegal here on purpose, and fsck is
 // looser. If ply parses the object, every field git exposes has to match.
 //
+// A rejection is judged too, never by ply: git's own strict object check (hash-object without --literally)
+// either refuses the object as well, or ply is stricter and the object's text has to show one of the rules
+// named in stricterRule below. A rejection git does not share and no named rule explains is a failure, and
+// so is a run in which nothing was accepted (a parser that refuses everything).
+//
 //   node test/fuzz/git-semantic.mjs [--n 20] [--seed 1] [--case <seed>]
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -12,7 +17,6 @@ import { fromHex } from '../../src/sha1.js';
 import { hashObject, parseCommit, parseTag, parseTree, encodeCommit, encodeTag, ident } from '../../src/objects.js';
 import { validateIdent } from '../../src/validate.js';
 import { Rng } from './prng.js';
-import { OID_BYTES } from '../../src/format.js';
 import { unwrap } from '../unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] && !arr[i + 1].startsWith('--') ? arr[i + 1] : true] : []).filter(x => x.length));
@@ -68,6 +72,36 @@ function parseOrThrow(type, data) {
 }
 
 function norm(s) { return (s ?? '').replace(/\n+$/, ''); }
+
+// git's verdict on one object, without storing it: hash-object without --literally runs fsck's per-object
+// checks in strict mode (object-file.c: index_mem → fsck_buffer with FSCK_OPTIONS_STRICT). null when git
+// takes the object, else git's first message.
+function gitRefusal(type, data) {
+  const r = git(dir, ['hash-object', '-t', type, '--stdin'], typeof data === 'string' ? data : Buffer.from(data));
+  return r.code === 0 ? null : (r.err.trim().split('\n')[0] || `exit ${r.code}`);
+}
+
+// The enumerated rules by which ply is stricter than fsck --strict, each read off the object's own text
+// (no ply code). fsck stops reading a commit's headers after `committer` and a tag's after `tagger` (or
+// after `tag` when there is no tagger); what follows is the extra-header region, which fsck does not check.
+//   shadowed-header     a line there starts with a key whose only legal place is the fixed prefix
+//                       (commit: tree, parent, author, committer; tag: object, type, tag, tagger)
+//   duplicate-encoding  a commit carries more than one `encoding` header
+// Continuation lines start with a space and so never match. A tree has no such rule: fsck --strict already
+// refuses everything parseTree refuses.
+// Only called for an object git's strict check accepted, so the fixed prefix is known to be well formed.
+function stricterRule(type, data) {
+  if (type === 'tree') return null;
+  const text = typeof data === 'string' ? data : Buffer.from(data).toString('latin1');
+  const end = text.indexOf('\n\n');
+  const lines = (end < 0 ? text : text.slice(0, end)).split('\n');
+  const from = type === 'commit' ? lines.findIndex(l => l.startsWith('committer ')) + 1 : lines[3]?.startsWith('tagger ') ? 4 : 3;
+  const extra = lines.slice(from);
+  const fixed = type === 'commit' ? ['tree', 'parent', 'author', 'committer'] : ['object', 'type', 'tag', 'tagger'];
+  if (extra.some(l => fixed.some(k => l.startsWith(`${k} `)))) return 'shadowed-header';
+  if (type === 'commit' && extra.filter(l => l.startsWith('encoding ')).length > 1) return 'duplicate-encoding';
+  return null;
+}
 
 function agreeCommit(oid, parsed) {
   const r = git(dir, ['log', '-1', '--no-walk', '--date=raw', '--format=%T%x00%P%x00%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%cd%x00%e%x00%B', oid]);
@@ -205,6 +239,8 @@ if (ONLY !== null) {
 }
 
 const fails = [];
+const tally = { agree: 0, rejectGit: 0, rejectRule: 0 };
+console.log(`git-semantic seed ${SEED} n ${N}`);
 try {
   for (const c of selected) {
     const data = typeof c.data === 'string' ? c.data : c.data;
@@ -214,14 +250,23 @@ try {
       rejected = true;
       if (e.code !== 'pack_corrupt') { fails.push(c.name); console.log(`FAIL ${c.name}: untyped ${e.code}: ${e.message}`); continue; }
     }
-    if (rejected) { console.log(`reject    ${c.name}`); continue; }
+    if (rejected) {
+      const refusal = gitRefusal(c.type, data);
+      const rule = refusal === null ? stricterRule(c.type, data) : null;
+      if (refusal !== null) { tally.rejectGit++; console.log(`reject    ${c.name}  git too: ${refusal}`); }
+      else if (rule !== null) { tally.rejectRule++; console.log(`reject    ${c.name}  ply stricter: ${rule}`); }
+      else { fails.push(c.name); console.log(`FAIL ${c.name}: ply rejected an object git's strict check accepts and no named rule covers (repro: --seed ${SEED} --n ${N} --case ${c.seed ?? c.name})`); }
+      continue;
+    }
     const oid = literally(c.type, data);
     const diff = c.type === 'commit' ? agreeCommit(oid, parsed) : c.type === 'tag' ? agreeTag(oid, parsed) : agreeTree(oid, parsed);
     if (diff) { fails.push(c.name); console.log(`FAIL ${c.name}: ${diff}`); }
-    else console.log(`agree     ${c.name}`);
+    else { tally.agree++; console.log(`agree     ${c.name}`); }
   }
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
-console.log(`\n${selected.length} cases, ${fails.length} failures`);
+// A whole run (no --case) always holds the three legal objects, so zero accepted means ply refused them.
+if (ONLY === null && tally.agree === 0) { fails.push('no-agree'); console.log('FAIL no-agree: ply accepted nothing, the legal commit, tag and tree included'); }
+console.log(`\n${selected.length} cases (seed ${SEED}): ${tally.agree} agree, ${tally.rejectGit} rejected with git, ${tally.rejectRule} rejected by a named stricter rule, ${fails.length} failures`);
 process.exit(fails.length ? 1 : 0);

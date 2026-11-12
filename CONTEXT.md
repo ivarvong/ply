@@ -116,8 +116,13 @@ there, with the reason written down.
 were run against the previous code to confirm they catch it.
 
 **Property tests and fuzzers over random inputs, with seeds and repro commands.** Every fuzzer prints a one-line repro
-(`--seed`, `--case`). `npm test` uses clock seeds for some fuzzers on purpose (discovery — the wanted-tree finding came
-from one); `npm run coverage` pins every seed so the coverage number is reproducible.
+(`--seed`, `--case`). `npm test`'s fuzz stage (`npm run test:fuzz-pinned`, test/fuzz/pinned.mjs) is seeded by constants:
+the same cases every run, each entry printing its seed when it starts and, with a replay command, when it fails or hangs
+past the per-entry timeout. Discovery by a fresh seed (the wanted-tree finding came from a clock seed) runs in the nightly
+workflow only, through `npm run test:fuzz-random`, which prints its seed first; `npm run coverage` pins every seed so
+the coverage number is reproducible. A fuzzer feeds its git oracle from a file, not through `execFileSync`'s `input`
+pipe, and gives the call a timeout: on node 24.18 / macOS under load that pipe call sometimes never returns for a 250 kB
+input (9 of about 36 000 calls with no ply code loaded, 0 of 13 000 from a file), which hung test/fuzz/codec.mjs.
 
 **Measure what is exercised.** Fuzzers report what they reached (coverage buckets, "exercised" counters: union-resolved
 files, merge-attribute conflicts, Myers heuristic splits, mxcost cutoffs), so a green run is known not to be vacuous.
@@ -153,7 +158,11 @@ This session (2026-10-19 → 20):
 
 9. Line-level merging: ported git's xdiff merge (histogram, compaction, `xdl_do_merge`, refinement). Found and fixed:
    rebase replaying against a blob that only existed in the pending push; duplicate objects in a pack ("tried to add
-   buffer twice"); rebase keeping commits that became empty (git: `--empty=drop`); rename naming at targets and a G1 hole.
+   buffer twice"); rebase keeping commits that became empty (git: `--empty=drop`); rename naming at targets and a G1 hole. Later: G1's deleted side is read off the three trees (a both-sides delete in a
+   subtree the sides share, or under a file turned directory, was unseen); the shared subtrees' losses arm G1 only when a
+   side added or removed a path of its own, and the gate reads the smaller set first (the shared subtrees, or the
+   directories one side alone changed), 8 siblings at a time, each tree fetched once (`test/merge-renames.test.js`,
+   counting transport; cost in SAFETY.md).
 10. Version skew: the remaining conservative answers all came from git 2.54's compaction re-diff. Built git master as a
     second oracle; ported classic Myers; made it the `rediff` option (`myers` ≡ git ≥ 2.54, `skip` ≡ older, `undecided`
     = safe for any). Double dissociation measured. Pinned the hash-chain limit (64 merges, 65 → git fails) exactly.
@@ -205,6 +214,24 @@ This session (2026-10-19 → 20):
 
 Requirements: Node ≥ 22, git ≥ 2.43 on PATH, OpenSSH `ssh-keygen` for the signing suites, `workerd` (npm,
 pinned) for the Workers suite (skipped if absent).
+
+Before every push, run the fast gate. It is what CI's `lint + fuzz` job and the registry test reject first:
+types and the ratchets, lint, the space registry (gate a, SPACES.md freshness), and the built `dist` importing
+the way consumers import it (`scripts/dist-check.mjs` builds into a temporary directory and imports `ply` from
+there; your `dist/` is not rewritten, `npm run build` is what writes it). It needs no network. There are no git hooks: running it is the contributor's step,
+and `notify-ply-web` tells ply-web about a commit only after `ci` passed for that commit on main.
+
+```sh
+npm run check             # typecheck + lint + registry test + dist check; run before every push
+```
+
+A ratchet baseline (`scripts/throw-baseline.json`, `scripts/absence-baseline.json`, `test/space/ratchet.json`,
+`test/durations.json`) moves the unsafe way only in a commit whose message has the line
+`Ratchet-Change: <file>: <reason>`. CI's `node scripts/ratchet-guard.mjs` compares each baseline with the base
+commit's and fails without that line; a squash merge must keep the line in its message, or main's own ci run fails.
+`npm run spaces -- --ratchet` only lowers `test/space/ratchet.json`. Adding a hole to it takes
+`npm run spaces -- --ratchet --init --reason "<why>"`, which prints that line; with no reason it exits 1, lists the
+holes it would add and writes nothing.
 
 ```sh
 npm ci

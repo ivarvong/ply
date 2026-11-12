@@ -1,8 +1,9 @@
 // The tree-entry name checks ply had before #207 made them allocation-free (src/validate.ts at c91c9cf, isHfsDot,
 // isNtfsDotGit, isNtfsDot, isDotGitName, isDotFileName, verbatim but for the imports): kept in test/ as the oracle.
 // test/dotnames.test.js and test/fuzz/dotnames.mjs hold src/validate.ts to it byte string by byte string, so a change
-// to the src side cannot pass by changing both sides of the comparison. It is itself held to git by
-// test/space/fsck-tree.test.js (as it was on c91c9cf).
+// to the src side cannot pass by changing both sides of the comparison. No test holds this file to git (it was, on
+// c91c9cf, when it was src): agreement with it is refactor equivalence only. git judges src/validate.ts itself in
+// test/space/fsck-tree.test.js (an enumerated space) and in test/fuzz/dotnames.mjs --stage git (git fsck --strict).
 import { te } from '../../src/bytes.js';
 import { atOr } from '../../src/absent.js';
 

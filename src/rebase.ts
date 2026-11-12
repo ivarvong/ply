@@ -19,7 +19,7 @@ import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
 import type { Option, Result } from './result.js';
 import type { Input } from './absent.js';
 import type { Rediff } from './linemerge.js';
-import type { AttributeSource, Author, Commit, MergeBlob, OpContext, PackObject, Parents, Signer, Transport, TreeCache, Trees } from './merge.js';
+import type { AttributeSource, Author, Commit, MergeBase, MergeBlob, OpContext, PackObject, Parents, Search, Signer, Transport, TreeCache, Trees } from './merge.js';
 import { parseOid, type Oid } from './oid.js';
 import { fail } from './errors.js';
 import { assertNever, err, getOrElse, map, mapOption, none, ok, some } from './result.js';
@@ -27,7 +27,7 @@ import { at, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import { operation } from './operation.js';
-import { mergeBaseOf, mergeTreesOf, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, operationOpts, refOid, NO_TREES } from './merge.js';
+import { ancestors, searchStep, mergeTreesOf, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, operationOpts, refOid, NO_TREES } from './merge.js';
 import { encodeCommitOf, hashObject, ident, TYPE } from './objects.js';
 import { validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
@@ -45,6 +45,151 @@ export function carriedExtra(extra: readonly string[]): string[] {
   const out: string[] = []; let dropping = false;
   for (const l of extra) { if (l.startsWith('gpgsig')) { dropping = true; continue; } if (dropping && l.startsWith(' ')) continue; dropping = false; out.push(l); }
   return out;
+}
+
+// Pure: the default message of a squash, from the replayed commits' messages oldest first: each without its trailing
+// newlines, the empty ones left out, joined by one blank line, ending in one newline. For messages git itself cleaned
+// up (`git commit`), that is the message `git rebase -i` writes for pick, squash, squash, ... byte for byte.
+// A message is written by whoever can push the branch, so the strip is a scan from the end, one step per newline
+// removed: `/\n+$/` retries a run of newlines from each newline in it, which is quadratic in a run that is not last.
+export function squashMessage(messages: ReadonlyArray<string | null>): string {
+  const parts: string[] = [];
+  for (const m of messages) {
+    if (m === null) continue;
+    let end = m.length;
+    while (end > 0 && m.codePointAt(end - 1) === 10) end--;
+    if (end > 0) parts.push(m.slice(0, end));
+  }
+  return `${parts.join('\n\n')}\n`;
+}
+
+// a walk that reached every parent it names: deepening it fetches nothing new
+const whole = (m: ReadonlyMap<Oid, Commit>): boolean => { for (const c of m.values()) for (const p of c.parents) if (!m.has(p)) return false; return true; };
+// Pure: the single-parent commits from `tip` that walk A holds and walk B does not, counted no further than max + 1
+const chainOutside = (A: ReadonlyMap<Oid, Commit>, B: ReadonlyMap<Oid, Commit>, tip: Oid, max: number): number => {
+  let over = 0;
+  let id: Oid = tip;
+  for (let c = mapGet(A, id); c.tag === 'some' && c.value.parents.length === 1 && !B.has(id) && over <= max; over++) { id = getOrElse(at(c.value.parents, 0), id); c = mapGet(A, id); }
+  return over;
+};
+// Pure: a walk's commits as parent lists only, what the windowed branch walk keeps of a window
+const parentsOf = (m: ReadonlyMap<Oid, Commit>): Map<Oid, readonly Oid[]> => { const o = new Map<Oid, readonly Oid[]>(); for (const [k, c] of m) o.set(k, c.parents); return o; };
+// Effect: the single-parent chain from `tip`, counted by position (the tip at 1), through `first` and then windows of
+// at most `window` commits fetched from the frontier, one held at a time as parent lists. It stops at a commit of the
+// onto walk (hit), at a merge or root (break), or past capA commits (cap).
+async function chainWindows(t: Transport, from: { readonly first: Map<Oid, readonly Oid[]>; readonly inOnto: ReadonlySet<Oid>; readonly tip: Oid }, capA: number, window: number): Promise<Result<{ readonly end: 'hit' | 'break' | 'cap'; readonly pos: number }, PlyError>> {
+  const { inOnto, tip } = from;
+  // a window is cleared before the next is fetched (the first one too, which the caller still names): one is live
+  let held = from.first;
+  let id: Oid = tip; let pos = 1;
+  for (;;) {
+    if (inOnto.has(id)) return ok({ end: 'hit', pos });
+    if (pos > capA) return ok({ end: 'cap', pos });
+    const c = mapGet(held, id);
+    if (c.tag === 'none') {
+      held.clear();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each window starts at the last one's frontier
+      const got = await ancestors(t, id, Math.min(window, capA - pos + 1));
+      if (!got.ok) return got;
+      held = parentsOf(got.value); continue;
+    }
+    if (c.value.length !== 1) return ok({ end: 'break', pos });
+    id = getOrElse(at(c.value, 0), id); pos++;
+  }
+}
+// Effect: the merge base of a rebase. Two walks, each under its own limit: the branch walk (from the tip) is the chain
+// walk, to maxRebaseCommits + 2 commits (the base of a chain of n commits is n + 1 from the tip, and one more shows a
+// chain one over the limit) or to maxMergeDepth where that is deeper; the onto walk is the merge-base search, to
+// maxMergeDepth, as mergeBranch's. Both double
+// from 8 to maxMergeDepth; a walk that is whole or at its cap is not fetched again. A branch cap more than twice
+// maxMergeDepth is walked on in windows of maxMergeDepth commits (chainWindows, one held at a time as parent lists),
+// and the search with full commits resumes only where the chain ends within the cap: a refusal under DEFAULT_LIMITS
+// is 17 + 9 window requests (26, test/rebase.test.js). When neither walk can go deeper and the graph is
+// still cut, the chain is known to be over its limit only if the onto walk is whole: every commit it does not hold is
+// then outside onto's history, so more than maxRebaseCommits single-parent commits from the tip are `rebase chain`
+// (got = max + 1: the search stops one past the limit, it does not count the chain). With the onto walk cut, a commit
+// of the branch walk may be an ancestor of onto beyond the cut (a short branch far behind onto looks the same as a
+// long one), and no request is spent to tell: the refusal is `merge-base search depth` against maxMergeDepth, with the
+// fields mergeBaseOf reports (got: twice the depth searched). Every max is a field of the caller's limits.
+type Settled = Exclude<Search<Oid>, { readonly tag: 'searching' }>;
+export async function rebaseBaseOf(t: Transport, tip: Oid, target: Oid): Promise<Result<MergeBase, PlyError>> {
+  const { maxRebaseCommits, maxMergeDepth } = t.limits;
+  const capB = Math.floor(maxMergeDepth);
+  // maxMergeDepth under 1 allows no search, as in mergeBase: refused before any fetch
+  if (capB < 1) return err(limitError('merge-base search depth', 1, maxMergeDepth));
+  // never shallower than the merge-base search (mergeBaseOf walks both sides to maxMergeDepth): a base that search
+  // finds is found here, so a chain over its limit is named wherever it was, and raising maxMergeDepth settles a cut
+  const capA = Math.max(Math.floor(maxRebaseCommits) + 2, capB);
+  const top = Math.max(capA, capB);
+  let A = new Map<Oid, Commit>(); let B = new Map<Oid, Commit>();
+  let atA = 0; let atB = 0;
+  let commits = new Map<Oid, Commit>();
+  // the merge-base search, the branch walk to capOfA; resumable at a depth
+  const search = async (start: number, capOfA: number): Promise<Result<Settled, PlyError>> => {
+    let st: Search<Oid> = { tag: 'searching', depth: start };
+    while (st.tag === 'searching') {
+      const depth: number = st.depth;
+      const wantA = Math.min(depth, capOfA); const wantB = Math.min(depth, capB);
+      const heldA = A; const heldB = B;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each round deepens from what the last one found
+      const [ra, rb] = await Promise.all([
+        wantA === atA || (atA > 0 && whole(heldA)) ? ok(heldA) : ancestors(t, tip, wantA),
+        wantB === atB || (atB > 0 && whole(heldB)) ? ok(heldB) : ancestors(t, target, wantB),
+      ]);
+      if (!ra.ok) return ra;
+      if (!rb.ok) return rb;
+      A = ra.value; B = rb.value; atA = wantA; atB = wantB;
+      commits = new Map([...B, ...A]);
+      st = searchStep(depth, capOfA === capA ? top : Math.max(capOfA, capB), commits, tip, target);
+    }
+    return ok(st);
+  };
+  // A branch cap within one doubling of maxMergeDepth is searched whole, as before (the chain walk holds at most twice
+  // the merge-base search). A deeper one is first walked to maxMergeDepth, as mergeBaseOf: what main holds.
+  const windowed = capA > capB * 2;
+  const first = await search(Math.min(8, top), windowed ? capB : capA);
+  if (!first.ok) return first;
+  let s: Settled = first.value;
+  if (s.tag === 'capped' && windowed) {
+    // Past maxMergeDepth the branch walk holds no more than the merge-base search did: from the cut frontier, in
+    // windows of maxMergeDepth commits (one window held at a time), it keeps the position along the single-parent
+    // chain, the frontier and whether a commit is in the onto walk. The chain's commits are fetched for the replay
+    // only once the base is found within capA.
+    const window = capB;
+    // onto-membership only: the onto walk's commits are dropped for the windows (refetched if the search goes on)
+    const ontoWhole = whole(B);
+    const inOnto: ReadonlySet<Oid> = new Set(B.keys());
+    const firstWindow = parentsOf(A);
+    A = new Map(); B = new Map(); atB = 0; commits = new Map();
+    const walked = await chainWindows(t, { first: firstWindow, inOnto, tip }, capA, window);
+    if (!walked.ok) return walked;
+    const { end, pos } = walked.value;
+    if (end === 'cap') {
+      // capA single-parent commits from the tip, none in the onto walk
+      if (ontoWhole) return err(limitError('rebase chain', Math.floor(maxRebaseCommits) + 1, maxRebaseCommits));
+      return err(limitError('merge-base search depth', capB * 2, maxMergeDepth));
+    }
+    // the chain reaches a commit of the onto walk at pos: a chain of pos - 1, over the limit when pos - 1 > max
+    if (end === 'hit' && pos - 1 > maxRebaseCommits) return err(limitError('rebase chain', Math.floor(maxRebaseCommits) + 1, maxRebaseCommits));
+    // the base within the limit, or a merge or root on the way: the search goes on as it did, with full commits
+    let d = capB; while (d < capA && d < pos + 1) d = Math.min(d * 2, capA);
+    atA = 0;
+    const rest = await search(d, capA);
+    if (!rest.ok) return rest;
+    s = rest.value;
+  }
+  switch (s.tag) {
+    case 'capped': {
+      const over = whole(B) ? chainOutside(A, B, tip, maxRebaseCommits) : 0;
+      if (over > maxRebaseCommits) return err(limitError('rebase chain', over, maxRebaseCommits));
+      return err(limitError('merge-base search depth', capB * 2, maxMergeDepth));
+    }
+    case 'found': return ok({ base: s.base, bases: s.bases, depth: s.depth, commits, verdict: s });
+    case 'criss-cross':
+    case 'unrelated': return ok({ base: null, bases: s.bases, depth: s.depth, commits, verdict: s });
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(s);
 }
 
 export type ChainCommit = Commit & { readonly oid: Oid };
@@ -185,7 +330,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     const target = targetAt.value;
     if (ontoOid.tag === 'some') { const c = await assertCommit(t, ontoOid.value, 'onto'); if (!c.ok) return c; }
     root.set({ 'git.rebase.tip': tip, 'git.rebase.target': target });
-    const found = await mergeBaseOf(t, tip, target);
+    const found = await rebaseBaseOf(t, tip, target);
     if (!found.ok) return found;
     const { bases, commits, verdict } = found.value;
     // several merge bases mean the branch contains a merge of its own (the commit joining the bases is not in onto),
@@ -226,7 +371,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     const last = at(chain, chain.length - 1);
     if (squash && first.tag === 'some' && last.tag === 'some') {
       const authorLine = authorPerson.tag === 'some' ? ident(authorPerson.value) : ok(first.value.author); if (!authorLine.ok) return authorLine;
-      const r = await transplant(t, cache, { base: treeOf(base), ours: targetTree, theirs: last.value.tree }, { parent: target, author: authorLine.value, committer: who, message: message === null ? `${chain.map(c => (c.message === null ? '' : c.message).replace(/\n+$/u, '')).filter(Boolean).join('\n\n')}\n` : message, encoding: null, extra: [] }, signer, out);
+      const r = await transplant(t, cache, { base: treeOf(base), ours: targetTree, theirs: last.value.tree }, { parent: target, author: authorLine.value, committer: who, message: message === null ? squashMessage(chain.map(c => c.message)) : message, encoding: null, extra: [] }, signer, out);
       if (!r.ok) return r;
       const w = r.value;
       if (w.kind === 'conflict') return fail('merge_conflict', `squash of ${short(ref)} onto ${short(onto)} conflicts: ${w.conflicts.slice(0, 8).join(', ')}`, { conflicts: w.conflicts, reasons: w.reasons } as ConflictDetail);

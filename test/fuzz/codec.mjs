@@ -2,7 +2,7 @@
 // inflate and SHA-1, and git's own patch_delta (via `git index-pack --fix-thin` on a one-delta pack) for deltas.
 //   node test/fuzz/codec.mjs [--n 200000] [--seed 1]
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import zlib from 'node:zlib';
@@ -18,6 +18,18 @@ import { unwrap } from '../unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200000', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10);
+// --oracle-timeout-s is a whole number of seconds, 1 or more. To execFileSync a timeout of 0 means none, and a
+// negative or non-numeric one is a RangeError on every oracle call: each is a usage error here, before anything runs.
+const ORACLE_TIMEOUT_S = String(args['oracle-timeout-s'] ?? '120');
+if (!/^\d+$/.test(ORACLE_TIMEOUT_S) || Number(ORACLE_TIMEOUT_S) < 1 || !Number.isSafeInteger(Number(ORACLE_TIMEOUT_S) * 1000)) {
+  console.error(`usage: --oracle-timeout-s takes a whole number of seconds, 1 or more; got ${JSON.stringify(args['oracle-timeout-s'])}`);
+  process.exit(2);
+}
+// The seed is printed on start and in every FAIL line, with the command that replays it: with no --seed it comes
+// from the clock, and a failure nobody can replay is lost. One stream is drawn from the seed, so case #i is the
+// (i+1)th case of `--n <i+1> --seed <seed>`.
+const REPLAY = 'node --import ./test/ts-resolve.mjs test/fuzz/codec.mjs';
+console.log(`codec: seed ${SEED}, n ${N}  replay: ${REPLAY} --n ${N} --seed ${SEED}`);
 const rng = new Rng(SEED);
 const fails = [], counts = {};
 const tick = k => counts[k] = (counts[k] ?? 0) + 1;
@@ -42,7 +54,22 @@ function gen() {
 // a git repo for delta judging: one-delta thin packs against a stored base
 const dir = mkdtempSync(join(tmpdir(), 'gw-codec-'));
 execFileSync('git', ['-C', dir, 'init', '-q']);
-const gitHash = (data) => execFileSync('git', ['-C', dir, 'hash-object', '-w', '--stdin'], { input: data }).toString().trim();
+// The git oracle. Its stdin is a regular file, never a spawnSync `input` pipe: on node v24.18.0 / macOS under load,
+// execFileSync('git', ['hash-object', '-w', '--stdin'], { input }) with a 250 kB input sometimes never returns (node
+// waits in kevent inside SyncProcessRunner, git waits in read(0)). That happens with no ply code loaded (5 of about
+// 27 000 calls, all five at 250 kB), and it hung this fuzzer without judging anything. Every oracle call also has a
+// timeout: a git that does not exit is killed and the case fails saying so, instead of hanging the run.
+const ORACLE_TIMEOUT_MS = Number(ORACLE_TIMEOUT_S) * 1000;
+const feed = `${dir}.stdin`;
+class OracleHang extends Error {}
+function git(args, stdin = null) {
+  let fd = null;
+  if (stdin !== null) { writeFileSync(feed, stdin); fd = openSync(feed, 'r'); }
+  try { return execFileSync('git', ['-C', dir, ...args], { stdio: [fd ?? 'ignore', 'pipe', 'pipe'], timeout: ORACLE_TIMEOUT_MS, killSignal: 'SIGKILL' }); }
+  catch (e) { if (e.code === 'ETIMEDOUT') throw new OracleHang(`oracle did not answer: git ${args.join(' ')} had not exited after ${ORACLE_TIMEOUT_MS / 1000} s and was killed (nothing was judged)`); throw e; }
+  finally { if (fd !== null) closeSync(fd); }
+}
+const gitHash = (data) => git(['hash-object', '-w', '--stdin'], data).toString().trim();
 
 for (let i = 0; i < N; i++) {
   const which = rng.weighted([['inflate', 6], ['sha1', 1], ['delta', 2], ['delta-git', 0.3], ['pkt', 1]]);
@@ -79,10 +106,10 @@ for (let i = 0; i < N; i++) {
         if (which === 'delta-git' && base.length > 0) {
           const baseOid = gitHash(base);
           const { pack } = await buildPack([{ type: 3, data: delta, base: { tag: 'ref', oid: baseOid } }]);
-          try { execFileSync('git', ['-C', dir, 'index-pack', '--fix-thin', '--strict', '--stdin'], { input: pack, stdio: 'pipe' }); }
-          catch (e) { throw new Error(`${name}: git rejected delta (base ${base.length}B off=${off} old=${oldLen} ins=${ins.length} delta=${delta.length}B): ${(e.stderr || '').toString().trim().split('\n').pop()}`); }
+          try { git(['index-pack', '--fix-thin', '--strict', '--stdin'], pack); }
+          catch (e) { if (e instanceof OracleHang) throw e; throw new Error(`${name}: git rejected delta (base ${base.length}B off=${off} old=${oldLen} ins=${ins.length} delta=${delta.length}B): ${(e.stderr || '').toString().trim().split('\n').pop()}`); }
           const targetOid = crypto.createHash('sha1').update(`blob ${target.length}\0`).update(target).digest('hex');
-          const got = execFileSync('git', ['-C', dir, 'cat-file', 'blob', targetOid]);
+          const got = git(['cat-file', 'blob', targetOid]);
           if (!got.equals(Buffer.from(target))) throw new Error(`${name}: git patch_delta produced different bytes`);
           tick('delta.git-judged');
         }
@@ -97,11 +124,11 @@ for (let i = 0; i < N; i++) {
     }
   } catch (e) {
     fails.push({ i, which, seed: SEED, msg: e.message });
-    console.log(`FAIL #${i} ${which}: ${e.message}`);
+    console.log(`FAIL #${i} ${which}: ${e.message}  seed=${SEED}  replay: ${REPLAY} --n ${i + 1} --seed ${SEED}`);
     if (fails.length > 20) break;
   }
   if (i % 20000 === 0 && i) process.stdout.write(`  ${i}/${N} ${((Date.now() - t0) / 1000) | 0}s\n`);
 }
-rmSync(dir, { recursive: true, force: true });
+rmSync(dir, { recursive: true, force: true }); rmSync(feed, { force: true });
 console.log(`\n${N} cases in ${((Date.now() - t0) / 1000) | 0}s, ${fails.length} failures\n` + Object.entries(counts).sort().map(([k, v]) => `${String(v).padStart(7)} ${k}`).join('\n'));
 process.exit(fails.length ? 1 : 0);

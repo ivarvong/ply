@@ -1,27 +1,46 @@
 name: Notify ply-web
 
+# ply-web deploys what this announces, so a commit is announced only after ci judged it green. `push` fired before
+# anything had run: on 2026-11-11 three red commits on main were each dispatched. workflow_run fires when a ci run
+# finishes; the job below sends only for a successful run of a push to this repository's main.
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
 
 # The dispatch uses PLY_WEB_DISPATCH_TOKEN, not GITHUB_TOKEN.
 permissions: {}
 
+# One dispatch at a time per judged commit; a re-run of ci for the same commit queues behind the first.
+concurrency:
+  group: notify-ply-web-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
 jobs:
   dispatch:
+    # head_branch alone is not enough: a pull request from a fork's `main` also has head_branch main. The run must be
+    # a push, in this repository, to main, and it must have succeeded (cancelled, skipped and failure all stay silent).
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-24.04
     steps:
       - name: Dispatch ply-main-updated
         env:
           PLY_WEB_DISPATCH_TOKEN: ${{ secrets.PLY_WEB_DISPATCH_TOKEN }}
-          COMMIT_SHA: ${{ github.sha }}
+          # The commit ci judged. In a workflow_run workflow the default sha context is main's tip when this run
+          # starts, which may be a later commit that nothing has judged yet.
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
+          [[ "${COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::head_sha is not a 40-hex commit id: '${COMMIT_SHA}'"; exit 1; }
           if [ -z "${PLY_WEB_DISPATCH_TOKEN}" ]; then
-            echo "::notice title=ply-web not notified::PLY_WEB_DISPATCH_TOKEN is not set. Add a fine-grained PAT with Contents: Read and write on ivarvong/ply-web. This push did not send repository_dispatch."
+            echo "::notice title=ply-web not notified::PLY_WEB_DISPATCH_TOKEN is not set. Add a fine-grained PAT with Contents: Read and write on ivarvong/ply-web. ci passed for ${COMMIT_SHA} but repository_dispatch was not sent."
             exit 0
           fi
-          # COMMIT_SHA is the commit just pushed. ply-web resolves main itself.
+          # COMMIT_SHA is the commit ci passed. ply-web resolves main itself.
           GH_TOKEN="${PLY_WEB_DISPATCH_TOKEN}" gh api --method POST repos/ivarvong/ply-web/dispatches --input - <<EOF
           {"event_type":"ply-main-updated","client_payload":{"sha":"${COMMIT_SHA}"}}
           EOF
