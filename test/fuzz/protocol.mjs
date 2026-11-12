@@ -15,6 +15,8 @@ import { TYPE_NAME } from '../../src/objects.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10), ONLY = args.case ? parseInt(args.case, 10) : null;
+// The run seed, before any case: a clock-seeded run is replayable only if it says which seed the clock gave (#308).
+console.log(`protocol: seed ${SEED}, n ${N}  replay: node --import ./test/ts-resolve.mjs test/fuzz/protocol.mjs --n ${N} --seed ${SEED}`);
 
 const { root, cleanup } = tmpRoot();
 // capture the real pack-objects invocation through uploadpack.packObjectsHook (honored from protected config only)

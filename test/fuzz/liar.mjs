@@ -30,6 +30,8 @@ import { unwrap } from '../unwrap.js';
 const createTransport = (...a) => unwrap(createTransportR(...a));
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10), ONLY = args.case ? parseInt(args.case, 10) : null;
+// The run seed, before any case: a clock-seeded run is replayable only if it says which seed the clock gave (#308).
+console.log(`liar: seed ${SEED}, n ${N}  replay: node --import ./test/ts-resolve.mjs test/fuzz/liar.mjs --n ${N} --seed ${SEED}`);
 const OP = args.op ?? 'mixed';
 if (!['edit', 'mergebase', 'mixed'].includes(OP)) throw new Error(`--op must be edit, mergebase or mixed, not ${OP}`);
 const CODES = new Set(['pack_corrupt', 'protocol', 'network', 'timeout', 'aborted', 'not_git', 'auth', 'not_found', 'rate_limited', 'upstream_5xx', 'http', 'limit_exceeded', 'remote_error', 'match_count', 'cas_conflict', 'push_rejected', 'bad_request', 'unsupported', 'ambiguous', 'merge_conflict', 'unrelated_histories', 'not_fast_forward']);

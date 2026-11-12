@@ -16,8 +16,11 @@ import { unwrap } from '../unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10);
+// The run seed, before any case: a clock-seeded run is replayable only if it says which seed the clock gave (#308).
+console.log(`packgen: seed ${SEED}, n ${N}  replay: node --import ./test/ts-resolve.mjs test/fuzz/packgen.mjs --n ${N} --seed ${SEED}`);
 const { root, cleanup } = tmpRoot();
 const fails = [], cov = new Map();
+let skipped = 0;
 const bump = k => cov.set(k, (cov.get(k) ?? 0) + 1);
 try {
   for (let i = 0; i < N; i++) {
@@ -34,7 +37,8 @@ try {
     const oldLen = Math.min(blobLen - off, rng.pick([0, 1, 7, 127, 128, 255, 256, rng.int(0, 300)]));
     const insert = Buffer.from(Array.from({ length: rng.pick([0, 1, 126, 127, 128, 254, 255, 256, rng.int(0, 2000)]) }, () => rng.int(0, 255)));
     const target = Buffer.concat([base.subarray(0, off), insert, base.subarray(off + oldLen)]);
-    if (target.equals(base)) { rmSync(work, { recursive: true, force: true }); continue; } // noop edits never reach the pack builder
+    // noop edits never reach the pack builder; the case still says so, under its seed (#308)
+    if (target.equals(base)) { skipped++; process.stdout.write(`skip #${String(i).padStart(3)} seed=${seed} noop edit depth=${depth} blob=${blobLen} off=${off} old=${oldLen} ins=${insert.length}\n`); rmSync(work, { recursive: true, force: true }); continue; }
     // siblings so trees are non-trivial
     const files = { [path]: base };
     for (let k = rng.int(0, 30); k > 0; k--) { const d = rng.int(0, depth - 1); files[[...comps.slice(0, d), 's' + rng.int(0, 9999)].join('/')] = Buffer.from('s'); }
@@ -83,5 +87,5 @@ try {
   }
 } finally { cleanup(); }
 function pktFor(s) { const b = te.encode(s); return concat([te.encode((b.length + 4).toString(16).padStart(4, '0')), b]); }
-console.log(`\n${N} cases, ${fails.length} failures\n` + [...cov.entries()].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0])).map(([k, v]) => `${String(v).padStart(4)} ${k}`).join('\n'));
+console.log(`\n${N - skipped} cases, ${skipped} skipped (noop edit), ${fails.length} failures (seed ${SEED})\n` + [...cov.entries()].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0])).map(([k, v]) => `${String(v).padStart(4)} ${k}`).join('\n'));
 process.exit(fails.length ? 1 : 0);

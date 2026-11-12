@@ -17,6 +17,8 @@ import { unwrapAsync } from '../unwrap.js';
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? process.env.FUZZ_N ?? '60', 10);
 const SEED = parseInt(args.seed ?? process.env.SEED ?? String(Date.now() % 1e9), 10);
+// The run seed, before any case: a clock-seeded run is replayable only if it says which seed the clock gave (#308).
+console.log(`run: seed ${SEED}, n ${N}  replay: node --import ./test/ts-resolve.mjs test/fuzz/run.mjs --n ${N} --seed ${SEED}`);
 const OUT = args.out ?? 'fuzz-out';
 const ONLY = args.case ? parseInt(args.case, 10) : null;
 mkdirSync(OUT, { recursive: true });

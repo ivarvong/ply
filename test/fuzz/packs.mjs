@@ -15,7 +15,7 @@ const N = parseInt(args.n ?? '60', 10), SEED = parseInt(args.seed ?? String(Date
 const { root, cleanup } = tmpRoot();
 const cov = new Map(), fails = [];
 let ran = 0, thinJudged = 0, fullJudged = 0, basesJudged = 0;
-console.log(`packs: seed ${SEED}, n ${N}`);
+console.log(`packs: seed ${SEED}, n ${N}  replay: node --import ./test/ts-resolve.mjs test/fuzz/packs.mjs --n ${N} --seed ${SEED}`);
 try {
   for (let i = 0; i < N; i++) {
     const seed = (SEED * 7919 + i * 104729) >>> 0, rng = new Rng(seed);

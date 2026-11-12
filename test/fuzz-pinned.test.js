@@ -192,10 +192,43 @@ test('every clock-seeded fuzzer, run directly with no --seed, names its seed on 
   const clock = readdirSync(`${ROOT}test/fuzz`).filter(f => f.endsWith('.mjs') && /args\.seed \?\?[^\n]*Date\.now\(\)/.test(readFileSync(`${ROOT}test/fuzz/${f}`, 'utf8'))).map(f => f.slice(0, -4)).sort();
   assert.deepEqual(clock, ['codec', 'hostile', 'liar', 'packgen', 'packs', 'protocol', 'run']);
   for (const name of clock) {
-    const r = direct(name, ['--n', name === 'codec' ? '200' : '2']);
-    assert.match(firstLine(r.stdout), /\bseed[= ]\d+/, `${name} with no --seed: first line names no seed (signal=${r.signal}): ${r.stdout.slice(0, 300)}${r.stderr.slice(0, 300)}`);
+    const n = name === 'codec' ? '200' : '2';
+    const r = direct(name, ['--n', n]);
+    // The run seed by name, not any `seed=`: a case line's seed=<case seed> matched the old /\bseed[= ]\d+/ and hid
+    // that packgen never logged its run seed (#308, CI 43164297129: both cases were noop edits and printed nothing).
+    assert.match(firstLine(r.stdout), new RegExp(`^${name}: seed \\d+, n ${n}\\b`), `${name} with no --seed: first line names no run seed (signal=${r.signal}): ${r.stdout.slice(0, 300)}${r.stderr.slice(0, 300)}`);
   }
 }, 900_000);
+
+// #308: the same rule with no case to lean on. With --n 0 a fuzzer runs no case, so only a run-level line can name
+// the seed: a fuzzer that drops it fails here on every run, not on the 0.57% of clock seeds whose first two packgen
+// cases were noop edits. Run once from the clock and once with --seed 4242; the second line must carry 4242 and the
+// replay command that reproduces the run.
+test('#308 every clock-seeded fuzzer names its run seed and replay before any case (--n 0, clock and --seed)', () => {
+  const clock = readdirSync(`${ROOT}test/fuzz`).filter(f => f.endsWith('.mjs') && /args\.seed \?\?[^\n]*Date\.now\(\)/.test(readFileSync(`${ROOT}test/fuzz/${f}`, 'utf8'))).map(f => f.slice(0, -4)).sort();
+  assert.ok(clock.length >= 7, clock.join(' '));
+  for (const name of clock) {
+    const a = direct(name, ['--n', '0']);
+    assert.equal(a.status, 0, `${name} --n 0: exit ${a.status} signal=${a.signal}: ${a.stdout.slice(0, 300)}${a.stderr.slice(0, 300)}`);
+    assert.match(firstLine(a.stdout), new RegExp(`^${name}: seed \\d+, n 0\\b`), `${name} --n 0 with no --seed: ${a.stdout.slice(0, 300)}`);
+    const b = direct(name, ['--n', '0', '--seed', '4242']);
+    assert.equal(b.status, 0, `${name} --n 0 --seed 4242: exit ${b.status}: ${b.stdout.slice(0, 300)}${b.stderr.slice(0, 300)}`);
+    const line = firstLine(b.stdout);
+    assert.match(line, new RegExp(`^${name}: seed 4242, n 0\\b`), `${name} --seed 4242: ${line}`);
+    assert.ok(line.endsWith(`replay: node --import ./test/ts-resolve.mjs test/fuzz/${name}.mjs --n 0 --seed 4242`), `${name}: ${line}`);
+  }
+}, 300_000);
+
+// #308 pinned: run seed 963345382 draws two noop edits as packgen's first two cases (the CI 43164297129 shape). The
+// run still names its seed first, each skipped case names its case seed, and the summary counts 0 run, 2 skipped.
+test('#308 packgen: a run whose every case is a noop edit still names its seed and counts the skips', () => {
+  const r = direct('packgen', ['--n', '2', '--seed', '963345382']);
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+  const lines = r.stdout.split('\n').filter(l => l.trim() !== '');
+  assert.match(lines[0], /^packgen: seed 963345382, n 2 {2}replay: node --import \.\/test\/ts-resolve\.mjs test\/fuzz\/packgen\.mjs --n 2 --seed 963345382$/);
+  assert.equal(lines.filter(l => /^skip #\s*\d+ seed=\d+ noop edit /.test(l)).length, 2, r.stdout);
+  assert.ok(lines.includes('0 cases, 2 skipped (noop edit), 0 failures (seed 963345382)'), r.stdout);
+}, 60_000);
 
 test('codec: the seed it prints is the seed it ran, a replay with it draws the same cases', () => {
   const a = direct('codec', ['--n', '200']);
