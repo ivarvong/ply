@@ -311,6 +311,30 @@ test('filesFromDir/pushDir (Node): exec bit, symlinks as 120000, nested dirs, .g
 // (NFD) stays decomposed on APFS; `git add` under the configuration `git init` writes there (core.precomposeunicode =
 // true, compat/precompose_utf8.c) records it precomposed. The oracle is git on a copy of the same directory with no
 // global or system configuration: its ls-files names and its write-tree. Nothing expected comes from ply.
+// README "Your own code failing": a pushDir / filesFromDir filter that throws is bad_request, what: 'filter', the thrown
+// value as cause; the walk precedes any request, so it is definite and git's ref does not move.
+test('filesFromDir/pushDir: a filter that throws is bad_request naming filter, cause the thrown value, no request, ref unmoved', async () => {
+  const r = emptyRepo();
+  const work = join(root, `${r.name}-w`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  commitFiles(work, r.bare, { 'a.txt': 'a\n' });
+  const before = git(r.bare, ['rev-parse', 'refs/heads/main']).trim();
+  const src = join(root, `${r.name}-src`); mkdirSync(join(src, 'sub'), { recursive: true });
+  writeFileSync(join(src, 'keep.txt'), 'k\n'); writeFileSync(join(src, 'sub', 'x.txt'), 'x\n');
+  // throws on the second path it is shown (sub, after keep.txt in sorted order), so it is not the first call alone
+  const thrown = new Error('filter boom'); let calls = 0;
+  const filter = () => { calls++; if (calls === 2) throw thrown; return true; };
+  const walked = await filesFromDir(src, { filter });
+  assert.equal(walked.ok, false);
+  assert.deepEqual([walked.error.code, walked.error.what, walked.error.cause === thrown, walked.error.message], ['bad_request', 'filter', true, 'caller-supplied filter threw: filter boom']);
+  calls = 0;
+  const { c, f } = counting();
+  const pushed = await pushDir(r.url, { dir: src, filter, author: A, message: 'dir' }, { fetchImpl: f });
+  assert.equal(pushed.ok, false);
+  assert.deepEqual([pushed.error.code, pushed.error.what, pushed.error.cause === thrown], ['bad_request', 'filter', true]);
+  assert.deepEqual(c, { 'git-upload-pack': 0, 'git-receive-pack': 0 }, 'no request');
+  assert.equal(git(r.bare, ['rev-parse', 'refs/heads/main']).trim(), before, 'git: the ref did not move');
+});
+
 test.skipIf(process.platform !== 'darwin')('filesFromDir/pushDir on macOS [darwin only]: a decomposed (NFD) name is recorded as git add records it (precomposed)', async () => {
   const src = join(root, `nfd${n++}`);
   // Latin e + combining acute, a decomposed directory holding a decomposed file, Hangul jamo, kana + combining dakuten
