@@ -544,13 +544,26 @@ export const spAttrs = (st: SpState, prefix = 'git.pack'): Attrs => ({ [`${prefi
 // computed hash, and the other commits and trees are harvested into `t.objects` (bounded by limits.maxHarvestBytes):
 // the next tree:0 fetch of any of them is answered locally. Spans: `git.fetch.filter.fallback`, `git.fetch.wide.*`.
 // The phrases a server uses when it refuses a fetch filter. Cloudflare Artifacts (observed 2026-10-23) is HTTP 400
-// plus the first one. One regex, shared: ply-web used to keep a copy of it next to the cache.
-const FILTER_REFUSAL = /only blob:none is supported|unsupported (git )?fetch filter|filter .* not (supported|allowed)/i;
+// plus the first one; git's upload-pack says "filter '<spec>' not supported" (upload-pack.c). One predicate, shared:
+// ply-web used to keep a copy of it next to the cache. The text is remote, so it is read in linear time. A single
+// `filter .* not` restarts its run at every "filter " (quadratic, ply#274); here each "filter " takes the rest of its
+// line once, the global exec resumes after it, and one fixed-phrase test (a bounded number of steps at each start)
+// reads that rest. The first "filter " on a line takes the longest rest, so a later one on the same line could find
+// nothing it did not. Same flags as before (/i, no /u): the same case fold.
+const FILTER_PHRASE = /only blob:none is supported|unsupported (git )?fetch filter/i;
+const FILTER_REST = /filter ([^\n\r\u2028\u2029]*)/gi;
+const FILTER_NOT = / not (supported|allowed)/i;
+const isFilterPhrase = (text: string): boolean => {
+  if (FILTER_PHRASE.test(text)) return true;
+  FILTER_REST.lastIndex = 0; // shared /g: every call starts at the beginning, whatever an earlier return left
+  for (let m = FILTER_REST.exec(text); m !== null; m = FILTER_REST.exec(text)) if (FILTER_NOT.test(atOr(m, 1, ''))) return true;
+  return false;
+};
 // oxlint-disable-next-line no-magic-numbers -- RFC 9110 Bad Request: Artifacts' refusal, and the only status this predicate accepts
 const FILTER_REFUSAL_STATUS = 400;
 // A raw upload-pack answer (the HTTP status and the body, or the text an error quoted from it). Status is part of the
 // answer: a 500 that happens to contain the phrase is not a filter refusal.
-export const isFilterRefusal = (status: number, text: string): boolean => status === FILTER_REFUSAL_STATUS && FILTER_REFUSAL.test(text);
+export const isFilterRefusal = (status: number, text: string): boolean => status === FILTER_REFUSAL_STATUS && isFilterPhrase(text);
 // A thrown value is not a PlyError until it is: message may be no string, and `status` is only on an http error.
 export const isFilterRejection = (e: unknown): boolean => {
   const code = getOrElse(thrownCode(e), null);

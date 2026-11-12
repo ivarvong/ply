@@ -205,7 +205,7 @@ export function readConfig(text: string): Map<string, string> {
       section = sub.tag === 'some' ? `${getOrElse(at(head, 1), '').toLowerCase()}.${sub.value}` : getOrElse(at(head, 1), '').toLowerCase();
       continue;
     }
-    const kv = /^([A-Za-z][\w-]*)\s*(=\s*(.*))?$/u.exec(line);
+    const kv = /^([A-Za-z][\w-]*)\s*(=\s*(\S[^\n\r\u2028\u2029]*|))?$/u.exec(line);
     if (kv !== null && section !== '') out.set(`${section}.${getOrElse(at(kv, 1), '').toLowerCase()}`, getOrElse(at(kv, 3), 'true').trim());
   }
   return out;
