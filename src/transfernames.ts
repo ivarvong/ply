@@ -37,3 +37,15 @@ export function isOptionOid(o: unknown): boolean {
   return tag === 'none' || (tag === 'some' && isOid(Reflect.get(o, 'value')));
 }
 export const isList = (v: unknown): boolean => Array.isArray(v);
+
+// A temp ref's last segment: the plan's key, a SHA-1 in lowercase hex (sha1Hex), so the shape of an id.
+export const isTempKey = (s: string): boolean => parseOid(s).ok;
+// The prefix a sweep may delete under: `root` (refs/ply/transfer/) or a namespace below it, whole segments ending in '/', each
+// one git would push. Anything else (refs/, refs/heads/, a name without its '/', a sibling namespace) is not ply's.
+export function sweepPrefix(prefix: unknown, root: string): Result<string, PlyError> {
+  const refuse = (why: string): Result<string, PlyError> => fail('bad_request', `sweepTransfers: prefix ${JSON.stringify(prefix)} ${why}`, { what: 'prefix' });
+  if (typeof prefix !== 'string') return refuse('is not a string');
+  if (!prefix.startsWith(root) || !prefix.endsWith('/')) return refuse(`is not ${root} or a namespace ending in '/' below it`);
+  // Stryker disable next-line BooleanLiteral: every prefix reaching here starts with root (refs/ply/transfer/), so the name has a '/' and deleting's only effect (allowing a slashless name) never applies
+  return validatePushRef(`${prefix}${'0'.repeat(40)}`, false).ok ? ok(prefix) : refuse('is not a ref namespace git would push');
+}

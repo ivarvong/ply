@@ -12,7 +12,8 @@
 //     at a step: an edited plan, another pack, other resolved ids, other commit bytes, a step not in the plan; at
 //     status: the ref already at another commit, a temp ref the plan never writes; a step that never lands
 //   - the commit policy (signatures dropped, other headers kept) and the deterministic ids
-//   - sweepTransfers removes what an abandoned transfer left, keeping what it is told to
+//   - sweepTransfers removes what an abandoned transfer left, keeping what it is told to; any prefix but ply's own
+//     temp-ref namespace is refused before a request, and only names of a temp ref's shape are deleted (#298)
 //   - the plan's types: batch steps carry their temp commit, the final step none; prev is an Option; refs are refused
 //     unless git would push them; a plan read back with a malformed step, id or ref is refused
 //   - ls-refs that lags a push (a host that acknowledges before its reads show it): settled by reading the refs again,
@@ -387,6 +388,60 @@ test('sweepTransfers: removes an abandoned transfer\'s temp ref, keeps what it i
   assert.deepEqual(must(await sweepTransfers(t, { keep: [plan.tempRef] })), []);
   assert.deepEqual(must(await sweepTransfers(t)), [plan.tempRef]);
   assert.equal(git(bare, ['for-each-ref', 'refs/ply']).trim(), '');
+});
+
+// #298: a sweep deletes only refs ply's transfers create: names of the shape refs/ply/transfer/<40 hex key> (README
+// 'Resumable transfer'), so any other prefix is refused before a request and a near miss is never matched by text.
+test('sweepTransfers: a prefix outside refs/ply/transfer/ is bad_request before any request; only temp refs go', async () => {
+  const from = await spooled(src.packs.ref);
+  const plan = must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit }));
+  let requests = 0;
+  const { bare, t } = repo({ fetchImpl: (...a) => { requests++; return globalThis.fetch(...a); } });
+  must(await runTransfer(t, from, plan, src.commit, { maxSteps: 2, ref: REF }));
+  const tip = git(bare, ['rev-parse', plan.tempRef]).trim();
+  // refs no transfer made: a branch, a tag, a sibling namespace, a near-miss name, a deeper name under the prefix
+  const others = ['refs/heads/main', 'refs/tags/v1', 'refs/ply/transfer-old/x', 'refs/ply/transferx', `refs/ply/transfer/${'0'.repeat(39)}`, 'refs/ply/transfer/sub/x',
+    // 40 characters that are not a lowercase-hex oid (git's object names are lowercase hex): not a temp key
+    `refs/ply/transfer/${'A'.repeat(40)}`, `refs/ply/transfer/${'g'.repeat(40)}`];
+  for (const r of others) git(bare, ['update-ref', r, tip]);
+  const listing = () => git(bare, ['for-each-ref', '--format=%(refname)']).trim().split('\n').sort();
+  const before = listing();
+  requests = 0;
+  for (const prefix of ['', 'refs/', 'refs/heads/', 'refs/tags/', 'refs/ply/transfer', 'refs/ply/transfer-old/', 'refs/ply/', 'refs/ply/transfer/../', 'refs/heads/ply/transfer/', 'refs/ply/transfer/sub', 42, {},
+    // ends in refs/ply/transfer/ but does not start with it: a branch namespace, not ply's
+    'refs/heads/refs/ply/transfer/']) {
+    const r = await sweepTransfers(t, { prefix });
+    assert.equal(r.ok, false, `prefix ${JSON.stringify(prefix)} is refused`);
+    assert.equal(r.error.code, 'bad_request', JSON.stringify(prefix));
+    assert.equal(r.error.what, 'prefix', JSON.stringify(prefix));
+  }
+  // the reason is caller-visible: one prefix per arm (not a string; outside the root or without '/'; a name git would not push)
+  const why = async prefix => { const r = await sweepTransfers(t, { prefix }); assert.equal(r.ok, false); return r.error.message; };
+  assert.match(await why(42), /^sweepTransfers: prefix 42 is not a string$/);
+  assert.match(await why('refs/heads/'), /^sweepTransfers: prefix "refs\/heads\/" is not refs\/ply\/transfer\/ or a namespace ending in '\/' below it$/);
+  assert.match(await why('refs/ply/transfer/../'), /^sweepTransfers: prefix "refs\/ply\/transfer\/\.\.\/" is not a ref namespace git would push$/);
+  assert.equal(requests, 0, 'no refusal made a request');
+  assert.deepEqual(listing(), before, 'git: every ref is still there after the refusals');
+  assert.deepEqual(must(await sweepTransfers(t, { prefix: 'refs/ply/transfer/' })), [plan.tempRef]);
+  assert.deepEqual(listing(), before.filter(r => r !== plan.tempRef), 'git: only the temp ref is gone');
+});
+
+// #298: README 'Resumable transfer': prefix may be refs/ply/transfer/ "or a namespace below it ending in /".
+test('sweepTransfers: a nested namespace below refs/ply/transfer/ is swept; only its temp ref goes', async () => {
+  const tempPrefix = 'refs/ply/transfer/sub/';
+  const from = await spooled(src.packs.ref);
+  const plan = must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit, tempPrefix }));
+  assert.ok(plan.tempRef.startsWith(tempPrefix));
+  const { bare, t } = repo();
+  must(await runTransfer(t, from, plan, src.commit, { maxSteps: 2, ref: REF, tempPrefix }));
+  const tip = git(bare, ['rev-parse', plan.tempRef]).trim();
+  // a root-level temp-shaped ref and a branch: outside the nested namespace, so kept
+  for (const r of ['refs/heads/keep', `refs/ply/transfer/${'1'.repeat(40)}`]) git(bare, ['update-ref', r, tip]);
+  const listing = () => git(bare, ['for-each-ref', '--format=%(refname)']).trim().split('\n').sort();
+  const before = listing();
+  assert.ok(before.includes(plan.tempRef));
+  assert.deepEqual(must(await sweepTransfers(t, { prefix: tempPrefix })), [plan.tempRef]);
+  assert.deepEqual(listing(), before.filter(r => r !== plan.tempRef), 'git: only the nested temp ref is gone');
 });
 
 test('the plan: a tagged step per batch, prev an Option, refs git would push; a malformed plan read back is refused', async () => {
