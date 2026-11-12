@@ -157,9 +157,14 @@ async function sendStep(dst: Transport, span: Span, { from, plan, step, commit }
   span.set({ 'git.transfer.batch.bytes': subset.value.length, 'git.transfer.batch.objects': subset.value.count });
   const commands = commandsOf(plan, s);
   const sent = await pushPackOutcome(dst, { commands, pack: subset.value.stream, length: subset.value.length, atomic: commands.length > 1 && plan.atomic });
-  // pushPack says no push request was made (refused here, or the advertisement was not read): the failure as it is
-  if (!sent.requested) return sent.result;
-  return ok({ pushed: sent.result.ok ? ok({ step }) : sent.result });
+  switch (sent.sent) {
+    // no push request reached receive-pack (refused here, the advertisement not read, or the body never pulled): the
+    // failure as it is, no settle, not counted (README, Resumable transfer)
+    case 'no': return sent.result;
+    case 'yes': return ok({ pushed: sent.result.ok ? ok({ step }) : sent.result });
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(sent);
 }
 
 // One push: step `step` of `plan` (checked, and held to the pack: planFitsPack), its entries read from `from.source`. `commit` is the source commit's bytes (the

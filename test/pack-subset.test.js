@@ -542,7 +542,7 @@ test('pushPack over a source that stalls mid-range: an abort returns an outcome,
   const pushed = pushPackChecked(t, { ref: REF, oldOid: ZERO_OID, newOid: packs.head, pack: built.stream, length: built.length, sideband: false });
   await src.parked;
   ac.abort(new Error('caller gave up'));
-  const r = await pushed;
+  const { result: r } = await pushed;
   // the request was under way with part of the pack sent: what the server did with it is not known to the client
   assert.equal(r.ok, false);
   assert.equal(r.error.code, 'ambiguous', r.error.message);
@@ -567,7 +567,7 @@ test('pushPack round trip: a reordered subset pushed to git http-backend lands, 
   const name = `push${n++}`;
   const bare = makeBareRepo(root, name);
   const t = unwrap(createTransport(`${srv.url}/${name}.git`));
-  const r = await pushPackChecked(t, { ref: REF, oldOid: ZERO_OID, newOid: packs.head, pack: built.stream, length: built.length, sideband: false });
+  const { result: r } = await pushPackChecked(t, { ref: REF, oldOid: ZERO_OID, newOid: packs.head, pack: built.stream, length: built.length, sideband: false });
   assert.equal(r.ok, true, r.ok ? '' : r.error.message);
   assert.equal(git(bare, ['rev-parse', REF]).trim(), packs.head);
   assert.deepEqual(fsckProblems(bare, { args: ['--strict'] }), []);
