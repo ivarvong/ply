@@ -337,6 +337,46 @@ object whose `message` getter or `toString` throws, a revoked Proxy) still ends 
 `a value with no string form` and whose `cause` is the value. Telemetry callbacks are different: they never change the
 outcome at all (see `onTelemetryError`).
 
+### `operation()`: your body's outcomes
+
+**Breaking change since #277.** `operation(op, url, opts, body)` never passes a throw from `body` (or from any
+callback reached from it) through to you, and never rejects. What you get back depends only on what was thrown and on
+whether a push request had been handed to the transport (the first `t.frames()` call for a service other than
+`git-upload-pack`) when it was thrown:
+
+| `body` … | before the push request was handed over | after |
+| --- | --- | --- |
+| throws a value that is not a `PlyError` | `bad_request`, `what: 'callback'`, `cause` the thrown value | `ambiguous`, `what: 'callback'`, `cause` the thrown value |
+| throws a `PlyError` | that `PlyError`, as itself | `ambiguous`, `what: 'callback'`, `cause` the thrown error, its code in `original` (a thrown `ambiguous` is itself) |
+| returns a `Result` | that `Result`, as it is | that `Result`, as it is |
+
+So a callback's own throw is treated as a failure, never as an answer: a definite `cas_conflict` you learned and then
+threw after the push is reported `ambiguous`. Return expected outcomes as values, a discriminated union inside the
+`Ok` (the pattern ply-web adopted in ivarvong/ply-web#153):
+
+```ts
+type Bump = { tag: 'bumped'; commit: string } | { tag: 'conflict'; reason: 'ref_exists' | 'stale_expected' };
+const r = await operation<Bump>('bump', url, opts, async ({ t, root, outcome }) => {
+  // … read refs over t …
+  if (exists) return outcome('conflict', { tag: 'conflict', reason: 'ref_exists' });
+  // … push over t …
+  return outcome('ok', { tag: 'bumped', commit });
+});
+if (!r.ok) return status(r.error);                 // ply's failure, or your crash (what: 'callback')
+if (r.value.tag === 'conflict') return conflict409(r.value.reason);
+```
+
+`test/operation-callback-contract.test.js` pins each row.
+
+### Upgrading from 0de5ad4-era releases
+
+Before #277 a value thrown from an `operation()` body reached the caller unchanged, so some consumers threw their own
+errors through it for control flow (ply-web's `ref_exists` and `stale_expected` 409s). Those now arrive as
+`bad_request` (`what: 'callback'`, your value in `error.cause`), or as `ambiguous` when thrown after the push request
+was handed over; nothing fails to compile and nothing throws, the answer just changes. Return them as values instead
+(above). Reading `error.cause` of a `what: 'callback'` Err works as a stopgap before the hand-over, but after it the
+code is `ambiguous` and the ref may have moved.
+
 Credentials: `auth: { token, user? }` (Basic `<user>:<token>`, user defaulting to `x-access-token`, sent as UTF-8 bytes as git sends a credential helper's), `{ bearer }`, or `{ header }` (an Authorization value forwarded verbatim; it and a bearer token must be printable ASCII). An `auth` that would send nothing is `bad_request`: `{}`, an empty token with no user, and `{ user }` alone (git's credential API asks for the password there; `{ user, token: '' }` sends Basic `<user>:`, the `https://<user>@host` form). Without `auth`, userinfo in the URL is sent as git sends it, byte for byte (percent-decoded): `https://user:pass@host/…` is Basic `user:pass`, a token as the user (`https://<token>@host/…`, the GitHub and GitLab form) is Basic `<token>:`, `https://:pass@host/…` is `:pass`; a NUL, CR or LF in it, or a URL that does not parse, is `bad_request` before any request. `createTransport` (and every operation given a URL) requests only `http:` and `https:` URLs, and the rule is applied to the URL that will be requested, in this order: the URL must parse, its userinfo must be clean (`what: 'url userinfo'`), then your `allowUrl` runs on the base, then the scheme is checked, and only then are `auth` and `limits` validated. A base that is not http(s) given together with an invalid `auth` or an invalid limit therefore reports `what: 'url'`, where the same options on an http(s) base report `what: 'auth'` or the limit's name (`what: 'requestTimeoutMs'`); both are `bad_request`, and before the scheme rule such a base reported the `auth` or the limit. So a base in a scheme of your own that `allowUrl` maps to `https:` is accepted, an `allowUrl` that refuses returns your own error, an `allowUrl` that answers with a URL that is not http(s) is `bad_request` (`what: 'allowUrl'`), and without an `allowUrl` a base that is not http(s) (`file:`, `data:`, `ssh:`, `git:`, …) is `bad_request` (`what: 'url'`, a fixed message that never repeats the URL) with no request made; before, such a base was accepted and failed later as a `network` error from `fetch`. None reaches a span, a URL attribute or an error message, even when a server echoes it (the Basic user too, when it is token-shaped or the whole credential). By default redirects are never followed: a 3xx is an `http` error naming the target, so no credential can follow it to another origin. `followRedirects: 'initial'` is git's `http.followRedirects=initial`: only the first GET info/refs is followed (up to `maxRedirects`, each `Location` through your `allowUrl`), the base is rewritten, and a cross-origin rebase drops the credential. How that exchange settled (the followed `Location`s, or none) is remembered per remote and service, like the quirks record, so a later transport for the same remote sends its first POST straight to the settled base with no GET; the remembered `Location`s go through that transport's own `allowUrl` and `maxRedirects` again, and a 3xx on that base drops the memo, settles over the network and re-sends a byte body once (a streamed body gets the error). `forgetQuirks(url)` forgets it too.
 
 Outcomes are typed on `r.error.code`: `cas_conflict` (retry), `match_count` (find ≠ exactly once), `not_found`, `auth`, `rate_limited`, `pack_corrupt`, `remote_error`, `upstream_5xx`. A `find === replace` edit returns `{ noop: true }` and pushes nothing.

@@ -33,6 +33,7 @@ const MUTATION_FILES = [
   'test/packindex.test.js',
   'test/space/push-outcome.test.js',
   'test/result.test.js',
+  'test/operation-callback-contract.test.js',
   'test/option.test.js',
   'test/version-refname.test.js',
   'test/uprequest.test.js',

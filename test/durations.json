@@ -64,6 +64,7 @@
   "test/mutate-plan.test.js": 1,
   "test/no-filter.test.js": 13,
   "test/oid.test.js": 0,
+  "test/operation-callback-contract.test.js": 1,
   "test/option.test.js": 0,
   "test/oracle.test.js": 3,
   "test/otel-ended.test.js": 0,
