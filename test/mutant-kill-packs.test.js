@@ -3,13 +3,18 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { take, shortRead, encodeBytes, HEXV, te, concat, decodeBytes as decodeBytesOf, decodeChunk as decodeChunkOf } from '../src/bytes.js';
 import { pkt, pktStep, pktFinish, pktInit } from '../src/pktline.js';
 import { inflate, DEFLATE_TABLES } from '../src/inflate.js';
 import { readObjHeader, readOfsDelta, readUint32BE, parsePack, applyDelta, resolvePack, makeDelta } from '../src/packresolve.js';
 import { buildPack, encodeObjHeader, spliceDelta } from '../src/pack.js';
-import { fromHex, toHex } from '../src/sha1.js';
+import { fromHex, toHex, Sha1 } from '../src/sha1.js';
+import { scanPackIndex } from '../src/packscanindex.js';
+import { resolvePackRange, NO_BASE } from '../src/packrangeresolve.js';
+import { rangeFromBytes } from '../src/rangesource.js';
+import { git, gitBuf, tmpRoot } from './server.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
 import { PACK_HEADER_BYTES, OBJ_CONTINUE } from '../src/format.js';
@@ -639,4 +644,107 @@ test('loadTransferPack: unparseable scan.limits are bad_request, saved index or 
     assert.match(bad.error.message, /limits\.maxPackObjects/u);
   }
   assert.equal(unwrap(await loadTransferPack(t, rangeFromBytes(pack), some(first.saved))).loaded.tag, 'saved');
+});
+
+// ---- #299: a base id's REF run is applied once, and only a run that exists is marked done ----
+// Packs built by hand (gitformat-pack); identity deltas (source 6, result 6, copy 0..6) so every delta's id is its base's.
+const r299 = {
+  cat: ps => { const o = new Uint8Array(ps.reduce((a, p) => a + p.length, 0)); let at = 0; for (const p of ps) { o.set(p, at); at += p.length; } return o; },
+  hdr(type, size) { const out = []; let b = (type << 4) | (size & 15); size = Math.floor(size / 16); while (size > 0) { out.push(b | 0x80); b = size & 0x7f; size = Math.floor(size / 128); } out.push(b); return Uint8Array.from(out); },
+  ofs(d) { const out = [d & 127]; d = Math.floor(d / 128); while (d > 0) { d -= 1; out.unshift(128 | (d & 127)); d = Math.floor(d / 128); } return Uint8Array.from(out); },
+  // entries: { blob } | { ofs: index } | { ref: oid bytes }
+  build(entries) {
+    const delta = zlib.deflateSync(Uint8Array.of(6, 6, 0x90, 6));
+    const parts = []; const pos = []; let at = PACK_HEADER_BYTES;
+    for (const e of entries) {
+      pos.push(at);
+      const p = e.blob ? r299.cat([r299.hdr(3, e.blob.length), zlib.deflateSync(e.blob)]) : e.ofs !== undefined ? r299.cat([r299.hdr(6, 4), r299.ofs(at - pos[e.ofs]), delta]) : r299.cat([r299.hdr(7, 4), e.ref, delta]);
+      parts.push(p); at += p.length;
+    }
+    const c = entries.length;
+    const body = r299.cat([Uint8Array.of(0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, (c >>> 24) & 255, (c >>> 16) & 255, (c >>> 8) & 255, c & 255), ...parts]);
+    return r299.cat([body, fromHex(new Sha1().update(body).hex())]);
+  },
+  async resolve(pack, opts) {
+    const idx = await scanPackIndex(new ReadableStream({ start(c) { c.enqueue(pack); c.close(); } }));
+    assert.ok(idx.ok);
+    return resolvePackRange(idx.value, rangeFromBytes(pack), opts);
+  },
+};
+
+test('#299: an OFS base with no REF run of its own leaves the next id\'s REF run alone (mixed pack, as git index-pack reads it)', async () => {
+  // blob a, an OFS delta on a, blob b, a REF delta on b, with id(a) < id(b): a's REF lookup lands on b's run, which a has
+  // no part in. Marking that run done from a refuses b's delta as unresolved.
+  let a = te.encode('aaaaa\n'); let b = te.encode('bbbbb\n');
+  if (hashObject('blob', a) > hashObject('blob', b)) [a, b] = [b, a];
+  const pack = r299.build([{ blob: a }, { ofs: 0 }, { blob: b }, { ref: fromHex(hashObject('blob', b)) }]);
+  const { root, cleanup } = tmpRoot();
+  try {
+    const repo = join(root, 'r.git');
+    git(root, ['init', '-q', '--bare', repo]);
+    const file = join(repo, 'objects', 'pack', 'pack-mixed.pack');
+    writeFileSync(file, pack);
+    git(repo, ['index-pack', file]);
+    const byOffset = gitBuf(repo, ['show-index'], readFileSync(file.replace(/\.pack$/u, '.idx'))).toString().trim().split('\n').map(l => l.split(' ')).toSorted((x, y) => Number(x[0]) - Number(y[0]));
+    const r = await r299.resolve(pack);
+    assert.ok(r.ok, r.ok ? '' : r.error.message);
+    assert.equal(r.value.count, 4);
+    for (let i = 0; i < 4; i++) assert.equal(r.value.oid(i).value, byOffset[i][1], `entry ${i}`);
+    // by hand: entry 1 rests on entry 0, entry 3 on entry 2, both one deep
+    assert.deepEqual([...r.value.columns.base], [NO_BASE, 0, NO_BASE, 2]);
+    assert.deepEqual([...r.value.columns.depth], [0, 1, 0, 1]);
+  } finally {
+    cleanup();
+  }
+});
+
+test('#299: a REF run already applied is not applied again from a later holder of its id (work pinned by hand)', async () => {
+  // blob B, k OFS identity deltas on B each with one OFS identity child, then m REF identity deltas on B's id. Every OFS
+  // result has B's id and children, so each is a parent whose REF lookup finds B's run; applying it again would visit the m
+  // REF deltas once per such parent. By hand: B inflated (6); each of the 2k + m deltas inflated (4), applied (6) and
+  // visited once (1).
+  const B = te.encode('hello\n');
+  const k = 100; const m = 100;
+  const es = [{ blob: B }];
+  for (let i = 0; i < k; i++) { es.push({ ofs: 0 }); es.push({ ofs: es.length - 1 }); }
+  for (let i = 0; i < m; i++) es.push({ ref: fromHex(hashObject('blob', B)) });
+  const r = await r299.resolve(r299.build(es));
+  assert.ok(r.ok, r.ok ? '' : r.error.message);
+  assert.equal(r.value.stats.work, 11 * (2 * k + m) + 6);
+});
+
+test('#299: a second holder of an id whose REF run is applied is not made again (reads and work pinned by hand)', async () => {
+  // blob B, the same blob B again, then one REF identity delta on B's id. The run rests on the first B; the second B has
+  // nothing left to give, so it is never read back. By hand: reads = the first B and the delta (2), no cache hit, work =
+  // B inflated (6) + the delta inflated (4), applied (6) and visited (1) = 17.
+  const B = te.encode('hello\n');
+  const r = await r299.resolve(r299.build([{ blob: B }, { blob: B }, { ref: fromHex(hashObject('blob', B)) }]));
+  assert.ok(r.ok, r.ok ? '' : r.error.message);
+  assert.deepEqual([r.value.stats.reads, r.value.stats.readBytes > 0, r.value.stats.cacheHits, r.value.stats.work], [2, true, 0, 17]);
+  assert.deepEqual([r.value.columns.base[2], r.value.columns.depth[2]], [0, 1]);
+});
+
+test('#299: the visit charge refuses at the visit, before the delta is read (got pinned by hand)', async () => {
+  // ceiling 6 = the blob: blob inflated (6), then its one child visited (1) = 7 > 6. Were the visit's refusal dropped, the
+  // delta's inflate would refuse instead, at 6 + 1 + 4 = 11.
+  const B = te.encode('hello\n');
+  const r = await r299.resolve(r299.build([{ blob: B }, { ref: fromHex(hashObject('blob', B)) }]), { limits: withLimits({ maxInflatedTotal: 6, maxResolveWork: 6 }) });
+  assert.equal(r.ok, false);
+  assert.deepEqual([r.error.code, r.error.what, r.error.got], ['limit_exceeded', 'resolve work bytes', 7]);
+});
+
+test('#299: a whole object whose REF lookup is empty is not made again (an id just below another\'s run; reads and work pinned by hand)', async () => {
+  // blob X with nothing resting on it, blob B, one REF identity delta on B, with id(X) < id(B). The scan hashes both
+  // blobs, so each root is made again only if it has kids. X's REF lookup is the empty range [0, 0) just below B's run at
+  // index 0: X has no kids, and reading index 0's done flag there would wrongly give it B's. By hand, head: B made again
+  // (1 read, 1 rebuilt, 6 inflated), the delta read (1 read, 4 inflated), applied (6) and visited (1): reads 2, inflated
+  // 10, rebuilt 1, work 6 + 4 + 6 + 1 = 17. Were X taken to have kids, X is made again too: reads 3, inflated 16,
+  // rebuilt 2, work 23.
+  let X = te.encode('xxxxx\n'); let B = te.encode('hello\n');
+  if (hashObject('blob', X) > hashObject('blob', B)) [X, B] = [B, X];
+  const r = await r299.resolve(r299.build([{ blob: X }, { blob: B }, { ref: fromHex(hashObject('blob', B)) }]));
+  assert.ok(r.ok, r.ok ? '' : r.error.message);
+  const st = r.value.stats;
+  assert.deepEqual([st.reads, st.inflated, st.rebuilt, st.work], [2, 10, 1, 17]);
+  assert.deepEqual([r.value.columns.base[2], r.value.columns.depth[2]], [1, 1]);
 });
