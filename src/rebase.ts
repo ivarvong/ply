@@ -101,7 +101,10 @@ async function chainWindows(t: Transport, from: { readonly first: Map<Oid, reado
 // walk, to maxRebaseCommits + 2 commits (the base of a chain of n commits is n + 1 from the tip, and one more shows a
 // chain one over the limit) or to maxMergeDepth where that is deeper; the onto walk is the merge-base search, to
 // maxMergeDepth, as mergeBranch's. Both double
-// from 8; a walk that is whole or at its cap is not fetched again. When neither walk can go deeper and the graph is
+// from 8 to maxMergeDepth; a walk that is whole or at its cap is not fetched again. A branch cap more than twice
+// maxMergeDepth is walked on in windows of maxMergeDepth commits (chainWindows, one held at a time as parent lists),
+// and the search with full commits resumes only where the chain ends within the cap: a refusal under DEFAULT_LIMITS
+// is 17 + 9 window requests (26, test/rebase.test.js). When neither walk can go deeper and the graph is
 // still cut, the chain is known to be over its limit only if the onto walk is whole: every commit it does not hold is
 // then outside onto's history, so more than maxRebaseCommits single-parent commits from the tip are `rebase chain`
 // (got = max + 1: the search stops one past the limit, it does not count the chain). With the onto walk cut, a commit
