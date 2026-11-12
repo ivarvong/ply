@@ -373,7 +373,7 @@ for (const kind of ['native', 'deaf']) {
     const t = transport('https://h/r', { fetchImpl: async () => reportResponse() });
     const pushed = pushPackChecked(t, packPush(src.stream, null));
     assert.equal(await settledWithin(pushed), 'settled', 'pushPack with the report in hand');
-    const r = await pushed;
+    const { result: r } = await pushed;
     // the server's report is `unpack ok`, `ok refs/heads/main` (reportResponse): by the protocol the push landed
     assert.equal(r.ok, true, r.error?.message);
     assert.equal(src.state.cancelled, 1, 'the source is asked to cancel, once');
@@ -388,7 +388,7 @@ for (const kind of ['native', 'deaf']) {
     ac.abort(new Error('caller gave up'));
     assert.equal(await settledWithin(pushed), 'settled', 'the abort ends it');
     // request bytes were on the wire and no report came back: what the server did is not known to the client
-    assertAmbiguous(await pushed, 'aborted');
+    assertAmbiguous((await pushed).result, 'aborted');
     assert.equal(src.state.cancelled, 1, 'the source is asked to cancel, once');
   });
 
@@ -404,7 +404,7 @@ for (const kind of ['native', 'deaf']) {
       assert.equal(await settledWithin(pushed, 20), 'pending', 'one millisecond short of limits.idleTimeoutMs');
       await vi.advanceTimersByTimeAsync(1);
       assert.equal(await settledWithin(pushed), 'settled', 'limits.idleTimeoutMs ends it');
-      const r = await pushed;
+      const { result: r } = await pushed;
       assertAmbiguous(r, 'timeout');
       assert.match(r.error.message, /1000 ms \(limits\.idleTimeoutMs\)/);
       assert.equal(src.state.cancelled, 1, 'the source is asked to cancel, once');
@@ -458,7 +458,7 @@ test('push options: refused when not advertised, sent when they are', async () =
   const checked = unwrap(checkPushCaps(new Set(['report-status', 'push-options', 'object-format=sha1']), { pushOptions: ['ci.skip'] }));
   let body = null;
   const fetchImpl = routed(async init => { const chunks = []; const reader = init.body.getReader(); for (;;) { const c = await reader.read(); if (c.done) break; chunks.push(c.value); } body = concat(chunks); return reportResponse(); });
-  const sent = await pushPackChecked(transport(url, { fetchImpl }), { ...create(), pack: streamOf(new Uint8Array([1, 2, 3])).stream, checked, sideband: false });
+  const { result: sent } = await pushPackChecked(transport(url, { fetchImpl }), { ...create(), pack: streamOf(new Uint8Array([1, 2, 3])).stream, checked, sideband: false });
   assert.equal(sent.ok, true, sent.error?.message);
   const text = new TextDecoder('latin1').decode(body);
   assert.ok(text.includes('000cci.skip\n0000'), text.slice(0, 300));
@@ -492,7 +492,7 @@ test('refusals with nothing read: a missing, locked or non-stream pack; objects;
   }
   const badRef = await pushPack(t, { ref: 'not a ref', oldOid: ZERO_OID, newOid: source.oid, pack: stream() });
   assert.equal(badRef.error.code, 'bad_request');
-  const noWants = await pushPackChecked(t, { ...create(), pack: stream(), atomic: true });
+  const { result: noWants } = await pushPackChecked(t, { ...create(), pack: stream(), atomic: true });
   assert.equal(noWants.error.code, 'bad_request', 'unchecked atomic is refused, not dropped');
 });
 
@@ -548,4 +548,74 @@ test('a transport that rejects without reading the body and pulls it afterwards 
   assert.equal(tipOf(bare), null);
   const first = await stream.getReader().read();
   assert.deepEqual([...first.value], [...source.pack.slice(0, 4096)]);
+});
+
+// #272: the outcome says whether receive-pack got a request. README (pushPack, Resumable transfer): a refusal, a fired
+// signal and a fetch that rejects before pulling the body send nothing; from the first pull the request went out.
+test('pushPackChecked says whether the request was sent: not for a refusal, a fired signal or an unpulled body; yes from the first pull', async () => {
+  const { url } = repo();
+  const stream = () => streamOf(source.pack).stream;
+  const unpulled = routed(async () => { throw new TypeError('connect failed'); });
+  const pulled = routed(async init => { await init.body.getReader().read(); throw new TypeError('network gone'); });
+  const fired = new AbortController(); fired.abort();
+  const cases = [
+    ['refused', transport(url), { ...create(), pack: stream(), length: -1 }, 'no', 'bad_request'],
+    ['signal fired', transport(url, { signal: fired.signal }), { ...create(), pack: stream() }, 'no', 'aborted'],
+    ['body never pulled', transport(url, { fetchImpl: unpulled }), { ...create(), pack: stream() }, 'no', 'network'],
+    ['lost after the first pull', transport(url, { fetchImpl: pulled }), { ...create(), pack: stream() }, 'yes', 'ambiguous'],
+    ['landed', transport(url), { ...create(), pack: stream() }, 'yes', null],
+  ];
+  for (const [what, t, opts, sent, code] of cases) {
+    const o = await pushPackChecked(t, { ...opts, sideband: false });
+    assert.equal(o.sent, sent, what);
+    assert.equal(o.result.ok ? null : o.result.error.code, code, what);
+  }
+});
+
+// #272: a failed pushPack's error is its git.receive-pack span's error (OTel semconv: status ERROR = code 2, OK = 1;
+// error.type, an 'exception' event), whether or not the body was pulled; a landed push's span is not an error.
+test('pushPackChecked records the outcome\'s error on its git.receive-pack span, sent or not', async () => {
+  const { url } = repo();
+  const unpulled = routed(async () => { throw new TypeError('connect failed'); });
+  const pulled = routed(async init => { await init.body.getReader().read(); throw new TypeError('network gone'); });
+  const cases = [
+    ['body never pulled', unpulled, 'network'],
+    ['lost after the first pull', pulled, 'ambiguous'],
+    ['landed', undefined, null],
+  ];
+  for (const [what, fetchImpl, code] of cases) {
+    const ex = arrayExporter();
+    const o = await pushPackChecked(transport(url, { fetchImpl, tracer: new Tracer({ exporter: ex }) }), { ...create(), pack: streamOf(source.pack).stream, sideband: false });
+    assert.equal(o.result.ok ? null : o.result.error.code, code, what);
+    const spans = ex.lines.flatMap(flattenLine).filter(s => s.name === 'git.receive-pack');
+    assert.equal(spans.length, 1, what);
+    const [span] = spans;
+    const exceptions = span.events.filter(e => e.name === 'exception');
+    assert.deepEqual(
+      { status: span.status.code, type: span.attrs['error.type'] ?? null, exceptions: exceptions.length },
+      code === null ? { status: 1, type: null, exceptions: 0 } : { status: 2, type: code, exceptions: 1 },
+      what,
+    );
+  }
+});
+
+// #272: a raise (a tracer or transport the caller handed in that throws) is 'protocol' and counts as sent: nothing says
+// the body was not pulled, so runTransfer settles it rather than treat a request that may have reached git as unsent.
+test('pushPackChecked: a raise is protocol and sent, before the first pull or after it', async () => {
+  const { url } = repo();
+  const raising = when => {
+    const tracer = new Tracer();
+    const start = tracer.start.bind(tracer);
+    tracer.start = (name, options) => {
+      if (when === 'start' && name === 'git.receive-pack') throw new TypeError('tracer raised');
+      const span = start(name, options);
+      if (when === 'set') { const set = span.set.bind(span); span.set = attrs => { if ('git.push.pack.bytes' in attrs) throw new TypeError('span raised'); return set(attrs); }; }
+      return span;
+    };
+    return tracer;
+  };
+  for (const when of ['start', 'set']) {
+    const o = await pushPackChecked(transport(url, { tracer: raising(when) }), { ...create(), pack: streamOf(source.pack).stream, sideband: false });
+    assert.deepEqual({ sent: o.sent, code: o.result.ok ? null : o.result.error.code }, { sent: 'yes', code: 'protocol' }, when);
+  }
 });

@@ -40,6 +40,6 @@ globalThis.gc(); globalThis.gc();
 const base = process.memoryUsage();
 let peak = base.arrayBuffers, samples = 0;
 const timer = setInterval(() => { globalThis.gc(); samples++; peak = Math.max(peak, process.memoryUsage().arrayBuffers); }, 50);
-const r = await pushPackChecked(t, { ref: REF, oldOid: ZERO_OID, newOid: 'a'.repeat(40), pack, length: c * count, sideband: false });
+const { result: r } = await pushPackChecked(t, { ref: REF, oldOid: ZERO_OID, newOid: 'a'.repeat(40), pack, length: c * count, sideband: false });
 clearInterval(timer);
 process.stdout.write(`${JSON.stringify({ ok: r.ok, error: r.ok ? null : r.error.message, packBytes: r.ok ? r.value.packBytes : null, bytesSeen, samples, liveDelta: peak - base.arrayBuffers })}\n`);
