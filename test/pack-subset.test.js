@@ -542,7 +542,7 @@ test('pushPack over a source that stalls mid-range: an abort returns an outcome,
   const pushed = pushPackChecked(t, { ref: REF, oldOid: ZERO_OID, newOid: packs.head, pack: built.stream, length: built.length, sideband: false });
   await src.parked;
   ac.abort(new Error('caller gave up'));
-  const r = await pushed;
+  const { result: r } = await pushed;
   // the request was under way with part of the pack sent: what the server did with it is not known to the client
   assert.equal(r.ok, false);
   assert.equal(r.error.code, 'ambiguous', r.error.message);

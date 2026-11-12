@@ -373,7 +373,7 @@ for (const kind of ['native', 'deaf']) {
     const t = transport('https://h/r', { fetchImpl: async () => reportResponse() });
     const pushed = pushPackChecked(t, packPush(src.stream, null));
     assert.equal(await settledWithin(pushed), 'settled', 'pushPack with the report in hand');
-    const r = await pushed;
+    const { result: r } = await pushed;
     // the server's report is `unpack ok`, `ok refs/heads/main` (reportResponse): by the protocol the push landed
     assert.equal(r.ok, true, r.error?.message);
     assert.equal(src.state.cancelled, 1, 'the source is asked to cancel, once');
@@ -388,7 +388,7 @@ for (const kind of ['native', 'deaf']) {
     ac.abort(new Error('caller gave up'));
     assert.equal(await settledWithin(pushed), 'settled', 'the abort ends it');
     // request bytes were on the wire and no report came back: what the server did is not known to the client
-    assertAmbiguous(await pushed, 'aborted');
+    assertAmbiguous((await pushed).result, 'aborted');
     assert.equal(src.state.cancelled, 1, 'the source is asked to cancel, once');
   });
 
@@ -404,7 +404,7 @@ for (const kind of ['native', 'deaf']) {
       assert.equal(await settledWithin(pushed, 20), 'pending', 'one millisecond short of limits.idleTimeoutMs');
       await vi.advanceTimersByTimeAsync(1);
       assert.equal(await settledWithin(pushed), 'settled', 'limits.idleTimeoutMs ends it');
-      const r = await pushed;
+      const { result: r } = await pushed;
       assertAmbiguous(r, 'timeout');
       assert.match(r.error.message, /1000 ms \(limits\.idleTimeoutMs\)/);
       assert.equal(src.state.cancelled, 1, 'the source is asked to cancel, once');
