@@ -17,7 +17,8 @@
 // Memory: one base + one pinned result + one result + one delta's instructions + the LRU, at most
 // max(maxObjectSize, maxDeltaResult) + 3 x maxDeltaResult + cacheBytes, whatever the pack's size, depth or shape.
 //
-// Work (bytes inflated from the source + bytes of delta results produced) is bounded by what the pack declares, not by
+// Work (bytes inflated from the source + bytes of delta results produced + one per child a base's deltas are looked at
+// for) is bounded by what the pack declares, not by
 // its compressed size (delta-compressed history is legitimately hundreds of times its pack). The floor is every member
 // inflated once (the scan's sizes) plus every delta applied once (its header's result size, capped by maxDeltaResult).
 // A work budget allows LIMIT_RESOLVE_FACTOR x the floor reached so far (the factor is the room for rebuilds), never
@@ -174,6 +175,8 @@ type State = {
   // REF deltas in order of their base id: refEntry[k]'s base id is refOid[k * 20 ..]
   readonly refEntry: Int32Array;
   readonly refOid: Uint8Array;
+  // refDone[lo] = 1 once the REF run starting at lo (one base id) has been applied
+  readonly refDone: Uint8Array;
   // a delta resting on a thin base: thinOf[i] is that base's index in thinOids
   readonly thinOf: Int32Array;
   thinOids: Uint8Array;
@@ -351,14 +354,20 @@ function refRange(s: State, ids: Uint8Array, at: number): readonly [number, numb
     if (oidCompare(s.refOid, mid * OID_BYTES, ids, at) < 0) lo = mid + 1;
     else hi = mid;
   }
+  // the run's end by a second binary search, not a walk: m deltas on one base would walk the run m times (#299)
   let end = lo;
-  while (end < m && oidCompare(s.refOid, end * OID_BYTES, ids, at) === 0) end += 1;
+  hi = m;
+  while (end < hi) {
+    const mid = (end + hi) >>> 1;
+    if (oidCompare(s.refOid, mid * OID_BYTES, ids, at) <= 0) end = mid + 1;
+    else hi = mid;
+  }
   return [lo, end];
 }
 function hasKids(s: State, i: number): boolean {
   if ((s.ofsStart[i + 1] as number) > (s.ofsStart[i] as number)) return true;
   const [lo, hi] = refRange(s, s.oid, i * OID_BYTES);
-  return hi > lo;
+  return hi > lo && s.refDone[lo] === 0;
 }
 
 // A base whose deltas are being applied: its entry (THIN_BASE for a thin base), type, depth, bytes, and its id at
@@ -370,9 +379,18 @@ async function resolveKids(s: State, p: Parent, stack: number[]): Promise<PlyErr
   const kids: number[] = [];
   if (p.index >= 0) for (let k = s.ofsStart[p.index] as number; k < (s.ofsStart[p.index + 1] as number); k++) kids.push(s.ofsKids[k] as number);
   const [lo, hi] = refRange(s, p.ids, p.idAt);
-  for (let k = lo; k < hi; k++) kids.push(s.refEntry[k] as number);
+  // A base id's REF run is applied once: every delta in it rests on whichever entry holding that id comes first, so a
+  // second holder (a duplicate, or a delta whose result is its base's own bytes) finds nothing to do (#299).
+  if (hi > lo && s.refDone[lo] === 0) {
+    s.refDone[lo] = 1;
+    for (let k = lo; k < hi; k++) kids.push(s.refEntry[k] as number);
+  }
   const depth = p.depth + 1;
   for (const c of kids) {
+    // every child looked at is charged: the work counts the visits as well as the bytes, so a shape that visits a delta
+    // more than a constant number of times is refused by the budget, not resolved slowly
+    const visited = charge(s, 1);
+    if (visited !== null) return visited;
     if (s.known[c] === 1) continue;
     if (depth > s.maxChain) return limitExceeded('delta chain depth', depth, s.maxChain);
     // oxlint-disable-next-line no-await-in-loop -- each child is applied in turn against the one base held
@@ -462,7 +480,7 @@ function setup(pack: ScannedPack, source: RangeSource, opts: ResolveRangeOpts, c
   return {
     pack, source, bases: opts.bases, halt, n, ...caps, floor: cols.size.reduce((a, b) => a + b, 0), work: 0, pin: null, oid, known,
     type: new Uint8Array(n), base: new Int32Array(n).fill(NO_BASE), depth: new Int32Array(n), size: Float64Array.from(pack.columns.size), ofsStart, ofsKids,
-    refEntry, refOid, thinOf: new Int32Array(n).fill(-1), thinOids: new Uint8Array(0), thinCount: 0,
+    refEntry, refOid, refDone: new Uint8Array(refs), thinOf: new Int32Array(n).fill(-1), thinOids: new Uint8Array(0), thinCount: 0,
     cache: { map: new Map(), bytes: 0, cap: opts.cacheBytes },
     stats: { inflated: 0, applied: 0, reads: 0, readBytes: 0, cacheHits: 0, rebuilt: 0, thinBases: 0 },
   };

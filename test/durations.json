@@ -72,6 +72,7 @@
   "test/pack-plan.test.js": 2,
   "test/pack-range-resolve-bound.test.js": 32,
   "test/pack-range-resolve-honest.test.js": 5,
+  "test/pack-range-resolve-shared.test.js": 2,
   "test/pack-range-resolve.test.js": 4,
   "test/pack-resolve-linear.test.js": 4,
   "test/pack-saved.test.js": 2,
