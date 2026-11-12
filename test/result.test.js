@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { ok, err, map, mapErr, andThen, match, matchKind, matchOption, assertNever, errorKind, errorKindAttr, some, none, isSome, isNone, resultToOption, optionToResult, transposeResultOption, transposeOptionResult } from '../src/result.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { fail, plyError, isPlyCode, retryPolicy, isRetryable, CODES, RETRY } from '../src/errors.js';
-import { checkLimit, parseLimits, limitsOf, lowered, limitExceeded, limitError, DEFAULT_LIMITS, WORKER_LIMITS } from '../src/limits.js';
+import { checkLimit, parseLimits, limitsOf, lowered, limitExceeded, limitError, withLimits, DEFAULT_LIMITS, WORKER_LIMITS } from '../src/limits.js';
 import { unwrap } from './unwrap.js';
 
 test('Result: ok/err shapes, map/mapErr/andThen short-circuit, match dispatches on code, assertNever throws', () => {
@@ -143,6 +143,16 @@ test('limits: checkLimit/parseLimits accept exactly the finite non-negative numb
   // left out, maxResolveWork is derived: by hand, 8 x maxInflatedTotal (256 MiB by default, 1 MiB given) = 2,147,483,648 and 8,388,608
   assert.equal(unwrap(parseLimits({})).maxResolveWork, 2_147_483_648);
   assert.equal(unwrap(parseLimits({ maxInflatedTotal: 1_048_576 })).maxResolveWork, 8_388_608);
+  // derived, it is never below maxInflatedTotal, so a record that leaves maxResolveWork out is never refused for it.
+  // By hand: the cap on 8 x is 2^53 - 1 = 9,007,199,254,740,991 (about 9.007e15). 1e18 is above the cap, so its derived
+  // value is 1e18 itself (main gave the cap, 9.007e15, which is below 1e18); Number.MAX_VALUE (8 x it is Infinity) is
+  // itself too. 2^50 x 8 = 2^53, one past the cap, and 2^50 is below the cap: derived is the cap, 9,007,199,254,740,991.
+  assert.equal(unwrap(parseLimits({ maxInflatedTotal: 1e18 })).maxResolveWork, 1e18);
+  assert.equal(unwrap(parseLimits({ maxInflatedTotal: Number.MAX_VALUE })).maxResolveWork, Number.MAX_VALUE);
+  assert.equal(unwrap(parseLimits({ maxInflatedTotal: 2 ** 50 })).maxResolveWork, 9_007_199_254_740_991);
+  assert.equal(unwrap(parseLimits(withLimits({ maxInflatedTotal: 1e18 }))).maxResolveWork, 1e18);
+  // withLimits does not bring the null sentinel back (#271): null is a value there too, refused by parseLimits
+  assert.deepEqual(shape(parseLimits(withLimits({ maxResolveWork: null }))), bad('maxResolveWork', null));
   // the refusal names maxResolveWork and quotes the bound it fell under (the README Limits contract)
   const below = (got, total) => ({ ok: false, error: { code: 'bad_request', message: `limits.maxResolveWork must be at least limits.maxInflatedTotal (${total})`, what: 'maxResolveWork', got } });
   // #271: maxResolveWork below the record's own maxInflatedTotal bounds nothing the resolver would keep; refused, not raised

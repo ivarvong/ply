@@ -305,8 +305,9 @@ export const WORKER_LIMITS: CheckedLimits = grant({
 /* oxlint-enable no-magic-numbers */
 
 // A caller's overrides on top of the defaults, as a plain record: it is checked where it enters (parseLimits).
-// maxResolveWork left out follows the record's own maxInflatedTotal (resolveWorkOf), as in parseLimits.
-const resolveWorkOf = (maxInflatedTotal: number): number => Math.min(Number.MAX_SAFE_INTEGER, maxInflatedTotal * LIMIT_RESOLVE_TOTALS);
+// maxResolveWork left out follows the record's own maxInflatedTotal (resolveWorkOf), as in parseLimits: 8 x it, capped
+// at MAX_SAFE_INTEGER but never below maxInflatedTotal itself, so a derived value always meets parseLimits' bound.
+const resolveWorkOf = (maxInflatedTotal: number): number => Math.max(maxInflatedTotal, Math.min(Number.MAX_SAFE_INTEGER, maxInflatedTotal * LIMIT_RESOLVE_TOTALS));
 export const withLimits = (o: Partial<Limits> = {}): Limits => {
   // null from an untyped caller is no overrides, as the missing value is: the frozen defaults, not a throw
   const given = getOrElse<Partial<Limits>>(fromNullish(o), {});
