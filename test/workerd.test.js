@@ -34,6 +34,35 @@ after(async () => { if (!WORKERD) return; proc?.kill(); await srv?.close(); clea
 
 const post = async (path, body, q = '') => (await fetch(`http://127.0.0.1:${PORT}${path}${q}`, { method: 'POST', body: JSON.stringify(body) })).json();
 
+// packSubset awaits a chunk read bare on the platform's reader and relies on the halt's reader.cancel() to settle a read
+// in flight. The Streams standard says it does, with done (ReadableStreamCancel closes the stream, and closing resolves
+// every pending read request). workerd settles it too on an internal stream, here a fetch body whose server stalls
+// after 1024 bytes (an R2 body is the same kind of stream), but by rejecting it (seen at compatibilityDate 2024-09-23).
+// What packSubset needs is that it settles, either way; the second test is packSubset itself over that stream.
+// Turns are counted, not timed.
+test('workerd: cancel() settles a read in flight on an internal stream', { skip: !WORKERD }, async () => {
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/octet-stream' }); res.write(Buffer.alloc(1024, 7)); /* never ends */ });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  try {
+    const r = await post('/cancel-pending-read', { url: `http://127.0.0.1:${server.address().port}/stall`, bytes: 1024 });
+    assert.deepEqual([r.got, r.before], [1024, 'pending'], JSON.stringify(r));
+    assert.ok(r.after === 'done' || r.after === 'rejected', `the read in flight settles: ${JSON.stringify(r)}`);
+  } finally { server.closeAllConnections(); server.close(); }
+});
+// 1036 = the 12-byte pack header + the 1024 bytes the server sends before it stalls (the entry's header is skipped
+// from the range and written anew, the same length). Then: the consumer's read in flight ends (done: the stream is
+// cancelled) and cancel() settles. Not asserted, and open: workerd reports one unhandled rejection carrying the cancel
+// reason (`rejections` here, `unhandled` in the route above, which runs no ply code and handles both of its promises:
+// it is the platform reader's own), the same with the chunk read raced as with it awaited bare.
+test('workerd: packSubset over an internal stream that stalls: cancel settles and the read in flight ends', { skip: !WORKERD }, async () => {
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/octet-stream' }); res.write(Buffer.alloc(1024, 7)); /* never ends */ });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  try {
+    const r = await post('/subset-cancel', { url: `http://127.0.0.1:${server.address().port}/stall`, bytes: 1036 });
+    assert.deepEqual([r.got, r.before, r.read, r.cancel], [1036, 'pending', 'done', 'settled'], JSON.stringify(r));
+  } finally { server.closeAllConnections(); server.close(); }
+});
+
 // #255 under workerd: a Node server that drips, stalls or answers late; the worker's transport must cut stalls (first
 // byte, idle) and let a long steady exchange through. Timers in workerd fire while a body read is pending.
 test('workerd: first-byte and idle timeouts; a long steady body or upload is not cut', { skip: !WORKERD }, async () => {

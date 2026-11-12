@@ -22,6 +22,7 @@ import { ok } from '../src/result.js';
 import { RETAIN_BUDGET } from '../src/packstream.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, UINT32_BYTES, OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK, OBJ_SIZE_NEXT_BASE } from '../src/format.js';
 import { buildPacks } from './space/pack-fixtures.js';
+import { settledWithin, stallAt, abortedBefore, codeOf } from './abortcells.js';
 
 const must = r => { if (r.ok) return r.value; throw Object.assign(new Error(r.error.message), { code: r.error.code }); };
 const streamOf = bytes => new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } });
@@ -422,4 +423,32 @@ test('a range source that throws, rejects or errors its stream mid-read is a cod
   const t = await resolved(thin, { bases: () => { throw new Error('store down'); } });
   assert.equal(t.ok, false);
   assert.equal(t.error.code, 'network');
+});
+
+// The Abort contract (README): an aborted resolve settles `aborted` when its signal fires, not when the storage answers.
+// git's OFS pack has a delta, so resolving it reads its entries back through the source; the source here never answers.
+// Expected values are the contract's: the code `aborted`, no read issued for a signal aborted before the call, and for
+// one aborted mid-read exactly the one read in flight, told through its signal (and its range cancelled once open).
+test('an aborted resolve settles aborted: before the call (no read), at the range open, and mid-read of a range', async () => {
+  const { packs } = buildPacks();
+  const bytes = packs.ofs.bytes;
+  const idx = must(await scan(bytes));
+  const before = stallAt(bytes, 0, 'never');
+  const pre = await resolvePackRange(idx, before, { signal: abortedBefore() });
+  assert.deepEqual({ code: codeOf(pre), ...before.state }, { code: 'aborted', reads: 0, cancelled: 0, aborted: 0 });
+  const seen = {};
+  for (const how of ['never', 'stall']) {
+    const source = stallAt(bytes, 0, how);
+    const ac = new AbortController();
+    const op = resolvePackRange(idx, source, { signal: ac.signal });
+    assert.equal(await settledWithin(source.parked), 'settled', how);
+    assert.equal(await settledWithin(op, 20), 'pending', how);
+    ac.abort(new Error('stop'));
+    assert.equal(await settledWithin(op), 'settled', how);
+    seen[how] = { code: codeOf(await op), ...source.state };
+  }
+  assert.deepEqual(seen, {
+    never: { code: 'aborted', reads: 1, cancelled: 0, aborted: 1 },
+    stall: { code: 'aborted', reads: 1, cancelled: 1, aborted: 1 },
+  });
 });

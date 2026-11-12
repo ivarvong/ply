@@ -339,7 +339,9 @@ test('end to end: each batch pushed with pushPack to git http-backend (receive.f
 });
 
 // A synthetic index of `n` entries: blob families of a root and a chain of deltas, a tree per 50 blobs, one commit.
-function synthetic(count) {
+// `stored` is how the deltas are stored: REF_DELTA (a 23-byte header: 3 of type and size, a 20-byte id) or OFS_DELTA (4:
+// 2 of type and size for a 40-byte delta, and a 2-byte distance, since the entry before is 203..383 bytes away).
+function synthetic(count, stored = TYPE.REF_DELTA) {
   const offset = new Float64Array(count), headerBytes = new Uint8Array(count).fill(3), compressed = new Float64Array(count), size = new Float64Array(count);
   const storedType = new Uint8Array(count), type = new Uint8Array(count), baseIndex = new Int32Array(count).fill(-1);
   const rbase = new Int32Array(count).fill(-1), depth = new Int32Array(count), rsize = new Float64Array(count);
@@ -353,9 +355,10 @@ function synthetic(count) {
     compressed[i] = 200 + (i % 17) * 10;
     size[i] = delta ? 40 : 400;
     rsize[i] = 400;
-    storedType[i] = isCommit ? TYPE.COMMIT : isTree ? TYPE.TREE : delta ? TYPE.REF_DELTA : TYPE.BLOB;
+    storedType[i] = isCommit ? TYPE.COMMIT : isTree ? TYPE.TREE : delta ? stored : TYPE.BLOB;
     type[i] = isCommit ? TYPE.COMMIT : isTree ? TYPE.TREE : TYPE.BLOB;
-    if (delta) { rbase[i] = i - 1; depth[i] = depth[i - 1] + 1; headerBytes[i] = 23; }
+    if (delta) { rbase[i] = i - 1; depth[i] = depth[i - 1] + 1; headerBytes[i] = stored === TYPE.OFS_DELTA ? 4 : 23; }
+    if (delta && stored === TYPE.OFS_DELTA) baseIndex[i] = i - 1;
     at += headerBytes[i] + compressed[i];
   }
   const idx = { version: 2, count, trailer: createHash('sha1').update(String(count)).digest('hex'), bytes: at + 20, columns: { offset, headerBytes, compressed, size, storedType, type, baseIndex } };
@@ -381,19 +384,60 @@ test('a resolved base column with a cycle is refused, not walked forever', () =>
   assert.ok(planPackBatches(idx, res, { budget: BIG }).ok);
 });
 
-test('planning time and memory at 200,000 entries', () => {
+test('planning time and memory at 200,000 entries, REF_DELTA and OFS_DELTA packs', () => {
   const N = 200_000;
-  const { idx, res } = synthetic(N);
   const budget = { maxRequestBytes: 64 * 1024 * 1024 - 64 * 1024, maxObjects: 50_000, maxObjectBytes: 32 * 1024 * 1024, maxCompressedObjectBytes: 32 * 1024 * 1024, reserveBytes: 64 * 1024, reserveObjects: 300 };
-  globalThis.gc?.();
-  const before = process.memoryUsage().heapUsed;
-  const t0 = performance.now();
-  const plan = must(planPackBatches(idx, res, { budget, crossBatchRef: false }));
-  const ms = performance.now() - t0;
-  const after = process.memoryUsage().heapUsed;
-  assert.equal(plan.entries, N);
-  for (const b of plan.batches) assert.ok(b.objects + budget.reserveObjects <= budget.maxObjects && b.packBytes + budget.reserveBytes <= budget.maxRequestBytes);
-  const json = JSON.stringify(plan).length;
-  console.log(JSON.stringify({ entries: N, batches: plan.batches.length, ms: Math.round(ms), heapDeltaMB: +((after - before) / 1e6).toFixed(1), planJsonMB: +(json / 1e6).toFixed(2) }));
-  assert.ok(ms < 5_000, `${ms} ms`);
+  const kinds = [['ref', synthetic(N)], ['ofs', synthetic(N, TYPE.OFS_DELTA)]];
+  const times = { ref: [], ofs: [] };
+  const first = {};
+  // the two kinds alternate, so load on the machine falls on both; the figure reported is each kind's median
+  // The bound on the planner's work is a count the test takes itself, never a time: the ids it asks `resolved` for.
+  // The id is any 40 lowercase hex (the planner checks its form, and names nothing with it).
+  let asked = 0;
+  const counting = res => ({ ...res, oid: () => { asked++; return { tag: 'some', value: 'a'.repeat(40) }; } });
+  for (let round = 0; round < 5; round++) {
+    for (const [kind, { idx, res }] of kinds) {
+      const counted = counting(res);
+      asked = 0;
+      globalThis.gc?.();
+      const before = process.memoryUsage().heapUsed;
+      const t0 = performance.now();
+      const plan = must(planPackBatches(idx, counted, { budget, crossBatchRef: false }));
+      const ms = performance.now() - t0;
+      const after = process.memoryUsage().heapUsed;
+      assert.equal(plan.entries, N);
+      for (const b of plan.batches) assert.ok(b.objects + budget.reserveObjects <= budget.maxObjects && b.packBytes + budget.reserveBytes <= budget.maxRequestBytes);
+      // whole families: nothing is rewritten, whichever way the deltas are stored
+      assert.equal(plan.batches.reduce((sum, b) => sum + b.refRewrites, 0), 0);
+      // by hand: every base is written beside its delta, so no id is written and none is asked for, at any N
+      assert.equal(asked, 0, `${kind}: ids asked of resolved for ${N} entries, families whole`);
+      // printed for README only; nothing is asserted on a time
+      times[kind].push(ms);
+      first[kind] ??= { batches: plan.batches.length, heapDeltaMB: +((after - before) / 1e6).toFixed(1), planJsonMB: +(JSON.stringify(plan).length / 1e6).toFixed(2) };
+    }
+  }
+  const median = a => Math.round(a.toSorted((x, y) => x - y)[Math.floor(a.length / 2)]);
+  for (const [kind] of kinds) console.log(JSON.stringify({ kind, entries: N, medianMs: median(times[kind]), runsMs: times[kind].map(Math.round), ...first[kind] }));
+
+  // A budget that cuts every family, worked out by hand from `synthetic`. Planned: the blobs alone (so no final batch),
+  // 2 objects a push, crossBatchRef on. Each block of 50 entries is 9 families of 5 (a root and d1..d4, each delta
+  // resting on the entry before it), one family of 4 (entries 45..48) and a tree at 49 (the commit, in the last block),
+  // which is not planned. No family fits a push, so each is split in chain order: [root d1] [d2 d3] [d4], or
+  // [root d1] [d2 d3]. d2 and d4 open a push without their base: 2 cuts in a family of 5 and 1 in a family of 4, so
+  // 9 * 2 + 1 = 19 cuts and 9 * 3 + 2 = 29 pushes a block, and there are N / 50 = 4,000 blocks.
+  const cuts = (N / 50) * 19;
+  assert.equal(cuts, 76_000);
+  const two = { ...budget, maxObjects: 2, reserveObjects: 0 };
+  // A REF_DELTA carries its base's id already: none is asked for. An OFS_DELTA cut from its base needs that id each
+  // time it is counted as a REF_DELTA: once sized in the push it opens, once placed there. Never beside its base.
+  for (const [kind, lookups] of [['ref', 0], ['ofs', 2 * cuts]]) {
+    const { idx, res } = Object.fromEntries(kinds)[kind];
+    const blobs = [...Array(N).keys()].filter(i => res.columns.type[i] === TYPE.BLOB);
+    asked = 0;
+    const plan = must(planPackBatches(idx, counting(res), { budget: two, select: blobs, crossBatchRef: true }));
+    assert.equal(plan.entries, N - N / 50, kind);
+    assert.equal(plan.batches.length, (N / 50) * 29, `${kind}: pushes`);
+    assert.equal(plan.batches.reduce((sum, b) => sum + b.refRewrites, 0), cuts, `${kind}: cuts`);
+    assert.equal(asked, lookups, `${kind}: ids asked of resolved for ${cuts} cut deltas`);
+  }
 });

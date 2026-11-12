@@ -16,7 +16,7 @@ import { mkdirSync, writeFileSync, symlinkSync, chmodSync, rmSync, appendFileSyn
 import { execFileSync } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { readBody } from './body.js';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
+import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { pushRepo, readConfig } from '../src/repo-node.js';
 import { encodeDelta, planDeltas } from '../src/delta.js';
 import { applyDelta, buildPack, encodeOfsDistance, parsePack, resolvePack, readOfsDelta } from '../src/pack.js';
@@ -480,4 +480,131 @@ test('readConfig: sections, subsections, case, comments, a bare key', () => {
   assert.equal(c.get('extensions.objectformat'), 'sha256');
   assert.equal(c.get('remote.origin.url'), 'x');
   assert.equal(c.get('x.flag'), 'true');
+});
+
+// ---- git is the judge of how a local repository is read: the same push, from the same directory, by git 2.50 ----
+// git's verdict: its exit status, its stderr, and the commands `git push --dry-run --porcelain` reports, in the shape
+// of pushRepo's dry run. Each new oid is git's own reading of the source ref it printed (rev-parse), so nothing
+// expected here comes from ply. Only creates are compared (the remote is empty): porcelain's `*` flag.
+const byRef = (a, b) => (a.ref < b.ref ? -1 : 1);
+const gitDryRun = async (dir, url, args) => {
+  const r = await gitAsync(dir, ['push', '--dry-run', '--porcelain', url, ...args]);
+  const rows = r.stdout.split('\n').filter(l => l.includes('\t')).map(l => l.split('\t'));
+  const updates = rows.map(([flag, pair]) => { const [src, dst] = pair.split(':'); return { ref: dst, newOid: rev(dir, src), kind: flag === '*' ? 'create' : flag }; });
+  return { status: r.status, stderr: r.stderr, updates: updates.sort(byRef) };
+};
+const plyDryRun = async (dir, url, spec) => {
+  const r = await pushRepo(dir, url, { ...spec, dryRun: true });
+  return r.ok ? { ok: true, updates: r.value.updates.map(u => ({ ref: u.ref, newOid: u.newOid, kind: u.kind })).sort(byRef) } : { ok: false, error: r.error };
+};
+// both sides on one push: git performs it, and pushRepo's commands are git's
+const sameAsGit = async (dir, url, args, spec) => {
+  const g = await gitDryRun(dir, url, args);
+  assert.equal(g.status, 0, `git push ${args.join(' ')}: ${g.stderr}`);
+  const p = await plyDryRun(dir, url, spec);
+  assert.ok(p.ok, p.ok || `pushRepo ${JSON.stringify(spec)}: ${p.error.code}: ${p.error.message}`);
+  assert.deepEqual(p.updates, g.updates, `git push ${args.join(' ')}`);
+  return g.updates;
+};
+// a work tree with one commit: main, topic and a lightweight tag v1, all loose
+const smallLocal = () => {
+  const dir = join(root, `small${n++}`);
+  git(root, ['init', '-q', '-b', 'main', dir]);
+  writeFileSync(join(dir, 'f'), 'one\n');
+  git(dir, ['add', '-A']);
+  git(dir, [...ID, 'commit', '-q', '-m', 'one']);
+  git(dir, ['branch', 'topic']);
+  git(dir, ['tag', 'v1']);
+  return dir;
+};
+
+test('pushRepo vs git: a file under refs/ that is not a ref (Finder\'s .DS_Store, a dot directory, a name check-ref-format refuses) is ignored', async () => {
+  const local = smallLocal();
+  const { url } = remoteRepo(false);
+  const refsDir = join(local, '.git', 'refs');
+  writeFileSync(join(refsDir, 'heads', '.DS_Store'), '\x00\x00\x00\x01Bud1');
+  writeFileSync(join(refsDir, '.DS_Store'), '\x00\x00\x00\x01Bud1');
+  mkdirSync(join(refsDir, 'heads', '.hidden'));
+  writeFileSync(join(refsDir, 'heads', '.hidden', 'x'), 'junk\n');
+  writeFileSync(join(refsDir, 'tags', 'bad~name'), 'junk\n');
+  const head = rev(local, 'main');
+  assert.deepEqual(await sameAsGit(local, url, ['main'], { refspecs: ['main'] }), [{ ref: 'refs/heads/main', newOid: head, kind: 'create' }]);
+  assert.deepEqual((await sameAsGit(local, url, ['--all'], { all: true })).map(u => u.ref), ['refs/heads/main', 'refs/heads/topic']);
+  assert.deepEqual((await sameAsGit(local, url, ['--tags'], { tags: true })).map(u => u.ref), ['refs/tags/v1']);
+});
+
+test('pushRepo vs git: a short source is ambiguous as git counts it (remote.c count_refspec_match): a branch or a tag wins over refs/remotes', async () => {
+  const local = smallLocal();
+  const { url } = remoteRepo(false);
+  // a branch named as a remote is (refs/remotes/foo/HEAD), a tag named as a remote-tracking ref, and a remote alone
+  git(local, ['branch', 'foo']);
+  git(local, ['update-ref', 'refs/remotes/foo/main', 'HEAD']);
+  git(local, ['symbolic-ref', 'refs/remotes/foo/HEAD', 'refs/remotes/foo/main']);
+  git(local, ['tag', 'bar']);
+  git(local, ['update-ref', 'refs/remotes/bar', 'HEAD']);
+  git(local, ['update-ref', 'refs/remotes/baz/main', 'HEAD']);
+  git(local, ['symbolic-ref', 'refs/remotes/baz/HEAD', 'refs/remotes/baz/main']);
+  assert.deepEqual((await sameAsGit(local, url, ['foo'], { refspecs: ['foo'] })).map(u => u.ref), ['refs/heads/foo']);
+  assert.deepEqual((await sameAsGit(local, url, ['bar'], { refspecs: ['bar'] })).map(u => u.ref), ['refs/tags/bar']);
+  assert.deepEqual((await sameAsGit(local, url, ['baz:refs/heads/from-baz'], { refspecs: ['baz:refs/heads/from-baz'] })).map(u => u.ref), ['refs/heads/from-baz']);
+  // two strong matches (a branch and a tag) stay ambiguous on both sides
+  git(local, ['branch', 'dup']);
+  git(local, ['tag', 'dup']);
+  const g = await gitDryRun(local, url, ['dup']);
+  assert.notEqual(g.status, 0);
+  assert.match(g.stderr, /src refspec dup matches more than one/);
+  const p = await plyDryRun(local, url, { refspecs: ['dup'] });
+  assert.equal(p.ok, false);
+  assert.equal(p.error.code, 'bad_request');
+  assert.match(p.error.message, /matches more than one ref \(refs\/tags\/dup, refs\/heads\/dup\)/);
+});
+
+test('pushRepo vs git: a ref directly under refs/ (refs/stash) is not a match for a short source (remote.c one_local_ref): the branch of that name is the source', async () => {
+  const local = smallLocal();
+  const { url } = remoteRepo(false);
+  // a repository that has run git stash and has a branch named stash: refs/stash is the stash commit, the branch is main's
+  writeFileSync(join(local, 'f'), 'stashed\n');
+  git(local, [...ID, 'stash']);
+  git(local, ['branch', 'stash']);
+  const [stashed, head] = [rev(local, 'refs/stash'), rev(local, 'refs/heads/main')];
+  assert.notEqual(stashed, head);
+  // every expected oid below is git's: sameAsGit compares with git push's own source, and the literal is rev-parse's
+  assert.deepEqual(await sameAsGit(local, url, ['stash'], { refspecs: ['stash'] }), [{ ref: 'refs/heads/stash', newOid: head, kind: 'create' }]);
+  assert.deepEqual(await sameAsGit(local, url, ['stash:refs/heads/s2'], { refspecs: ['stash:refs/heads/s2'] }), [{ ref: 'refs/heads/s2', newOid: head, kind: 'create' }]);
+  // the same for any one-level ref: refs/x (the stash commit) beside a branch x
+  git(local, ['update-ref', 'refs/x', stashed]);
+  git(local, ['branch', 'x']);
+  assert.deepEqual(await sameAsGit(local, url, ['x'], { refspecs: ['x'] }), [{ ref: 'refs/heads/x', newOid: head, kind: 'create' }]);
+  // git still reads a one-level ref as the source when it is named in full, or when nothing git counts matches the name
+  assert.deepEqual(await sameAsGit(local, url, ['refs/x:refs/heads/from-x'], { refspecs: ['refs/x:refs/heads/from-x'] }), [{ ref: 'refs/heads/from-x', newOid: stashed, kind: 'create' }]);
+  git(local, ['update-ref', 'refs/lone', stashed]);
+  assert.deepEqual(await sameAsGit(local, url, ['lone:refs/heads/from-lone'], { refspecs: ['lone:refs/heads/from-lone'] }), [{ ref: 'refs/heads/from-lone', newOid: stashed, kind: 'create' }]);
+});
+
+test('pushRepo vs git: a loose ref that is a symbolic link is the file it points at; a link that points nowhere is not a ref', async () => {
+  const local = smallLocal();
+  const { url } = remoteRepo(false);
+  const outside = join(root, `outside-ref${n++}`);
+  writeFileSync(outside, `${rev(local, 'main')}\n`);
+  symlinkSync(outside, join(local, '.git', 'refs', 'heads', 'linked'));
+  symlinkSync(join(root, 'nowhere'), join(local, '.git', 'refs', 'heads', 'dangling'));
+  // a link whose target text is a ref name and that resolves on disk nowhere (the legacy symlink form of a symbolic ref)
+  symlinkSync('refs/heads/topic', join(local, '.git', 'refs', 'heads', 'alias'));
+  assert.deepEqual(await sameAsGit(local, url, ['linked'], { refspecs: ['linked'] }), [{ ref: 'refs/heads/linked', newOid: rev(local, 'main'), kind: 'create' }]);
+  const all = await sameAsGit(local, url, ['--all'], { all: true });
+  assert.ok(all.some(u => u.ref === 'refs/heads/linked'), 'git push --all sends the linked branch');
+  // a link whose target text is a ref name and that does resolve on disk (to refs/x/refs/heads/topic, at the second
+  // commit): git reads it as a symbolic ref to refs/heads/topic (the first commit), never as the file it points at
+  writeFileSync(join(local, 'f'), 'two\n');
+  git(local, [...ID, 'commit', '-q', '-a', '-m', 'two']);
+  git(local, ['update-ref', 'refs/x/refs/heads/topic', 'main']);
+  symlinkSync('refs/heads/topic', join(local, '.git', 'refs', 'x', 'alias2'));
+  assert.notEqual(rev(local, 'topic'), rev(local, 'main'));
+  assert.deepEqual(await sameAsGit(local, url, ['refs/x/alias2:refs/heads/via-link'], { refspecs: ['refs/x/alias2:refs/heads/via-link'] }), [{ ref: 'refs/heads/via-link', newOid: rev(local, 'topic'), kind: 'create' }]);
+  // the one stated difference: git walks into a linked directory (the push below succeeds for git); ply refuses it by name
+  symlinkSync(join(local, '.git', 'refs', 'tags'), join(local, '.git', 'refs', 'heads', 'dirlink'));
+  assert.equal((await gitDryRun(local, url, ['main'])).status, 0);
+  const refused = await plyDryRun(local, url, { refspecs: ['main'] });
+  assert.equal(refused.ok, false);
+  assert.deepEqual([refused.error.code, refused.error.what, refused.error.path], ['bad_request', 'ref', 'refs/heads/dirlink']);
 });

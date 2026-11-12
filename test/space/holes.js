@@ -4,7 +4,8 @@
 //   decisions  a decision point of the inventory (scripts/decision-points.mjs) that no registry rule names     gate a
 //   git        a git-manifest entry (test/space/git-manifest.json) neither covered nor excluded                 gate b
 //   failsites  a fail site (fail / failHere / wrapper call) no recorded stack passed through, unless excluded   gate c
-//   claims     a fail site the registry assigns to a merged space whose runners did not reach it                gate c
+//   claims     a fail site the registry assigns to a space whose runners ran and did not reach it (merged or
+//              pending: a space whose runners are in the run is judged, whatever its status says)             gate c
 //   linux      a runner of a merged CI space with no record from a Linux run. Judged only on records from Linux (CI);
 //              a macOS pass does not count: the filesystem there hides cells (a non-UTF-8 ref name cannot be a file)
 //   stale      a registry rule that matches nothing (the decision it named is gone or renamed)
@@ -44,10 +45,10 @@ export function resolve(ids, rules) {
 
 // Structural problems in the registry itself (always fatal: a rule naming a space or axis that does not exist is a typo,
 // not a hole).
-export function registryProblems() {
+export function registryProblems(spaces = SPACES) {
   const bad = [];
   const names = new Set();
-  for (const s of SPACES) {
+  for (const s of spaces) {
     if (names.has(s.name)) bad.push(`space ${s.name} registered twice`);
     names.add(s.name);
     if (!['main', 'pending'].includes(s.status)) bad.push(`space ${s.name}: status must be main or pending`);
@@ -58,6 +59,9 @@ export function registryProblems() {
     if (!s.oracle) bad.push(`space ${s.name}: no oracle`);
     if (!s.axes?.length) bad.push(`space ${s.name}: no axes`);
     if (s.status === 'main') for (const r of s.runners ?? []) if (!existsSync(join(ROOT, r))) bad.push(`space ${s.name}: runner ${r} does not exist`);
+    // a pending space is one whose runners are not in this tree yet. Once they all are, it is merged: left pending,
+    // its sites would be claimed (gate a green) by a space the Linux gate and SPACES.md treat as not there
+    if (s.status === 'pending' && s.runners?.length && s.runners.every(r => existsSync(join(ROOT, r)))) bad.push(`space ${s.name}: pending (${s.pending}) but every runner is in the tree; it is merged: status: 'main'`);
   }
   for (const [list, rules] of [['DECISIONS', DECISIONS], ['GIT', GIT]]) for (const r of rules) {
     if (typeof r.match !== 'string' || !r.match) { bad.push(`${list}: a rule without match`); continue; }
@@ -74,6 +78,9 @@ export function readRecords(dir) {
   const frames = new Map();
   const runners = new Set();
   const platforms = new Map(); // runner -> Set(platform)
+  // frame -> Set(runner) for the errors a test read; null when no record carries the field (records of an older
+  // recorder): then `observed` is not judged, which is not the same as nothing observed
+  let observed = null;
   if (!dir || !existsSync(dir)) return null;
   for (const f of readdirSync(dir).filter(x => x.endsWith('.json'))) {
     const rec = JSON.parse(readFileSync(join(dir, f), 'utf8'));
@@ -81,19 +88,24 @@ export function readRecords(dir) {
     if (!platforms.has(rec.runner)) platforms.set(rec.runner, new Set());
     platforms.get(rec.runner).add(rec.platform ?? 'unknown');
     for (const k of Object.keys(rec.frames)) { if (!frames.has(k)) frames.set(k, new Set()); frames.get(k).add(rec.runner); }
+    if (Array.isArray(rec.observed)) {
+      observed ??= new Map();
+      for (const k of rec.observed) { if (!observed.has(k)) observed.set(k, new Set()); observed.get(k).add(rec.runner); }
+    }
   }
-  return { frames, runners, platforms };
+  return { frames, runners, platforms, observed };
 }
 export const frameOf = p => `${p.file}:${p.callLine}:${p.col}`;
 
 // Everything the gates and SPACES.md need, computed once.
-export function compute({ records = null } = {}) {
+export function compute({ records = null, spaces = SPACES, decisions = DECISIONS } = {}) {
+  const byName = spaces === SPACES ? spaceByName : new Map(spaces.map(s => [s.name, s]));
   const inv = inventory();
   const points = decisionPoints(inv);
   const man = manifest();
-  const dec = resolve(points.map(p => p.id), DECISIONS);
+  const dec = resolve(points.map(p => p.id), decisions);
   const git = resolve(man.entries.map(e => e.id), GIT);
-  const holes = { decisions: [], git: [], failsites: null, claims: null, linux: null, stale: [] };
+  const holes = { decisions: [], git: [], failsites: null, claims: null, observed: null, linux: null, stale: [] };
   for (const p of points) if (!dec.by.has(p.id)) holes.decisions.push(p.id);
   for (const e of man.entries) if (!git.by.has(e.id)) holes.git.push(e.id);
   for (const r of dec.unused) holes.stale.push(`DECISIONS ${r.match}`);
@@ -106,12 +118,17 @@ export function compute({ records = null } = {}) {
     // a site the registry excludes (with its reason) is not a hole for gate c either
     const excluded = p => { const r = dec.by.get(p.id); return !!r && 'excluded' in r; };
     holes.failsites = sites.filter(p => !reachedBy.get(p.id).size && !sampled.has(p.id) && !excluded(p)).map(p => p.id);
+    // reached is not judged: a site whose error code no test read (see failsite-hook.mjs) would pass
+    // gate c with a wrong code, message or outcome. Reported by failsites.test.js; not in CATEGORIES (no ratchet
+    // baseline yet: that needs one recorded run of the whole suite)
+    if (records.observed) holes.observed = sites.filter(p => reachedBy.get(p.id).size && !records.observed.get(frameOf(p))?.size && !sampled.has(p.id) && !excluded(p)).map(p => p.id);
     holes.claims = [];
     for (const p of sites) {
       const r = dec.by.get(p.id);
-      const s = r && !('excluded' in r) ? spaceByName.get(r.space) : null;
-      if (!s || s.status !== 'main' || !s.runners?.length || sampled.has(p.id)) continue;
-      // a claim is checked only when its space's runners were part of this run
+      const s = r && !('excluded' in r) ? byName.get(r.space) : null;
+      if (!s || !s.runners?.length || sampled.has(p.id)) continue;
+      // a claim is checked only when its space's runners were part of this run. The space's status is not asked: a
+      // pending space whose runner ran is judged like a merged one (a glob claims every new site in its file)
       if (!s.runners.some(x => records.runners.has(x))) continue;
       if (!s.runners.some(x => reachedBy.get(p.id).has(x))) holes.claims.push(`${p.id} -> ${s.name}`);
     }
@@ -119,7 +136,7 @@ export function compute({ records = null } = {}) {
   // the Linux gate: only a run that has Linux records can judge it (null otherwise: not judged, not passed)
   if (records && [...(records.platforms?.values() ?? [])].some(p => p.has('linux'))) {
     holes.linux = [];
-    for (const s of SPACES) if (s.status === 'main' && s.run === 'ci') for (const r of s.runners ?? []) if (!records.platforms.get(r)?.has('linux')) holes.linux.push(`${s.name}: ${r}`);
+    for (const s of spaces) if (s.status === 'main' && s.run === 'ci') for (const r of s.runners ?? []) if (!records.platforms.get(r)?.has('linux')) holes.linux.push(`${s.name}: ${r}`);
   }
   return { inv, points, sites, man, dec, git, holes, reachedBy };
 }

@@ -23,10 +23,12 @@ import type { PlyError } from './errors.js';
 import { plyError } from './errors.js';
 import type { Option, Result } from './result.js';
 import { ok, err, some, none, assertNever } from './result.js';
+import type { Halt, Halted } from './rangesource.js';
+import { UNCANCELLABLE, HALTED, haltOn, drop, aborted } from './rangesource.js';
 import { withDefaults } from './absent.js';
 import type { LimitsInput } from './limits.js';
 import { DEFAULT_LIMITS, limitExceeded, parseLimits } from './limits.js';
-import type { Oid } from './oid.js';
+import type { Oid } from './sha1.js';
 import { Sha1, fromHex, toOid } from './sha1.js';
 import { encodeBytes } from './bytes.js';
 import type { ObjType } from './format.js';
@@ -76,9 +78,12 @@ export type ScanIndexOpts = {
   readonly budget: ScanBudget;
   readonly oids: boolean;
   readonly content: ScanContent | null;
+  // aborts the scan: every await on `source` (and on content.take) is raced against it, so the call settles `aborted` at
+  // once even when the source never answers (it is asked to cancel, not waited for). Default: never aborts.
+  readonly signal: AbortSignal;
 };
 // A fresh record per call: withDefaults fills it in place.
-const defaultOpts = (): ScanIndexOpts => ({ limits: DEFAULT_LIMITS, verify: true, budget: WORK_BUDGET, oids: true, content: null });
+const defaultOpts = (): ScanIndexOpts => ({ limits: DEFAULT_LIMITS, verify: true, budget: WORK_BUDGET, oids: true, content: null, signal: UNCANCELLABLE });
 
 // Typed columns, one slot per entry. `type` is 0 for unknown; `baseIndex` is -1 for none or not found. `oids` holds
 // entry i's whole-object id at i * 20 (empty with oids off; zeros for a delta); `refs` entry i's REF base id at i * 20
@@ -240,19 +245,41 @@ export function scannedPackOf(meta: ScannedMeta, columns: ScanColumns): ScannedP
   return { ...meta, columns, entry, entries };
 }
 
-type Pull = { readonly next: () => Promise<Uint8Array | null>; readonly cancel: () => Promise<void> };
-function puller(source: ScanSource): Pull {
+// The source is the caller's stream and may never answer: its reads and its cancel go through halt.race
+// (rangesource.ts), so an aborted scan waits for neither. The source is asked to stop exactly once: by the halt when the
+// scan aborts, by `cancel` when the scan refuses the pack.
+type Pull = { readonly next: () => Promise<Uint8Array | null | Halted>; readonly cancel: () => Promise<void> };
+function puller(source: ScanSource, halt: Halt): Pull {
   if ('getReader' in source) {
     const reader = source.getReader();
+    halt.reading(reader);
     return {
-      next: async () => { const r = await reader.read(); return r.done ? null : r.value; },
-      cancel: async () => { await reader.cancel().catch(() => null); },
+      next: async () => {
+        const r = await halt.race(reader.read(), drop);
+        if (r === HALTED) return HALTED;
+        return r.done ? null : r.value;
+      },
+      cancel: async () => {
+        if (halt.halted()) return;
+        halt.reading(null);
+        await halt.race(reader.cancel().catch(drop), drop);
+      },
     };
   }
   const it = source[Symbol.asyncIterator]();
+  const stop = async (): Promise<void> => { if (typeof it.return === 'function') await Promise.resolve(it.return()).catch(drop); };
+  halt.reading({ cancel: stop });
   return {
-    next: async () => { const r = await it.next(); return r.done === true ? null : r.value; },
-    cancel: async () => { if (typeof it.return === 'function') await Promise.resolve(it.return()).catch(() => null); },
+    next: async () => {
+      const r = await halt.race(it.next(), drop);
+      if (r === HALTED) return HALTED;
+      return r.done === true ? null : r.value;
+    },
+    cancel: async () => {
+      if (halt.halted()) return;
+      halt.reading(null);
+      await halt.race(stop(), drop);
+    },
   };
 }
 
@@ -261,6 +288,7 @@ function puller(source: ScanSource): Pull {
 type Scanner = {
   readonly s: Store;
   readonly opts: ScanIndexOpts;
+  readonly halt: Halt;
   readonly maxSelected: number;
   version: number;
   count: number;
@@ -331,7 +359,7 @@ function onChunk(sc: Scanner, bytes: Uint8Array): void {
   sc.data.set(bytes, sc.at);
   sc.at += bytes.length;
 }
-async function onObjectEnd(sc: Scanner, i: number, compressed: number): Promise<void> {
+async function onObjectEnd(sc: Scanner, i: number, compressed: number): Promise<ScanError | null> {
   sc.s.compressed[i] = compressed;
   let oid: Oid | null = null;
   if (sc.sha !== null) {
@@ -340,12 +368,14 @@ async function onObjectEnd(sc: Scanner, i: number, compressed: number): Promise<
     oid = toOid(digest);
   }
   const content = sc.opts.content;
-  if (sc.selected === null || content === null) return;
+  if (sc.selected === null || content === null) return null;
   const object: ScannedObject = { index: i, type: sc.selected, size: sc.data.length, oid };
   const data = sc.data;
   sc.data = EMPTY;
   sc.selected = null;
-  await content.take(object, data);
+  // the caller's sink is its storage too
+  const taken = await sc.halt.race(Promise.resolve(content.take(object, data)), drop);
+  return taken === HALTED ? aborted('pack scan') : null;
 }
 
 function finish(sc: Scanner, bytes: number): ScannedPack {
@@ -365,6 +395,7 @@ async function onPiece(sc: Scanner, st: PackScan, pull: Pull, p: PackPiece): Pro
   switch (p.kind) {
     case 'need': {
       const bytes = await pull.next();
+      if (bytes === HALTED) return aborted('pack scan');
       if (bytes === null) parsePackClose(st);
       else parsePackFeed(st, bytes);
       return null;
@@ -378,8 +409,7 @@ async function onPiece(sc: Scanner, st: PackScan, pull: Pull, p: PackPiece): Pro
       onChunk(sc, p.bytes);
       return null;
     case 'object-end':
-      await onObjectEnd(sc, p.index, p.compressed);
-      return null;
+      return onObjectEnd(sc, p.index, p.compressed);
     case 'trailer':
       sc.trailer = p.trailer;
       return null;
@@ -398,24 +428,29 @@ export async function scanPackIndex(source: ScanSource, input: Partial<ScanIndex
   const opened = parsePackInit({ limits: opts.limits, verify: opts.verify, budget: opts.budget });
   if (!opened.ok) return opened;
   const st = opened.value;
-  const pull = puller(source);
+  const halt = haltOn(opts.signal);
+  const pull = puller(source, halt);
   const s: Store = {
     n: 0, cap: 0, offset: new Float64Array(0), headerBytes: EMPTY, compressed: new Float64Array(0), size: new Float64Array(0),
     storedType: EMPTY, type: EMPTY, baseIndex: new Int32Array(0), oids: EMPTY, refs: EMPTY,
   };
-  const sc: Scanner = { s, opts, maxSelected: limits.value.maxObjectSize, version: 0, count: 0, trailer: '', sha: null, data: EMPTY, at: 0, selected: null };
-  for (;;) {
-    const got = parsePackPull(st);
-    if (got.ok && got.value.kind === 'end') {
-      settle(s, opts.oids);
-      return ok(finish(sc, st.total));
+  const sc: Scanner = { s, opts, halt, maxSelected: limits.value.maxObjectSize, version: 0, count: 0, trailer: '', sha: null, data: EMPTY, at: 0, selected: null };
+  try {
+    for (;;) {
+      const got = parsePackPull(st);
+      if (got.ok && got.value.kind === 'end') {
+        settle(s, opts.oids);
+        return ok(finish(sc, st.total));
+      }
+      // oxlint-disable-next-line no-await-in-loop -- one stream, read in order
+      const refused = got.ok ? await onPiece(sc, st, pull, got.value) : got.error;
+      if (refused !== null) {
+        // oxlint-disable-next-line no-await-in-loop -- the loop ends here
+        await pull.cancel();
+        return err(refused);
+      }
     }
-    // oxlint-disable-next-line no-await-in-loop -- one stream, read in order
-    const refused = got.ok ? await onPiece(sc, st, pull, got.value) : got.error;
-    if (refused !== null) {
-      // oxlint-disable-next-line no-await-in-loop -- the loop ends here
-      await pull.cancel();
-      return err(refused);
-    }
+  } finally {
+    halt.release();
   }
 }

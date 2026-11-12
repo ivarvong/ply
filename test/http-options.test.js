@@ -688,3 +688,22 @@ for (const idleMs of [1000, 0]) test(`exchangeClock: idle ${idleMs}, upload prog
     assert.ok(at >= take + heldMs && at <= take + heldMs + late, `cut at ${at}, want [${take + heldMs}, ${take + heldMs + late}]`);
   } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; }
 });
+
+// README "Your own code failing": a fetchImpl you passed that throws or rejects is `network` with what 'fetchImpl'; a
+// failure of the platform fetch (no fetchImpl passed) is your network, not your code, and names no callback. Expected
+// values are that table's, not ply's output. The default fetchImpl is read from globalThis.fetch when the options are
+// parsed (httpDefaults() runs per parseHttpOptions call, not at module load), so the platform fetch is replaced on
+// globalThis for the call and restored after: the transport then holds the stub as its default, unnamed.
+test('a failing fetchImpl you passed is named fetchImpl; a failing platform fetch is not', async () => {
+  const where = { ref: 'refs/heads/main', path: 'a' };
+  for (const [label, fetchImpl] of [['throws', () => { throw new Error('boom'); }], ['rejects', async () => { await null; throw new Error('boom'); }]]) {
+    const r = await readFile('https://h/r.git', where, { fetchImpl });
+    assert.deepEqual([r.ok, r.error?.code, r.error?.what], [false, 'network', 'fetchImpl'], label);
+  }
+  const real = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => { await null; throw new TypeError('fetch failed'); };
+    const r = await readFile('https://h/r.git', where, {});
+    assert.deepEqual([r.ok, r.error?.code, r.error?.what], [false, 'network', undefined]);
+  } finally { globalThis.fetch = real; }
+});

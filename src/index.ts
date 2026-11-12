@@ -26,7 +26,7 @@ export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, ar
 // ---- wire ----
 export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, pushPack, receiveCaps, discover, pushBody, forgetQuirks } from './client.js';
 export type { Transport } from './transport.js';
-export type { ExportLine, Exporter, EndedSpan, SpanSink, FlatSpan } from './otel.js';
+export type { ExportLine, Exporter, EndedSpan, SpanSink, FlatSpan, TelemetryHook, TelemetryErrorSink } from './otel.js';
 export type { Limits, CheckedLimits, LimitsInput } from './limits.js';
 export type { FetchOpts, SpState } from './fetch.js';
 export type { OperationOpts, Outcome } from './operation.js';
@@ -64,7 +64,7 @@ export type { ResolvedIndex, ResolvedColumns, ResolveStats, ResolveRangeOpts, Th
 export { rangeFromBytes } from './rangesource.js';
 export { planPackBatches, planHash, PLAN_VERSION } from './packplan.js';
 export type { PackPlan, PlannedBatch, PushBudget, PlanOpts, BatchKind } from './packplan.js';
-export type { RangeSource } from './rangesource.js';
+export type { RangeRead, RangeSource } from './rangesource.js';
 export type { ScannedPack, ScannedEntry, ScannedBase, ScannedType, ScannedObject, ScanColumns, ScanContent, ScanIndexOpts, ScanSource } from './packscanindex.js';
 export { packSubset } from './packsubset.js';
 export type { PackSubset, PackSubsetOpts, OutsideBase } from './packsubset.js';
