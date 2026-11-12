@@ -153,7 +153,11 @@ This session (2026-10-19 → 20):
 
 9. Line-level merging: ported git's xdiff merge (histogram, compaction, `xdl_do_merge`, refinement). Found and fixed:
    rebase replaying against a blob that only existed in the pending push; duplicate objects in a pack ("tried to add
-   buffer twice"); rebase keeping commits that became empty (git: `--empty=drop`); rename naming at targets and a G1 hole.
+   buffer twice"); rebase keeping commits that became empty (git: `--empty=drop`); rename naming at targets and a G1 hole. Later: G1's deleted side is read off the three trees (a both-sides delete in a
+   subtree the sides share, or under a file turned directory, was unseen); the shared subtrees' losses arm G1 only when a
+   side added or removed a path of its own, and the gate reads the smaller set first (the shared subtrees, or the
+   directories one side alone changed), 8 siblings at a time, each tree fetched once (`test/merge-renames.test.js`,
+   counting transport; cost in SAFETY.md).
 10. Version skew: the remaining conservative answers all came from git 2.54's compaction re-diff. Built git master as a
     second oracle; ported classic Myers; made it the `rediff` option (`myers` ≡ git ≥ 2.54, `skip` ≡ older, `undecided`
     = safe for any). Double dissociation measured. Pinned the hash-chain limit (64 merges, 65 → git fails) exactly.
