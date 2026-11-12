@@ -349,7 +349,7 @@ service other than `git-upload-pack`) when it was thrown:
 
 | `body` … | before the push request was handed over | after |
 | --- | --- | --- |
-| throws a value that is not a `PlyError` | `bad_request`, `what: 'callback'`, `cause` the thrown value | `ambiguous`, `what: 'callback'`, `cause` the thrown value, its `code` in `original` if it has a string one (a node `ECONNRESET` error, say) |
+| throws a value that is not a `PlyError` | `bad_request`, `what: 'callback'`, `cause` the thrown value | `ambiguous`, `what: 'callback'`, `cause` the thrown value, its `code` in `original` if it has one (any value but null or undefined; a node `ECONNRESET` error, say) |
 | throws a `PlyError` | that `PlyError`, as itself | `ambiguous`, `what: 'callback'`, `cause` the thrown error, its code in `original` (a thrown `ambiguous` is itself) |
 | returns a `Result` | that `Result`, as it is | that `Result`, as it is |
 

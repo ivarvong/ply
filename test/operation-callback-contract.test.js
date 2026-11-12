@@ -43,16 +43,26 @@ test('2. a PlyError thrown before the hand-over is returned as itself', async ()
 });
 
 test('3. any throw after the push request was handed to the transport is ambiguous what callback, with the value as cause', async () => {
-  // README row 1 'after': a non-PlyError with a string `code` (a node network error) also puts that code in `original`
-  for (const thrown of [new Error('boom'), { kind: 'stale_expected' }, Object.assign(new Error('reset'), { code: 'ECONNRESET' }), plyError('cas_conflict', 'mine: a definite rejection, seen after the hand-over')]) {
+  // README row 1 'after': a non-PlyError with a `code` (any value but null or undefined: a node network error's
+  // 'ECONNRESET', or a number) also puts that code in `original`; a thrown PlyError's code goes there too. Each case
+  // names its expected `original` by hand (undefined: no `original` key at all).
+  const cases = [
+    [new Error('boom'), undefined],
+    [{ kind: 'stale_expected' }, undefined],
+    [Object.assign(new Error('reset'), { code: 'ECONNRESET' }), 'ECONNRESET'],
+    [{ code: 42 }, 42],
+    [{ code: null }, undefined],
+    [plyError('cas_conflict', 'mine: a definite rejection, seen after the hand-over'), 'cas_conflict'],
+  ];
+  for (const [thrown, original] of cases) {
     const r = await operation('probe', url, opts, async ({ t, root }) => { await null; t.frames('git-receive-pack', empty, root, {}); throw thrown; });
     assert.equal(r.ok, false);
     assert.equal(r.error.code, 'ambiguous');
     assert.equal(r.error.what, 'callback');
     assert.equal(r.error.cause, thrown);
     assert.notEqual(r.error, thrown);
-    if (thrown instanceof Error && 'code' in thrown) assert.equal(r.error.original, thrown.message === 'reset' ? 'ECONNRESET' : 'cas_conflict');
-    else assert.equal('original' in r.error, false);
+    if (original === undefined) assert.equal('original' in r.error, false);
+    else assert.equal(r.error.original, original);
   }
 });
 
