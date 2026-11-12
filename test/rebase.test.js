@@ -429,3 +429,90 @@ test('limits: WORKER_LIMITS.maxRebaseCommits, the cheapest shape of chain (every
   assert.ok(at.n <= 800, `a ${N}-commit rebase took ${at.n} requests`);
   console.log(`WORKER_LIMITS rebase: ${N} commits, ${at.n} requests; refusing ${N + 1}: ${over.n} requests`);
 }, 300_000);
+
+// The windowed branch walk (rebaseBaseOf, capA > 2 * maxMergeDepth) at a size worked by hand: maxMergeDepth 4 and
+// maxRebaseCommits 20 put the branch cap at 22 and the windows at 4 commits. A fast-import graph: `main` is `base`
+// plus `mainLen` commits; `feat` is `n` single-parent commits on `base` (or on a new root when unrelated), with a merge
+// of a side commit at `mergeAt` commits above its foot when given.
+const windowedGraph = (r, { n, mainLen = 1, mergeAt = 0, unrelated = false }) => {
+  const L = []; let at = 1_700_000_000; let mark = 0;
+  const commit = (ref, from, path, body, merge = 0) => { mark++; L.push(`commit ${ref}`, `mark :${mark}`, `committer s <s@x> ${at++} +0000`, 'data 1', 'c', ...(from ? [`from :${from}`] : []), ...(merge ? [`merge :${merge}`] : []), `M 100644 inline ${path}`, `data ${body.length}`, body); return mark; };
+  const base = commit('refs/heads/main', 0, 'a.txt', 'a');
+  let m = base; for (let i = 1; i <= mainLen; i++) m = commit('refs/heads/main', m, 'm.txt', `${i}`);
+  const side = mergeAt ? commit('refs/heads/side', base, 's.txt', 's') : 0;
+  if (unrelated) L.push('reset refs/heads/feat');
+  let f = unrelated ? 0 : base; for (let i = 1; i <= n; i++) f = commit('refs/heads/feat', f, 'f.txt', `${i}`, i === mergeAt ? side : 0);
+  ok(sh(r.bare, ['fast-import', '--quiet'], `${L.join('\n')}\n`));
+};
+const W = { maxMergeDepth: 4, maxRebaseCommits: 20 };
+const windowedRun = async (r, limits, fetchImpl) => {
+  const { DEFAULT_LIMITS } = await import('../src/limits.js');
+  const c = counting(); const f = fetchImpl ? fetchImpl(c) : c.fetchImpl;
+  const e = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { ...T(), fetchImpl: f, limits: { ...DEFAULT_LIMITS, ...limits } })).then(() => null, x => x);
+  return { code: e?.code ?? null, what: e?.what, got: e?.got, max: e?.max, requests: c.n };
+};
+
+test('limits: windowed branch walk, cap reached: onto whole is the rebase chain, onto cut is the merge-base search depth; requests by hand', async () => {
+  // ls-refs 1; the search at depth 8 walks both sides to maxMergeDepth 4 (2); windows of 4 from positions 5, 9, 13,
+  // 17 and 21 (the last cut to capA - 21 + 1 = 2): 5; position 23 is past capA 22. 1 + 2 + 5 = 8.
+  const whole = repo(); windowedGraph(whole, { n: 30 });
+  assert.equal(ok(sh(whole.bare, ['rev-list', '--count', 'main..feat'])), '30');
+  assert.deepEqual(await windowedRun(whole, W), { code: 'limit_exceeded', what: 'rebase chain', got: 21, max: 20, requests: 8 });
+  // onto is base + 10: cut at 4, so the chain is not known to be over; the same 8 requests
+  const cut = repo(); windowedGraph(cut, { n: 30, mainLen: 10 });
+  assert.deepEqual(await windowedRun(cut, W), { code: 'limit_exceeded', what: 'merge-base search depth', got: 8, max: 4, requests: 8 });
+  // a chain of 21 reaches base (in onto) at position 22 = capA: hit, 21 > 20. Windows at 5, 9, 13, 17, 21: 8 requests
+  const over = repo(); windowedGraph(over, { n: 21 });
+  assert.deepEqual(await windowedRun(over, W), { code: 'limit_exceeded', what: 'rebase chain', got: 21, max: 20, requests: 8 });
+}, 60_000);
+
+test('limits: windowed branch walk, a transport error inside a window is the operation\'s error, after the windows before it', async () => {
+  const r = repo(); windowedGraph(r, { n: 30 });
+  // request 1 ls-refs, 2-3 the search, 4 the first window (position 5): it fails
+  const failing = (c) => (u, i) => { c.n++; if (c.n === 4) return Promise.reject(new TypeError('network down')); return fetch(u, i); };
+  const e = await windowedRun(r, W, failing);
+  assert.notEqual(e.code, 'limit_exceeded'); assert.notEqual(e.code, null);
+  assert.equal(e.requests, 4);
+  console.log(`window transport error: ${e.code}`);
+}, 60_000);
+
+test('limits: windowed branch walk, a chain at the limit with its base past maxMergeDepth rebases as git does, at 4 window requests over the unwindowed walk', async () => {
+  const r = repo(); windowedGraph(r, { n: 20 });
+  const tip = ok(sh(r.bare, ['rev-parse', 'feat']));
+  const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'feat'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitTree = treeOf(d, 'HEAD'); rmSync(d, { recursive: true, force: true });
+  // unwindowed (maxMergeDepth 16, capA 22 <= 32): ls-refs, the search at 8 (2), 16 (branch only: main is whole), 22.
+  // windowed: ls-refs, the search at 8 (2), windows at 5, 9, 13, 17 (base hit at 21, held), the search again at 22
+  // (both sides: the onto walk was dropped for the windows): 2. 5 vs 9 before an identical replay: +4.
+  const plain = await windowedRun(r, { maxMergeDepth: 16, maxRebaseCommits: 20 });
+  assert.equal(plain.code, null);
+  ok(sh(r.bare, ['update-ref', 'refs/heads/feat', tip]));
+  const win = await windowedRun(r, W);
+  assert.equal(win.code, null); assert.equal(treeOf(r.bare, 'feat'), gitTree);
+  assert.equal(win.requests, plain.requests + 4);
+  // capA exactly twice maxMergeDepth is not windowed: maxRebaseCommits 6 at maxMergeDepth 4 (capA 8) costs what it
+  // costs at maxMergeDepth 8 (one search round at 8, both walks whole)
+  const six = repo(); windowedGraph(six, { n: 6 });
+  const sixTip = ok(sh(six.bare, ['rev-parse', 'feat']));
+  const at4 = await windowedRun(six, { maxMergeDepth: 4, maxRebaseCommits: 6 });
+  ok(sh(six.bare, ['update-ref', 'refs/heads/feat', sixTip]));
+  const at8 = await windowedRun(six, { maxMergeDepth: 8, maxRebaseCommits: 6 });
+  assert.deepEqual([at4.code, at8.code], [null, null]); assert.equal(at4.requests, at8.requests);
+  console.log(`chain 20 at the limit: unwindowed ${plain.requests} requests, windowed ${win.requests}; chain 6: ${at4.requests}`);
+}, 60_000);
+
+test('limits: windowed branch walk, a chain ending at a merge or a root within capA goes on to the full search', async () => {
+  // a merge 10 commits above base, 20 commits in all: from the tip it is at position 11. Windows at 5 and 9 (9-12
+  // holds it): break; the search resumes at 16 >= 12 (2 walks) and settles at 22 (the branch walk; main is whole),
+  // as the unwindowed search does (ls-refs, 8 (2), 16, 22: 5): 1 + 2 + 2 + 2 + 1 = 8, refused as a non-linear branch
+  const m = repo(); windowedGraph(m, { n: 20, mergeAt: 10 });
+  const mTip = ok(sh(m.bare, ['rev-parse', 'feat']));
+  assert.deepEqual(await windowedRun(m, { maxMergeDepth: 16, maxRebaseCommits: 20 }), { code: 'not_linear', what: undefined, got: undefined, max: undefined, requests: 5 });
+  assert.equal(ok(sh(m.bare, ['rev-parse', 'feat'])), mTip);
+  assert.deepEqual(await windowedRun(m, W), { code: 'not_linear', what: undefined, got: undefined, max: undefined, requests: 8 });
+  // an unrelated branch of 22 commits: its root at position 22 = capA is a break, not a cap. Windows at 5, 9, 13, 17,
+  // 21; the search resumes at 22 (2): 1 + 2 + 5 + 2 = 10, and the answer is the unrelated search's, not a limit
+  const u = repo(); windowedGraph(u, { n: 22, unrelated: true });
+  const got = await windowedRun(u, W);
+  assert.notEqual(got.code, 'limit_exceeded'); assert.equal(got.requests, 10);
+  console.log(`unrelated 22 at capA: ${got.code}`);
+}, 60_000);
