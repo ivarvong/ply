@@ -13,10 +13,14 @@
 //     landed through a second clean transport. Git itself then refuses the runner's push because the ref moved (a lost
 //     compare-and-swap, no hook), or a pre-receive hook installed for that one request declines it: done either way
 //   - atomic off, the temp ref's delete refused by an update hook while the create lands: done with tempLeft
-//   - a real AbortSignal fired during the final push (after git applied it, and before the request was forwarded):
-//     `ambiguous`, never `aborted`; git shows which of the two happened and a resume ends done
+//   - a real AbortSignal fired during the final push: after git applied it, `ambiguous`, never `aborted`; before the
+//     request was forwarded (fetch rejects with the body unpulled, git never saw it), `aborted` as it is, not a push
+//     (README, Resumable transfer; #272); git shows which of the two happened and a resume ends done
 //   - a sweep deleting the temp ref just before the final push: atomic off, the branch is published and the run is
 //     done; atomic on, git refuses the whole push, nothing is published and the run reports a definite refusal
+//   - a receive-pack POST whose fetch rejects before pulling the body (a connect error), at the first, second and
+//     final step, with and without another transport landing that step first: the request never reached git, so it is
+//     not a push (README, Resumable transfer): the run ends with that `network` error, no settle read, pushes unchanged
 // Each expectation is the fault the wrapper injected and what git shows in the bare repository, not ply's output.
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
@@ -31,6 +35,7 @@ import { createTransport } from '../src/http.js';
 import { planTransfer } from '../src/transferplan.js';
 import { runTransfer, transferStep, sweepTransfers } from '../src/transfer.js';
 import * as entry from '../src/index.js';
+import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap } from './unwrap.js';
 
 const must = r => { if (r.ok) return r.value; throw Object.assign(new Error(r.error.message), { code: r.error.code }); };
@@ -401,11 +406,13 @@ test('a pause after this run\'s push was refused and another runner landed the s
   assert.equal(entry.runTransfer, runTransfer);
 });
 
-test('a real AbortSignal fired during the final push: ambiguous, never aborted; git decides what landed', async () => {
+test('a real AbortSignal fired during the final push: ambiguous once sent, aborted when the body was never pulled; git decides what landed', async () => {
   const p = plan();
   const n = p.steps.length;
   // 'applied': the signal fires once git has written its whole report for the final push (it landed);
-  // 'unsent': it fires before the final push is forwarded (git never saw it). The runner cannot tell them apart.
+  // 'unsent': it fires before the final push is forwarded, so fetch rejects without pulling the body (git never saw it):
+  // README, Resumable transfer: a step that fails before any push request is made, `aborted` included, is not a push
+  // and ends with that error as it is (#272).
   for (const when of ['applied', 'unsent']) {
     const controller = new AbortController();
     const seen = { pushes: 0, fired: 0 };
@@ -426,7 +433,7 @@ test('a real AbortSignal fired during the final push: ambiguous, never aborted; 
     if (when === 'applied') assertPublished(bare, p);
     else assert.equal(refsOf(bare), `${p.tempRef} ${p.steps[n - 2].temp}`);
     assert.equal(run.ok, false, `${when}: the final push's outcome is not known to the runner; it said ${say(run)}`);
-    assert.equal(run.error.code, 'ambiguous', `${when}: ${say(run)}`);
+    assert.equal(run.error.code, when === 'applied' ? 'ambiguous' : 'aborted', `${when}: ${say(run)}`);
     // a resume without the signal: nothing to send when it had landed, the one final push when it had not
     const resumed = must(await runTransfer(unwrap(createTransport(url)), from, p, src.commit, { settle: FAST, ref: REF }));
     assert.deepEqual(resumed, { tag: 'done', head: p.head, pushes: when === 'applied' ? 0 : 1, tempLeft: false }, when);
@@ -540,5 +547,45 @@ test('the final push\'s advertisement GET failing (a real AbortSignal; the host 
     assert.equal(c.seen.posts, n - 1, `${fault}: the batch steps' pushes only`);
     assert.deepEqual([c.seen.postsAfterAdvert, c.seen.readsAfterAdvert], [0, 0], `${fault}: no push request and no read after the failed GET`);
     assert.equal(refsOf(bare), `${p.tempRef} ${p.steps[n - 2].temp}`, `${fault}: git shows the last batch and no published ref`);
+  }
+});
+
+// #272. The fetch rejects without reading the request body: the command list never left the process, so git never saw
+// a request. README (Resumable transfer): "A step that fails before any push request is made (… `aborted` or `network`
+// included …) is not a push: the run ends with that error as it is, with no settle reads, it is not counted in `pushes`,
+// and it is never `ambiguous` or a `lastPush`." So the expected values are: code 'network', exactly k settle spans
+// (one per earlier push, k pushes before step k), the run span's pushes k, and git's refs as k clean pushes left them
+// (or k + 1 steps when the other transport landed step k: that push was its, not ours).
+test('a push whose fetch rejects before pulling the body is not a push: the network error as it is, no settle, pushes unchanged (#272)', async () => {
+  const p = plan();
+  const final = p.steps.length - 1;
+  assert.ok(final >= 2);
+  for (const k of [0, 1, final]) {
+    for (const landedFirst of [false, true]) {
+      const { bare, url } = repo();
+      const clean = unwrap(createTransport(url));
+      let posts = 0, rejected = 0;
+      const fetchImpl = async (input, init) => {
+        if (!isPush(input, init) || posts++ !== k) return fetch(input, init);
+        if (landedFirst) must(await transferStep(clean, from, p, k, { commit: src.commit, ref: REF }));
+        rejected++;
+        throw new TypeError('injected: connect failed'); // the body is never read
+      };
+      const ex = arrayExporter();
+      const t = unwrap(createTransport(url, { fetchImpl, tracer: new Tracer({ exporter: ex }) }));
+      const run = await runTransfer(t, from, p, src.commit, { settle: FAST, ref: REF });
+      const at = `step ${k}, landed first ${landedFirst}`;
+      assert.equal(rejected, 1, at);
+      assert.equal(run.ok, false, `${at}: the run reported ${JSON.stringify(run.ok ? run.value : null)}`);
+      assert.equal(run.error.code, 'network', `${at}: ${run.error.code}: ${run.error.message}`);
+      const spans = ex.lines.flatMap(flattenLine);
+      assert.equal(spans.filter(s => s.name === 'git.transfer.settle').length, k, `${at}: settle reads only after the k pushes made`);
+      const [root] = spans.filter(s => s.name === 'git.transfer.run');
+      assert.equal(root.attrs['git.transfer.pushes'] ?? 0, k, `${at}: pushes counts only requests git received`);
+      const landed = landedFirst ? k + 1 : k;
+      const tempAt = landed === 0 ? '' : landed > final ? null : `${p.tempRef} ${p.steps[landed - 1].temp}`;
+      if (tempAt !== null) assert.equal(refsOf(bare), tempAt, `${at}: git's refs`);
+      else assertPublished(bare, p);
+    }
   }
 });

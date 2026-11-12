@@ -89,6 +89,7 @@
                 "git.fetch.wants": "array",
                 "git.fetch.wants.count": "number",
                 "git.limits.first_byte_timeout_ms": "number",
+                "git.limits.held_timeout_ms": "number",
                 "git.limits.idle_timeout_ms": "number",
                 "git.limits.request_timeout_ms": "number",
                 "git.pack.cache": "string",
@@ -152,6 +153,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.cache": "string",
@@ -228,6 +230,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.object.oid": "string",
@@ -287,6 +290,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -446,6 +450,7 @@
                     "git.fetch.wants": "array",
                     "git.fetch.wants.count": "number",
                     "git.limits.first_byte_timeout_ms": "number",
+                    "git.limits.held_timeout_ms": "number",
                     "git.limits.idle_timeout_ms": "number",
                     "git.limits.request_timeout_ms": "number",
                     "git.pack.cache": "string",
@@ -509,6 +514,7 @@
               "attrs": {
                 "git.command": "string",
                 "git.limits.first_byte_timeout_ms": "number",
+                "git.limits.held_timeout_ms": "number",
                 "git.limits.idle_timeout_ms": "number",
                 "git.limits.request_timeout_ms": "number",
                 "git.pack.cache": "string",
@@ -585,6 +591,7 @@
                 "git.fetch.wants": "array",
                 "git.fetch.wants.count": "number",
                 "git.limits.first_byte_timeout_ms": "number",
+                "git.limits.held_timeout_ms": "number",
                 "git.limits.idle_timeout_ms": "number",
                 "git.limits.request_timeout_ms": "number",
                 "git.object.oid": "string",
@@ -644,6 +651,7 @@
               "attrs": {
                 "git.command": "string",
                 "git.limits.first_byte_timeout_ms": "number",
+                "git.limits.held_timeout_ms": "number",
                 "git.limits.idle_timeout_ms": "number",
                 "git.limits.request_timeout_ms": "number",
                 "git.ls_refs.count": "number",
@@ -689,6 +697,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.cache": "string",
@@ -765,6 +774,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.object.oid": "string",
@@ -824,6 +834,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -908,6 +919,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.cache": "string",
@@ -984,6 +996,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.object.oid": "string",
@@ -1043,6 +1056,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -1125,6 +1139,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.bytes": "number",
@@ -1188,6 +1203,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -1268,6 +1284,7 @@
                 "git.fetch.wants": "array",
                 "git.fetch.wants.count": "number",
                 "git.limits.first_byte_timeout_ms": "number",
+                "git.limits.held_timeout_ms": "number",
                 "git.limits.idle_timeout_ms": "number",
                 "git.limits.request_timeout_ms": "number",
                 "git.pack.bytes": "number",
@@ -1371,6 +1388,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.bytes": "number",
@@ -1434,6 +1452,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -1545,6 +1564,7 @@
                     "git.fetch.wants": "array",
                     "git.fetch.wants.count": "number",
                     "git.limits.first_byte_timeout_ms": "number",
+                    "git.limits.held_timeout_ms": "number",
                     "git.limits.idle_timeout_ms": "number",
                     "git.limits.request_timeout_ms": "number",
                     "git.pack.cache": "string",
@@ -1649,6 +1669,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.object.oid": "string",
@@ -1708,6 +1729,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -1800,6 +1822,7 @@
                 "git.fetch.wants": "array",
                 "git.fetch.wants.count": "number",
                 "git.limits.first_byte_timeout_ms": "number",
+                "git.limits.held_timeout_ms": "number",
                 "git.limits.idle_timeout_ms": "number",
                 "git.limits.request_timeout_ms": "number",
                 "git.pack.cache": "string",
@@ -1898,6 +1921,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.object.oid": "string",
@@ -1957,6 +1981,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -2035,6 +2060,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.object.oid": "string",
@@ -2093,6 +2119,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -2172,6 +2199,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.cache": "string",
@@ -2248,6 +2276,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.object.oid": "string",
@@ -2313,6 +2342,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -2382,6 +2412,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.cache": "string",
@@ -2458,6 +2489,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.object.oid": "string",
@@ -2523,6 +2555,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -2587,6 +2620,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.cache": "string",
@@ -2663,6 +2697,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.object.oid": "string",
@@ -2722,6 +2757,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -2786,6 +2822,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.cache": "string",
@@ -2862,6 +2899,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.object.oid": "string",
@@ -2921,6 +2959,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -2982,6 +3021,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.cache": "string",
@@ -3041,6 +3081,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -3101,6 +3142,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.cache": "string",
@@ -3160,6 +3202,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -3223,6 +3266,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.cache": "string",
@@ -3299,6 +3343,7 @@
             "git.fetch.wants": "array",
             "git.fetch.wants.count": "number",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.object.oid": "string",
@@ -3357,6 +3402,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -3445,6 +3491,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.pack.cache": "string",
@@ -3504,6 +3551,7 @@
           "attrs": {
             "git.command": "string",
             "git.limits.first_byte_timeout_ms": "number",
+            "git.limits.held_timeout_ms": "number",
             "git.limits.idle_timeout_ms": "number",
             "git.limits.request_timeout_ms": "number",
             "git.ls_refs.count": "number",
@@ -3622,6 +3670,7 @@
         "git.fetch.wants": "array",
         "git.fetch.wants.count": "number",
         "git.limits.first_byte_timeout_ms": "number",
+        "git.limits.held_timeout_ms": "number",
         "git.limits.idle_timeout_ms": "number",
         "git.limits.request_timeout_ms": "number",
         "git.pack.bytes": "number",
@@ -3685,6 +3734,7 @@
       "attrs": {
         "git.command": "string",
         "git.limits.first_byte_timeout_ms": "number",
+        "git.limits.held_timeout_ms": "number",
         "git.limits.idle_timeout_ms": "number",
         "git.limits.request_timeout_ms": "number",
         "git.ls_refs.count": "number",

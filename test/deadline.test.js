@@ -39,7 +39,7 @@ const drain = async (t, body = new Uint8Array(0), span = spanOf()) => {
 const refusal = async (p) => { try { await p; } catch (e) { return e; } assert.fail('expected a refusal'); };
 
 test('defaults: first byte and idle 60 s, no total cap', () => {
-  assert.deepEqual([DEFAULT_LIMITS.firstByteTimeoutMs, DEFAULT_LIMITS.idleTimeoutMs, DEFAULT_LIMITS.requestTimeoutMs], [60_000, 60_000, 0]);
+  assert.deepEqual([DEFAULT_LIMITS.firstByteTimeoutMs, DEFAULT_LIMITS.idleTimeoutMs, DEFAULT_LIMITS.heldTimeoutMs, DEFAULT_LIMITS.requestTimeoutMs], [60_000, 60_000, 240_000, 0]);
 });
 
 test('a slow but steady body runs far past every timer and is not cut', async () => {
@@ -166,14 +166,14 @@ test('0 turns a timer off: a stalled body with idle 0 runs until the opt-in tota
 
 test('exchangeClock: progress while waiting for headers does not extend the first-byte wait; cancel fires nothing', async () => {
   let fired = null;
-  const c = exchangeClock({ firstByteMs: 80, idleMs: 1000, totalMs: 0 }, null, k => { fired = k; });
+  const c = exchangeClock({ firstByteMs: 80, idleMs: 1000, heldMs: 0, totalMs: 0 }, null, k => { fired = k; });
   const iv = setInterval(() => c.feed('upload_bytes'), 10);
   await sleep(200);
   clearInterval(iv);
   assert.equal(fired, 'firstByteTimeoutMs');
   assert.equal(timeoutLimit(c.signal.reason), 'firstByteTimeoutMs');
   assert.equal(c.signal.reason.name, 'TimeoutError');
-  const d = exchangeClock({ firstByteMs: 40, idleMs: 40, totalMs: 40 }, null, () => { fired = 'late'; });
+  const d = exchangeClock({ firstByteMs: 40, idleMs: 40, heldMs: 0, totalMs: 40 }, null, () => { fired = 'late'; });
   d.cancel();
   await sleep(100);
   assert.equal(d.signal.aborted, false);
@@ -182,7 +182,7 @@ test('exchangeClock: progress while waiting for headers does not extend the firs
 
 test('exchangeClock: idle progress re-arms; the body phase fires only after a real gap', async () => {
   let fired = null;
-  const c = exchangeClock({ firstByteMs: 50, idleMs: 60, totalMs: 0 }, null, k => { fired = k; });
+  const c = exchangeClock({ firstByteMs: 50, idleMs: 60, heldMs: 0, totalMs: 0 }, null, k => { fired = k; });
   c.feed('headers');
   for (let i = 0; i < 8; i++) { await sleep(30); c.feed('body_chunk'); }
   assert.equal(fired, null);
@@ -191,7 +191,7 @@ test('exchangeClock: idle progress re-arms; the body phase fires only after a re
 });
 
 test('watchedUpload: no buffer of its own, the source locked only from the first pull, cancel reaches the source', async () => {
-  const c = exchangeClock({ firstByteMs: 0, idleMs: 0, totalMs: 0 }, null, () => {});
+  const c = exchangeClock({ firstByteMs: 0, idleMs: 0, heldMs: 0, totalMs: 0 }, null, () => {});
   let pulls = 0, cancelled = null;
   const source = new ReadableStream({ pull(ctl) { pulls++; ctl.enqueue(new Uint8Array(1)); }, cancel(r) { cancelled = r; } }, { highWaterMark: 0 });
   const w = watchedUpload(source, c);
@@ -212,7 +212,8 @@ test('watchedUpload: no buffer of its own, the source locked only from the first
 //   - headers seen (from any state before them) is `streaming`: the first byte is satisfied for good
 //   - `restart` (the wait starts again) only on network progress: the request sent again, upload bytes while uploading
 //     or streaming, the upload's end before the headers, the headers, a body chunk, the consumer asking for more
-//   - consumer_took parks the clock (`held`); only consumer_asked resumes it; `ended` and `done` are final
+//   - consumer_took parks the clock (`held`) without a restart: the hold runs from the last network mark (#273 review);
+//     only consumer_asked resumes it; `ended` and `done` are final
 const STATES = ['connecting', 'uploading', 'awaiting_first_byte', 'streaming', 'held', 'done'];
 const EVENTS = ['request_sent', 'upload_started', 'upload_bytes', 'upload_ended', 'headers', 'body_chunk', 'consumer_took', 'consumer_asked', 'ended'];
 // next state per event, in EVENTS order; a trailing `!` is a restart
@@ -248,7 +249,7 @@ test('transition: no event moves a state backwards', () => {
 });
 
 test('deadlineOf: first byte before the headers, idle while on the network, nothing while held, the total throughout', () => {
-  const t = { firstByteMs: 100, idleMs: 20, totalMs: 0 };
+  const t = { firstByteMs: 100, idleMs: 20, heldMs: 0, totalMs: 0 };
   // mark 1000, start 400: the step deadline is mark + its limit
   const at = state => { const d = deadlineOf(state, 1000, 400, t); return d === null ? null : [d.key, d.at, d.ms]; };
   assert.deepEqual(STATES.map(at), [['firstByteTimeoutMs', 1100, 100], ['idleTimeoutMs', 1020, 20], ['firstByteTimeoutMs', 1100, 100], ['idleTimeoutMs', 1020, 20], null, null]);
@@ -257,7 +258,10 @@ test('deadlineOf: first byte before the headers, idle while on the network, noth
   const capped = state => { const d = deadlineOf(state, 1000, 400, { ...t, totalMs: 650 }); return d === null ? null : [d.key, d.at]; };
   assert.deepEqual(STATES.map(capped), [['requestTimeoutMs', 1050], ['idleTimeoutMs', 1020], ['requestTimeoutMs', 1050], ['idleTimeoutMs', 1020], ['requestTimeoutMs', 1050], null]);
   // 0 turns a limit off
-  assert.equal(deadlineOf('streaming', 1000, 400, { firstByteMs: 100, idleMs: 0, totalMs: 0 }), null);
+  assert.equal(deadlineOf('streaming', 1000, 400, { firstByteMs: 100, idleMs: 0, heldMs: 0, totalMs: 0 }), null);
+  // #273: while held, the hold runs from the take (the mark): mark + held, unless the total is earlier
+  assert.deepEqual(capped('held') && [deadlineOf('held', 1000, 400, { ...t, heldMs: 30 }).key, deadlineOf('held', 1000, 400, { ...t, heldMs: 30 }).at], ['heldTimeoutMs', 1030]);
+  assert.equal(deadlineOf('held', 1000, 400, { ...t, heldMs: 30, totalMs: 620 }).key, 'requestTimeoutMs');
 });
 
 // The hot loop (#255 review, R2). One timer is left pending: past the headers a deadline only moves later, so the
@@ -273,7 +277,7 @@ const countingTimers = async run => {
 test('a consumer that keeps up costs no setTimeout and no clearTimeout per body chunk', async () => {
   await countingTimers(calls => {
     for (const totalMs of [0, 120_000]) {
-      const c = exchangeClock({ firstByteMs: 60_000, idleMs: 60_000, totalMs }, null, () => {});
+      const c = exchangeClock({ firstByteMs: 60_000, idleMs: 60_000, heldMs: 240_000, totalMs }, null, () => {});
       c.feed('headers');
       calls.set = 0; calls.clear = 0;
       for (let i = 0; i < 1000; i++) { c.feed('body_chunk'); c.feed('consumer_took'); c.feed('consumer_asked'); }
@@ -333,7 +337,7 @@ test('exchangeClock: with requestTimeoutMs set, the idle limit survives a timer 
       c.cancel();
       return fired;
     };
-    const capped = { firstByteMs: 1000, idleMs: 1000, totalMs: 100_000 };
+    const capped = { firstByteMs: 1000, idleMs: 1000, heldMs: 0, totalMs: 100_000 };
     // headers at 10, a chunk taken at 20; the timer set for 10 + 1000 fires while the consumer holds; ask at 1500, then
     // silence: 1500 + 1000
     assert.equal(run(capped, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('body_chunk'); c.feed('consumer_took'); at(1500); c.feed('consumer_asked'); at(200_000); }), 'idleTimeoutMs@2500');
@@ -352,10 +356,10 @@ test('exchangeClock: with requestTimeoutMs set, the idle limit survives a timer 
 });
 // What README Limits and SAFETY.md I1 say about a held chunk (re-review REQ 3): a timer may still be pending, but with
 // no total cap it cuts nothing, and once it has fired it is not set again until the consumer asks.
-test('exchangeClock: while the consumer holds a chunk a timer may be pending, and without requestTimeoutMs it cuts nothing', async () => {
+test('exchangeClock: with heldTimeoutMs 0, while the consumer holds a chunk a timer may be pending, and without requestTimeoutMs it cuts nothing', async () => {
   await manualTimers(({ advance, pending }) => {
     let fired = 'none';
-    const c = exchangeClock({ firstByteMs: 60_000, idleMs: 60_000, totalMs: 0 }, null, key => { fired = key; });
+    const c = exchangeClock({ firstByteMs: 60_000, idleMs: 60_000, heldMs: 0, totalMs: 0 }, null, key => { fired = key; });
     advance(10); c.feed('headers'); advance(20); c.feed('body_chunk'); c.feed('consumer_took');
     // the one timer, set before the consumer took the chunk
     assert.equal(pending(), 1);
@@ -394,5 +398,115 @@ test('frames(): with requestTimeoutMs set, a server that stalls after the consum
     advance(200_000);
     const e = await next;
     assert.deepEqual([firedAt, e.code, e.what, attrs['git.timeout.limit']], [1000, 'timeout', 'idleTimeoutMs', 'idleTimeoutMs']);
+  });
+});
+// #273 (option B): a consumer that holds a chunk is bounded by limits.heldTimeoutMs, apart from network idle. Expected
+// values are the issue's contract worked by hand: the held wait starts when the consumer takes the chunk (time 0 here)
+// and the cut is at take + heldTimeoutMs, named heldTimeoutMs, with the upstream body cancelled; a hold just under it
+// is not cut; while held, idleTimeoutMs (300, shorter than the hold) is never charged.
+test('defaults: heldTimeoutMs is 4 x the idle default (README Limits)', () => {
+  assert.equal(DEFAULT_LIMITS.heldTimeoutMs, 240_000);
+});
+test('frames(): a consumer that holds a chunk past heldTimeoutMs is cut as timeout/heldTimeoutMs and the upstream is cancelled; just under is not cut', async () => {
+  await manualTimers(async ({ advance, time }) => {
+    const exchange = () => {
+      let pulls = 0, cancelled = null;
+      const body = new ReadableStream({ pull(c) { pulls++; c.enqueue(te.encode('0008abcd')); }, cancel(r) { cancelled = r ?? 'cancelled'; } }, { highWaterMark: 0 });
+      const t = createTransport('https://h/r', { fetchImpl: () => Promise.resolve(new Response(body, { status: 200, headers: RESULT })), limits: withLimits({ firstByteTimeoutMs: 300, idleTimeoutMs: 300, heldTimeoutMs: 1000 }) }).value;
+      const attrs = {};
+      let firedAt = null;
+      const span = { attrs, set: a => { if ('git.timeout.limit' in a) firedAt = time(); Object.assign(attrs, a); }, event() {}, error() {} };
+      return { frames: t.frames('git-upload-pack', new Uint8Array(4), span, { bypassCache: false })[Symbol.asyncIterator](), attrs, fired: () => firedAt, cancelled: () => cancelled, pulls: () => pulls };
+    };
+    // held just under: 999 ms (three idle limits long), then the ask is served: not cut
+    const a = exchange();
+    const t0 = time();
+    assert.equal((await a.frames.next()).done, false);
+    advance(t0 + 999);
+    assert.equal(a.fired(), null, 'network idle is not charged while held, and 999 < heldTimeoutMs');
+    assert.equal((await a.frames.next()).done, false);
+    assert.equal(a.fired(), null);
+    await a.frames.return();
+    // held past it. The take reads no clock: the hold starts at the first clock read that sees it, here the idle timer
+    // pending since the headers (t1 + 300), so the cut is at t1 + 300 + 1000: never before take + 1000, late by at
+    // most one idle interval (README Limits)
+    const b = exchange();
+    const t1 = time();
+    assert.equal((await b.frames.next()).done, false);
+    advance(t1 + 1299);
+    assert.equal(b.fired(), null);
+    advance(t1 + 1300);
+    assert.equal(b.fired(), t1 + 1300);
+    await new Promise(r => setImmediate(r));
+    assert.notEqual(b.cancelled(), null, 'the upstream body is cancelled when the hold is cut');
+    const e = await refusal(b.frames.next());
+    assert.deepEqual([e.code, e.what, b.attrs['git.timeout.limit']], ['timeout', 'heldTimeoutMs', 'heldTimeoutMs']);
+    // the span names the hold limit beside its siblings (README Limits), and the message says what was held and for how long
+    assert.equal(b.attrs['git.limits.held_timeout_ms'], 1000);
+    assert.match(e.message, /held a chunk for 1000 ms .*limits\.heldTimeoutMs/);
+  });
+});
+test('exchangeClock: heldTimeoutMs runs from the first clock read after the take and stops at consumer_asked; 0 turns it off', async () => {
+  await manualTimers(({ advance, time }) => {
+    const run = (t, script) => {
+      const t0 = time();
+      let fired = 'none';
+      const c = exchangeClock(t, null, key => { fired = `${key}@${time() - t0}`; });
+      script(c, ms => { advance(t0 + ms); });
+      c.cancel();
+      return fired;
+    };
+    const lim = { firstByteMs: 1000, idleMs: 1000, heldMs: 4000, totalMs: 0 };
+    // took at 20, never asks. The take reads no clock; the first read after it is the first-byte timer armed at 0 for
+    // 1000 (still pending: the headers' idle deadline 1010 is later), so the hold runs from 1000: 1000 + 4000
+    assert.equal(run(lim, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('body_chunk'); c.feed('consumer_took'); at(200_000); }), 'heldTimeoutMs@5000');
+    // held 3990 each time, five times, the network answering at once: never cut; then silence after the last ask at
+    // 10 + 5 * 3990 = 19960: idle at 19960 + 1000
+    assert.equal(run(lim, (c, at) => {
+      at(10); c.feed('headers');
+      for (let i = 1; i <= 5; i++) { c.feed('body_chunk'); c.feed('consumer_took'); at(10 + i * 3990); c.feed('consumer_asked'); }
+      at(200_000);
+    }), 'idleTimeoutMs@20960');
+    // held shorter than idle: the pending timer (1000) is later than mark + held (10 + 200), so the take arms a new
+    // one, and that arm's clock read is the take's own time: 20 + 200, exactly on time
+    assert.equal(run({ ...lim, heldMs: 200 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'heldTimeoutMs@220');
+    // idle off: the first-byte timer armed at 0 for 1000 is still pending at the take and due before 10 + 4000, so its
+    // fire starts the hold: 1000 + 4000 (late by 980 ms, under one held interval)
+    assert.equal(run({ ...lim, idleMs: 0 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'heldTimeoutMs@5000');
+    // 0 turns it off: only the total cap bounds the hold
+    assert.equal(run({ ...lim, heldMs: 0, totalMs: 9000 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'requestTimeoutMs@9000');
+  });
+});
+// #273 review (owner decision): the hold adds no clock read per chunk. A chunk's cycle in frames() is consumer_took then
+// consumer_asked; on main (8e3939db) that is one Date.now (the ask's restart), and it must stay one: the take reads no
+// clock, and the hold runs from the first clock read after it (a timer firing, or an arm), not from a new read at the take.
+test('exchangeClock: a chunk (consumer_took + consumer_asked) reads the clock once, as on main', () => {
+  let reads = 0;
+  const c = exchangeClock({ firstByteMs: 60_000, idleMs: 60_000, heldMs: 240_000, totalMs: 0 }, null, () => {}, () => { reads++; return 0; });
+  c.feed('headers');
+  const before = reads;
+  for (let i = 0; i < 1000; i++) { c.feed('consumer_took'); c.feed('consumer_asked'); }
+  c.cancel();
+  assert.equal(reads - before, 1000);
+});
+// #273 review round 3 (reproduced at 626a4c7d, passes on main 8e3939db): a chunk whose network delivery took
+// heldTimeoutMs or longer must not be cut the moment it is taken. idle off, and idle (600 s) above held (240 s): headers
+// at 10, the ask at 20, the network silent 300 s, the chunk taken at 300 020 and held 5 ms. The README contract: a hold
+// is never cut before take + heldTimeoutMs.
+for (const idleMs of [0, 600_000]) test(`exchangeClock: idle ${idleMs}, a 5 ms hold after a 300 s network wait is not cut as heldTimeoutMs`, async () => {
+  await manualTimers(({ advance, time }) => {
+    const t0 = time();
+    let fired = 'none';
+    const c = exchangeClock({ firstByteMs: 60_000, idleMs, heldMs: 240_000, totalMs: 0 }, null, k => { fired = `${k}@${time() - t0}`; });
+    const at = ms => { advance(t0 + ms); };
+    at(10); c.feed('headers'); c.feed('consumer_took'); at(20); c.feed('consumer_asked');
+    at(300_020); c.feed('consumer_took'); at(300_025); c.feed('consumer_asked'); at(300_030);
+    assert.equal(fired, 'none');
+    // and a hold past it is still cut, no earlier than take + 240 000
+    c.feed('consumer_took'); at(300_030 + 239_999);
+    assert.equal(fired, 'none');
+    at(300_030 + 240_000 + Math.min(idleMs || 240_000, 240_000));
+    assert.equal(fired.startsWith('heldTimeoutMs@'), true, fired);
+    c.cancel();
   });
 });

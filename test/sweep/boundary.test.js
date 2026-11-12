@@ -50,7 +50,7 @@ test('second-pass cells (#144) exist: thin packs, protocol v0/v1, pkt-line lengt
   const wd = allCells().filter(c => c.runtime === 'workerd');
   assert.ok(wd.length >= 8 && wd.filter(c => isCi(c)).length >= 6, `workerd cells ${wd.length}`);
   // the slow-server cells at the default 60 s timers are nightly; CI crosses a 1 s cap (#255: one per timer)
-  const timers = ['requestTimeoutMs', 'firstByteTimeoutMs', 'idleTimeoutMs'];
+  const timers = ['requestTimeoutMs', 'firstByteTimeoutMs', 'idleTimeoutMs', 'heldTimeoutMs'];
   for (const c of allCells().filter(c => timers.includes(c.param) && !c.id.startsWith('parse.') && !c.limits?.[c.param])) assert.equal(isCi(c), false, c.id);
   for (const key of timers) assert.ok(allCells().some(c => c.param === key && isCi(c) && c.limits?.[key] === 1000), `a CI cell crosses a 1 s ${key}`);
 });
@@ -64,13 +64,12 @@ test('every Limits key is parsed where it enters (#156): a CI cell per key refus
       assert.ok(isCi(c), c.id);
       assert.equal(c.op, 'lsRefs', c.id);
       assert.deepEqual(Object.keys(c.limits), [key], c.id);
-      // the one null that parses: maxResolveWork: null means derived, the same as leaving the key out (README Limits)
-      const expected = c.id === 'parse.maxResolveWork.null' ? { status: 'ok' } : { status: 'refused', code: 'bad_request', what: key };
-      assert.deepEqual(c.expect, expected, c.id);
+      // null is a value on every key, refused like -1 (#271)
+      assert.deepEqual(c.expect, { status: 'refused', code: 'bad_request', what: key }, c.id);
     }
   }
   const work = cells.filter(c => c.id.startsWith('parse.maxResolveWork.'));
-  assert.deepEqual(work.map(c => [c.id, c.limits.maxResolveWork, c.expect.status]), [['parse.maxResolveWork.negative', -1, 'refused'], ['parse.maxResolveWork.null', null, 'ok']]);
+  assert.deepEqual(work.map(c => [c.id, c.limits.maxResolveWork, c.expect.status]), [['parse.maxResolveWork.negative', -1, 'refused'], ['parse.maxResolveWork.null', null, 'refused']]);
   assert.deepEqual(cells.find(c => c.id === 'parse.none').expect, { status: 'ok' });
 });
 

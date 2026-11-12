@@ -97,6 +97,14 @@ test('workerd: first-byte and idle timeouts; a long steady body or upload is not
     assert.deepEqual([up.ok, up.frames], [true, 2], JSON.stringify(up));
     const upStall = await run('uploadstall');
     assert.deepEqual([upStall.ok, upStall.code, upStall.what], [false, 'timeout', 'idleTimeoutMs'], JSON.stringify(upStall));
+    // #273 heldTimeoutMs: the consumer holds the first frame (holdMs), longer than the 250 ms idle limit each time.
+    // Past a 600 ms hold limit it is cut as timeout/heldTimeoutMs; just under it, or with the limit off, it reads all 21.
+    const holdPast = await post('/timeouts', { url: `${base}/steady/r.git`, mode: 'steady', holdMs: 900, limits: { ...limits, heldTimeoutMs: 600 } });
+    assert.deepEqual([holdPast.ok, holdPast.code, holdPast.what, holdPast.limit], [false, 'timeout', 'heldTimeoutMs', 'heldTimeoutMs'], JSON.stringify(holdPast));
+    const holdUnder = await post('/timeouts', { url: `${base}/steady/r.git`, mode: 'steady', holdMs: 450, limits: { ...limits, heldTimeoutMs: 600 } });
+    assert.deepEqual([holdUnder.ok, holdUnder.frames], [true, 21], JSON.stringify(holdUnder));
+    const holdOff = await post('/timeouts', { url: `${base}/steady/r.git`, mode: 'steady', holdMs: 900, limits: { ...limits, heldTimeoutMs: 0 } });
+    assert.deepEqual([holdOff.ok, holdOff.frames], [true, 21], JSON.stringify(holdOff));
     console.log(`  workerd timeouts: steady ${steady.ms} ms ok, stall cut at ${stall.ms} ms, slow headers ${slow.ms} ms, upload stall ${upStall.ms} ms`);
   } finally { server.closeAllConnections?.(); server.close(); }
 });

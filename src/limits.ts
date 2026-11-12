@@ -150,6 +150,14 @@ export const LIMIT_REQUEST_TIMEOUT_MS = 0;
 export const LIMIT_FIRST_BYTE_TIMEOUT_MS = 60_000;
 /** The longest gap with no progress: no upload chunk pulled, no response body chunk read. 0 turns it off. */
 export const LIMIT_IDLE_TIMEOUT_MS = 60_000;
+/** How many idle limits a consumer may hold one chunk before the exchange is cut (#273). */
+const HELD_PER_IDLE = 4;
+/**
+ * The longest the consumer may hold a chunk (from taking it to asking for the next) before the exchange is cut as
+ * `timeout` naming heldTimeoutMs (#273). Network idle is not charged while the consumer holds; this is the consumer's own
+ * bound, so a stalled consumer does not keep a socket open forever. 4 x the idle default. 0 turns it off.
+ */
+export const LIMIT_HELD_TIMEOUT_MS: number = HELD_PER_IDLE * LIMIT_IDLE_TIMEOUT_MS;
 /**
  * What one held object costs beyond its bytes, charged against the byte budget that holds it: each parsed pack object
  * against maxInflatedTotal (parsePack, and resolvePack's room), each local object against it (pushRepo), each file or
@@ -179,8 +187,8 @@ export const LIMIT_WORK_RATIO = 32;
  * miss. Measured by the test's own RangeSource (test/pack-range-resolve.test.js): that history resolves at about 1x the
  * sum of its object sizes on the default cache.
  * The hard ceiling, whatever the pack declares (a pack of maximum-size delta bombs declares a floor as large as it
- * likes), is the Limits key maxResolveWork, or the record's maxInflatedTotal when that is larger (the bound is never
- * below maxInflatedTotal: a preset spread with maxInflatedTotal raised resolves what it did before the key existed).
+ * likes), is the Limits key maxResolveWork, exactly as parsed. parseLimits refuses it below the record's own
+ * maxInflatedTotal (bad_request, #271): such a ceiling would refuse what the retain bound admits.
  * Left out of a caller's record it is LIMIT_RESOLVE_TOTALS x that record's
  * maxInflatedTotal, so it follows the preset: 2 GiB on DEFAULT_LIMITS, 512 MiB on WORKER_LIMITS. Measured on a 40 KB
  * bomb (test/pack-range-resolve-bound.test.js): refused after 512 MiB in about 2 s of CPU and after 2 GiB in about 8 s
@@ -226,6 +234,7 @@ export type Limits = {
   readonly requestTimeoutMs: number;
   readonly firstByteTimeoutMs: number;
   readonly idleTimeoutMs: number;
+  readonly heldTimeoutMs: number;
 };
 export type LimitKey = keyof Limits;
 
@@ -234,10 +243,9 @@ export type LimitKey = keyof Limits;
 // is a plain record again and is parsed afresh. Internal code takes CheckedLimits and reads its keys directly.
 const CHECKED_LIMITS: unique symbol = Symbol('checkedLimits');
 export type CheckedLimits = Limits & { readonly [CHECKED_LIMITS]: true };
-// What a caller passes: any subset of the keys (a missing key is the default), or none. maxResolveWork may also be
-// null: derived from the record's own maxInflatedTotal, the same as leaving it out (no other key takes null).
-type LimitsGiven = Omit<Limits, 'maxResolveWork'> & { readonly maxResolveWork: number | null };
-export type LimitsInput = Input<LimitsGiven>;
+// What a caller passes: any subset of the keys (a missing key is the default; maxResolveWork missing is derived from
+// the record's own maxInflatedTotal), or none. null is a value on every key, and refused.
+export type LimitsInput = Input<Limits>;
 
 // The brand on a record whose every value is a finite non-negative number (each caller's check, or arithmetic on checked
 // values). Frozen: the record is shared by every read past the edge.
@@ -276,6 +284,7 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
   requestTimeoutMs: LIMIT_REQUEST_TIMEOUT_MS,
   firstByteTimeoutMs: LIMIT_FIRST_BYTE_TIMEOUT_MS,
   idleTimeoutMs: LIMIT_IDLE_TIMEOUT_MS,
+  heldTimeoutMs: LIMIT_HELD_TIMEOUT_MS,
 });
 
 /**
@@ -315,15 +324,22 @@ export const WORKER_LIMITS: CheckedLimits = grant({
 /* oxlint-enable no-magic-numbers */
 
 // A caller's overrides on top of the defaults, as a plain record: it is checked where it enters (parseLimits).
-// maxResolveWork left out follows the record's own maxInflatedTotal (resolveWorkOf), as in parseLimits.
-const resolveWorkOf = (maxInflatedTotal: number): number => Math.min(Number.MAX_SAFE_INTEGER, maxInflatedTotal * LIMIT_RESOLVE_TOTALS);
-// maxResolveWork: null is left out too (a spread of a preset, or a JSON record, has no other way to ask for the derived value)
-const hasWork = (record: LimitsGiven): record is Limits => record.maxResolveWork !== null;
-export const withLimits = (o: Partial<LimitsGiven> = {}): Limits => {
+// maxResolveWork left out follows the record's own maxInflatedTotal (resolveWorkOf), as in parseLimits: 8 x it, capped
+// at MAX_SAFE_INTEGER but never below maxInflatedTotal itself, so a derived value always meets parseLimits' bound.
+const resolveWorkOf = (maxInflatedTotal: number): number => Math.max(maxInflatedTotal, Math.min(Number.MAX_SAFE_INTEGER, maxInflatedTotal * LIMIT_RESOLVE_TOTALS));
+export const withLimits = (o: Partial<Limits> = {}): Limits => {
   // null from an untyped caller is no overrides, as the missing value is: the frozen defaults, not a throw
-  const given = getOrElse<Partial<LimitsGiven>>(fromNullish(o), {});
+  const given = getOrElse<Partial<Limits>>(fromNullish(o), {});
   const filled = { ...DEFAULT_LIMITS, ...given };
-  return Object.freeze(hasWork(filled) && !isMissing(given.maxResolveWork) ? filled : { ...filled, maxResolveWork: resolveWorkOf(filled.maxInflatedTotal) });
+  return Object.freeze(isMissing(given.maxResolveWork) ? { ...filled, maxResolveWork: resolveWorkOf(filled.maxInflatedTotal) } : filled);
+};
+
+// A record with maxResolveWork taken out, so it is derived from the record's own maxInflatedTotal where it is parsed:
+// for a spread preset whose maxInflatedTotal is changed (`withDerivedWork({ ...WORKER_LIMITS, maxInflatedTotal: x })`
+// is bounded at 8 x x). Every other key is kept as given.
+export const withDerivedWork = <T extends LimitsInput>(limits: T): Omit<T, 'maxResolveWork'> => {
+  const { maxResolveWork: _derived, ...rest } = limits;
+  return rest;
 };
 
 // Absent, NaN, Infinity, or negative: the check would not bound anything. Fail before any allocation.
@@ -332,28 +348,30 @@ export const checkLimit = (value: unknown, what: string): Result<number, ErrorOf
     ? ok(value)
     : err(plyError('bad_request', `limits.${what} must be a finite non-negative number`, { what, got: value }));
 
-// The largest delay a platform timer holds: a signed 32-bit count of ms (24.8 days). The exchange's three timeouts.
+// The largest delay a platform timer holds: a signed 32-bit count of ms (24.8 days). The exchange's four timeouts.
 export const MAX_TIMER_MS = 2_147_483_647;
-const TIMER_KEYS: ReadonlySet<string> = new Set(['requestTimeoutMs', 'firstByteTimeoutMs', 'idleTimeoutMs']);
+const TIMER_KEYS: ReadonlySet<string> = new Set(['requestTimeoutMs', 'firstByteTimeoutMs', 'idleTimeoutMs', 'heldTimeoutMs']);
 
 // The caller's limits record (any subset), or none (null), parsed once where it enters. A key it gives must pass
 // checkLimit (the refusal names the key, `got` is what was passed; keys are checked in DEFAULT_LIMITS order); a key it
-// leaves out, or passes as the missing value, is DEFAULT_LIMITS's (maxResolveWork: 8 x the record's maxInflatedTotal). Keys this version does not read are ignored. A
+// leaves out, or passes as the missing value, is DEFAULT_LIMITS's (maxResolveWork: 8 x the record's maxInflatedTotal; given, it must be at least the record's maxInflatedTotal). Keys this version does not read are ignored. A
 // record parseLimits already returned is returned as it is; none (null) is DEFAULT_LIMITS.
 // @decoder parseLimits prefix=limits
 export function parseLimits(input: LimitsInput | null): Result<CheckedLimits, ErrorOf<'bad_request'>> {
   if (input === null) return ok(DEFAULT_LIMITS);
   if (isChecked(input)) return ok(input);
   // A spread of DEFAULT_LIMITS: its keys (the brand is not enumerable), in order, each filled from the input where given.
-  const given = withDefaults<LimitsGiven>(input, { ...DEFAULT_LIMITS });
-  // the resolve work ceiling a caller leaves out (or gives as null) follows the maxInflatedTotal of its own record, not the default's
-  const filled: Limits = hasWork(given) && !isMissing(input.maxResolveWork) ? given : { ...given, maxResolveWork: resolveWorkOf(given.maxInflatedTotal) };
+  const given = withDefaults<Limits>(input, { ...DEFAULT_LIMITS });
+  // the resolve work ceiling a caller leaves out follows the maxInflatedTotal of its own record, not the default's
+  const filled: Limits = isMissing(input.maxResolveWork) ? { ...given, maxResolveWork: resolveWorkOf(given.maxInflatedTotal) } : given;
   for (const [key, value] of Object.entries(filled)) {
     const checked = checkLimit(value, key);
     if (!checked.ok) return checked;
     // a timer holds at most MAX_TIMER_MS: above it the platform's timer fires at once (Node: 1 ms, with a warning)
     if (TIMER_KEYS.has(key) && checked.value > MAX_TIMER_MS) return err(plyError('bad_request', `limits.${key} must be at most ${MAX_TIMER_MS} ms (0 turns the timer off)`, { what: key, got: value }));
   }
+  // #271: the resolver's ceiling is this number as given, so one below the retain bound is refused, never raised
+  if (filled.maxResolveWork < filled.maxInflatedTotal) return err(plyError('bad_request', `limits.maxResolveWork must be at least limits.maxInflatedTotal (${filled.maxInflatedTotal})`, { what: 'maxResolveWork', got: filled.maxResolveWork }));
   return ok(grant(filled));
 }
 

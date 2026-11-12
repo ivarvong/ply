@@ -165,7 +165,7 @@ export default {
       removeEventListener('unhandledrejection', onRejection);
       return Response.json({ got, before, read, cancel, rejections });
     }
-    if (u.pathname === '/timeouts') { // #255 under workerd: {url, mode, limits}; frames over a POST whose server drips, stalls or is slow
+    if (u.pathname === '/timeouts') { // #255 under workerd: {url, mode, limits, holdMs}; frames (the consumer holds the first one holdMs, #273) over a POST whose server drips, stalls or is slow
       const body = await req.json();
       const t = unwrap(createTransport(body.url, { limits: withLimits(body.limits) }));
       const span = { attrs: {}, set(a) { Object.assign(this.attrs, a); }, event() {}, error() {} };
@@ -186,7 +186,7 @@ export default {
       const t0 = Date.now();
       let frames = 0;
       try {
-        for await (const _ of t.frames('git-upload-pack', upload, span, { bypassCache: false })) frames++;
+        for await (const _ of t.frames('git-upload-pack', upload, span, { bypassCache: false })) { if (frames++ === 0 && body.holdMs > 0) await new Promise(r => setTimeout(r, body.holdMs)); }
         return Response.json({ ok: true, frames, ms: Date.now() - t0, limit: span.attrs['git.timeout.limit'] ?? null });
       } catch (e) {
         return Response.json({ ok: false, code: e.code, what: e.what ?? null, message: e.message, ms: Date.now() - t0, limit: span.attrs['git.timeout.limit'] ?? null });

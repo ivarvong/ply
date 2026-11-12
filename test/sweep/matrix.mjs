@@ -46,6 +46,7 @@ const refused = (code, extra = {}) => Object.freeze({ status: 'refused', code, .
  * @property {number} [history]  commits in the log fixture, for the readLog oracle
  * @property {'workerd'} [runtime]  run once inside workerd (test/workerd/worker.mjs) instead of on the two node heaps
  * @property {string} [shim]  shim.mjs mode the request goes through (v0, v1, delay-<ms>, stall-<ms>, frame-<L>)
+ * @property {number} [holdMs]  readFile: the consumer holds the stream's first chunk this long before reading on (heldTimeoutMs, #273)
  * @property {number} [capDelta]  the cap is the oracle's measurement plus this (expectFrom objects, delta-result, harvest)
  * @property {number} [haveCount]  haves for a fetchPack cell: this many ancestors of main
  * @property {number} [wantCount]  wants for a fetchPack cell: main and this many minus one of its ancestors
@@ -341,11 +342,10 @@ function build() {
   // is made, before any request, whichever operation would read it: lsRefs reads only maxRefs and maxLsRefsBytes, and
   // every key's cell is still refused there (the lazy read refused only the key the operation reached). A key left out
   // is the default: every other cell passes only the keys it sets (cell.mjs passes the record as written).
-  // One null parses: maxResolveWork: null means derived (8 x the record's maxInflatedTotal), the same as leaving it out.
+  // null is refused on every key (#271): derived maxResolveWork is the key left out.
   for (const key of Object.keys(DEFAULT_LIMITS)) {
     for (const [name, value] of [['negative', -1], ['null', null]]) {
-      const expect = key === 'maxResolveWork' && value === null ? ok : refused('bad_request', { what: key });
-      add({ id: `parse.${key}.${name}`, param: key, op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: { [key]: value }, expect });
+      add({ id: `parse.${key}.${name}`, param: key, op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: { [key]: value }, expect: refused('bad_request', { what: key }) });
     }
   }
   add({ id: 'parse.none', param: 'maxRefs', op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: {}, expect: ok });
@@ -515,6 +515,11 @@ function pass2(add) {
   for (const [ms, expect] of [[200, ok], [2500, timeout]]) {
     add({ id: `timeout.firstbyte1000.lsRefs.delay-${ms}`, param: 'firstByteTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `delay-${ms}`, bytes: 200, entries: 1, limits: { firstByteTimeoutMs: 1000 }, expect });
     add({ id: `timeout.idle1000.lsRefs.stall-${ms}`, param: 'idleTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `stall-${ms}`, bytes: 200, entries: 1, limits: { idleTimeoutMs: 1000 }, expect });
+  }
+  // heldTimeoutMs (#273): the consumer, not the server, holds the first chunk of a 1 MiB blob (holdMs), through the
+  // shim (delay-0, a pass-through): held well inside a 1 s cap is read whole, held well past it is cut as timeout.
+  for (const [ms, expect] of [[200, ok], [2500, refused('timeout', { what: 'heldTimeoutMs' })]]) {
+    add({ id: `timeout.held1000.readFile.hold-${ms}`, param: 'heldTimeoutMs', op: 'readFile', repo: 'blob-1048576', path: 'big.bin', shim: 'delay-0', holdMs: ms, bytes: MiB, entries: 2, limits: { heldTimeoutMs: 1000 }, expect });
   }
   add({ id: 'timeout.idle1000.readFile.stall-2500', param: 'idleTimeoutMs', op: 'readFile', repo: 'blob-1048576', path: 'big.bin', shim: 'stall-2500', bytes: MiB, entries: 2, limits: { idleTimeoutMs: 1000 }, expect: timeout });
   const fCap = DEFAULT_LIMITS.firstByteTimeoutMs, iCap = DEFAULT_LIMITS.idleTimeoutMs;
