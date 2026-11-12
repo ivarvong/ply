@@ -32,7 +32,7 @@ import type { ScannedPack, ScanColumns } from './packscanindex.js';
 import { scannedPackOf, SCAN_INDEX_ENTRY_BYTES } from './packscanindex.js';
 import type { ResolvedIndex, ResolvedColumns, ResolveStats } from './packrangeresolve.js';
 import { resolvedIndexOf, NO_BASE, THIN_BASE } from './packrangeresolve.js';
-import { DEFAULT_LIMITS } from './limits.js';
+import { DEFAULT_LIMITS, limitExceeded } from './limits.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
 import { OID_BYTES, OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA, PACK_TRAILER_BYTES } from './format.js';
 
@@ -109,6 +109,11 @@ export async function packIdentity(source: RangeSource, signal: AbortSignal = UN
   } finally {
     halt.release();
   }
+}
+
+// A limit_exceeded refusal as the PlyError a scan under the same cap returns (transferload refuses with it, #299).
+export function refusalLimitError(r: Extract<SavedIndexRefusal, { readonly tag: 'limit_exceeded' }>): PlyError {
+  return limitExceeded(r.what, r.got, r.max);
 }
 
 // A refusal in words, for a span or a log line.

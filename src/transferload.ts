@@ -28,12 +28,11 @@ import type { RangeSource } from './rangesource.js';
 import { UNCANCELLABLE, HALTED, haltOn, cancelLate, aborted } from './rangesource.js';
 import type { TransferPack } from './transferplan.js';
 import type { SavedIndex, SavedIndexRefusal } from './packsaved.js';
-import { decodeSavedIndex, encodeSavedIndex, describeRefusal, packIdentity } from './packsaved.js';
+import { decodeSavedIndex, encodeSavedIndex, describeRefusal, packIdentity, refusalLimitError } from './packsaved.js';
 import type { Span } from './otel.js';
 import { KIND } from './otel.js';
 import type { Transport } from './transport.js';
 import { spanned } from './transport.js';
-import { limitExceeded } from './limits.js';
 
 export type Loaded = { readonly tag: 'saved' } | { readonly tag: 'resolved' } | { readonly tag: 'scanned'; readonly refused: Option<SavedIndexRefusal> };
 export type LoadedPack = { readonly from: TransferPack; readonly loaded: Loaded; readonly saved: Uint8Array };
@@ -64,7 +63,7 @@ async function scanned(source: RangeSource, cfg: LoadConfig, refused: Option<Sav
 async function fromSaved(source: RangeSource, cfg: LoadConfig, span: Span, bytes: Uint8Array, decoded: Result<SavedIndex, SavedIndexRefusal>): Promise<Result<LoadedPack, PlyError>> {
   if (!decoded.ok) {
     // over maxPackObjects: refused, not scanned (a scan of the same pack under the same cap is refused the same way)
-    if (decoded.error.tag === 'limit_exceeded') return err(limitExceeded(decoded.error.what, decoded.error.got, decoded.error.max));
+    if (decoded.error.tag === 'limit_exceeded') return err(refusalLimitError(decoded.error));
     span.set({ 'git.transfer.load.refused': decoded.error.tag, 'git.transfer.load.refused_reason': describeRefusal(decoded.error) });
     const again = await scanned(source, cfg, some(decoded.error));
     return again;
