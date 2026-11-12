@@ -432,6 +432,9 @@ test('frames(): a consumer that holds a chunk past heldTimeoutMs is cut as timeo
     assert.notEqual(b.cancelled(), null, 'the upstream body is cancelled when the hold is cut');
     const e = await refusal(b.frames.next());
     assert.deepEqual([e.code, e.what, b.attrs['git.timeout.limit']], ['timeout', 'heldTimeoutMs', 'heldTimeoutMs']);
+    // the span names the hold limit beside its siblings (README Limits), and the message says what was held and for how long
+    assert.equal(b.attrs['git.limits.held_timeout_ms'], 1000);
+    assert.match(e.message, /held a chunk for 1000 ms .*limits\.heldTimeoutMs/);
   });
 });
 test('exchangeClock: heldTimeoutMs runs from consumer_took and stops at consumer_asked; 0 turns it off', async () => {

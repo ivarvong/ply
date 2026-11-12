@@ -46,6 +46,7 @@ const refused = (code, extra = {}) => Object.freeze({ status: 'refused', code, .
  * @property {number} [history]  commits in the log fixture, for the readLog oracle
  * @property {'workerd'} [runtime]  run once inside workerd (test/workerd/worker.mjs) instead of on the two node heaps
  * @property {string} [shim]  shim.mjs mode the request goes through (v0, v1, delay-<ms>, stall-<ms>, frame-<L>)
+ * @property {number} [holdMs]  readFile: the consumer holds the stream's first chunk this long before reading on (heldTimeoutMs, #273)
  * @property {number} [capDelta]  the cap is the oracle's measurement plus this (expectFrom objects, delta-result, harvest)
  * @property {number} [haveCount]  haves for a fetchPack cell: this many ancestors of main
  * @property {number} [wantCount]  wants for a fetchPack cell: main and this many minus one of its ancestors
@@ -515,6 +516,11 @@ function pass2(add) {
   for (const [ms, expect] of [[200, ok], [2500, timeout]]) {
     add({ id: `timeout.firstbyte1000.lsRefs.delay-${ms}`, param: 'firstByteTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `delay-${ms}`, bytes: 200, entries: 1, limits: { firstByteTimeoutMs: 1000 }, expect });
     add({ id: `timeout.idle1000.lsRefs.stall-${ms}`, param: 'idleTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `stall-${ms}`, bytes: 200, entries: 1, limits: { idleTimeoutMs: 1000 }, expect });
+  }
+  // heldTimeoutMs (#273): the consumer, not the server, holds the first chunk of a 1 MiB blob (holdMs), through the
+  // shim (delay-0, a pass-through): held well inside a 1 s cap is read whole, held well past it is cut as timeout.
+  for (const [ms, expect] of [[200, ok], [2500, refused('timeout', { what: 'heldTimeoutMs' })]]) {
+    add({ id: `timeout.held1000.readFile.hold-${ms}`, param: 'heldTimeoutMs', op: 'readFile', repo: 'blob-1048576', path: 'big.bin', shim: 'delay-0', holdMs: ms, bytes: MiB, entries: 2, limits: { heldTimeoutMs: 1000 }, expect });
   }
   add({ id: 'timeout.idle1000.readFile.stall-2500', param: 'idleTimeoutMs', op: 'readFile', repo: 'blob-1048576', path: 'big.bin', shim: 'stall-2500', bytes: MiB, entries: 2, limits: { idleTimeoutMs: 1000 }, expect: timeout });
   const fCap = DEFAULT_LIMITS.firstByteTimeoutMs, iCap = DEFAULT_LIMITS.idleTimeoutMs;

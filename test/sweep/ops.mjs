@@ -12,10 +12,13 @@ import { unwrap, unwrapAsync } from '../unwrap.js';
 const author = { name: 'sweep', email: 'sweep@example.com' };
 const when = 1700000000;
 
-/** @param {ReadableStream<Uint8Array>} stream */
-async function drain(stream) {
+/** The consumer holds the first chunk for holdMs before reading on (#273 heldTimeoutMs). @param {ReadableStream<Uint8Array>} stream @param {number} holdMs */
+async function drain(stream, holdMs = 0) {
   let len = 0;
-  for await (const chunk of stream) len += chunk.byteLength;
+  for await (const chunk of stream) {
+    if (len === 0 && holdMs > 0) await new Promise(r => setTimeout(r, holdMs));
+    len += chunk.byteLength;
+  }
   return len;
 }
 
@@ -24,7 +27,7 @@ export function fetchOps(cell, opts) {
   return {
     async readFile() {
       const r = await unwrapAsync(readFile(cell.url, { ref: cell.ref ?? null, path: cell.path }, opts));
-      const len = await drain(r.stream);
+      const len = await drain(r.stream, cell.holdMs ?? 0);
       return { blob: r.blob, size: r.size, len };
     },
     async listTree() {
