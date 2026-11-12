@@ -214,11 +214,13 @@ test('codec: the seed it prints is the seed it ran, a replay with it draws the s
 // the seed and its replay. The failure is made by the oracle, not by ply: a stand-in `git` whose fsck rejects every
 // object, so each object ply accepts is a DIVERGE. The replay expected for a case is its usage line's: a fixed case
 // by name, a random case `kind#<seed>` by that seed, with the run's --n and --seed (they decide which cases exist).
+// Under vitest `command -v git` is test/git-shim, which strips its own directory from PATH and execs `git`: the
+// stand-in hands git the PATH without itself, or the shim finds the stand-in again and the two exec each other forever.
 test('below-hash: prints its seed on start, and a failure names the seed and the command that replays it', () => {
   const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
   const bin = mkdtempSync(join(tmpdir(), 'ply-no-fsck-'));
   try {
-    writeFileSync(join(bin, 'git'), `#!/bin/sh\nfor a in "$@"; do [ "$a" = fsck ] && { echo "error: stand-in fsck rejects every object"; exit 1; }; done\nexec "${realGit}" "$@"\n`);
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nfor a in "$@"; do [ "$a" = fsck ] && { echo "error: stand-in fsck rejects every object"; exit 1; }; done\nPATH='${process.env.PATH}' exec "${realGit}" "$@"\n`);
     chmodSync(join(bin, 'git'), 0o755);
     const r = direct('below-hash', ['--n', '2'], { ...process.env, PATH: `${bin}:${process.env.PATH}` });
     assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
