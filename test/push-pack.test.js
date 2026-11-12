@@ -358,7 +358,7 @@ test('push options: refused when not advertised, sent when they are', async () =
   const checked = unwrap(checkPushCaps(new Set(['report-status', 'push-options', 'object-format=sha1']), { pushOptions: ['ci.skip'] }));
   let body = null;
   const fetchImpl = routed(async init => { const chunks = []; const reader = init.body.getReader(); for (;;) { const c = await reader.read(); if (c.done) break; chunks.push(c.value); } body = concat(chunks); return reportResponse(); });
-  const sent = await pushPackChecked(transport(url, { fetchImpl }), { ...create(), pack: streamOf(new Uint8Array([1, 2, 3])).stream, checked, sideband: false });
+  const { result: sent } = await pushPackChecked(transport(url, { fetchImpl }), { ...create(), pack: streamOf(new Uint8Array([1, 2, 3])).stream, checked, sideband: false });
   assert.equal(sent.ok, true, sent.error?.message);
   const text = new TextDecoder('latin1').decode(body);
   assert.ok(text.includes('000cci.skip\n0000'), text.slice(0, 300));
@@ -392,7 +392,7 @@ test('refusals with nothing read: a missing, locked or non-stream pack; objects;
   }
   const badRef = await pushPack(t, { ref: 'not a ref', oldOid: ZERO_OID, newOid: source.oid, pack: stream() });
   assert.equal(badRef.error.code, 'bad_request');
-  const noWants = await pushPackChecked(t, { ...create(), pack: stream(), atomic: true });
+  const { result: noWants } = await pushPackChecked(t, { ...create(), pack: stream(), atomic: true });
   assert.equal(noWants.error.code, 'bad_request', 'unchecked atomic is refused, not dropped');
 });
 
@@ -448,4 +448,26 @@ test('a transport that rejects without reading the body and pulls it afterwards 
   assert.equal(tipOf(bare), null);
   const first = await stream.getReader().read();
   assert.deepEqual([...first.value], [...source.pack.slice(0, 4096)]);
+});
+
+// #272: the outcome says whether receive-pack got a request. README (pushPack, Resumable transfer): a refusal, a fired
+// signal and a fetch that rejects before pulling the body send nothing; from the first pull the request went out.
+test('pushPackChecked says whether the request was sent: not for a refusal, a fired signal or an unpulled body; yes from the first pull', async () => {
+  const { url } = repo();
+  const stream = () => streamOf(source.pack).stream;
+  const unpulled = routed(async () => { throw new TypeError('connect failed'); });
+  const pulled = routed(async init => { await init.body.getReader().read(); throw new TypeError('network gone'); });
+  const fired = new AbortController(); fired.abort();
+  const cases = [
+    ['refused', transport(url), { ...create(), pack: stream(), length: -1 }, 'no', 'bad_request'],
+    ['signal fired', transport(url, { signal: fired.signal }), { ...create(), pack: stream() }, 'no', 'aborted'],
+    ['body never pulled', transport(url, { fetchImpl: unpulled }), { ...create(), pack: stream() }, 'no', 'network'],
+    ['lost after the first pull', transport(url, { fetchImpl: pulled }), { ...create(), pack: stream() }, 'yes', 'ambiguous'],
+    ['landed', transport(url), { ...create(), pack: stream() }, 'yes', null],
+  ];
+  for (const [what, t, opts, sent, code] of cases) {
+    const o = await pushPackChecked(t, { ...opts, sideband: false });
+    assert.equal(o.sent, sent, what);
+    assert.equal(o.result.ok ? null : o.result.error.code, code, what);
+  }
 });

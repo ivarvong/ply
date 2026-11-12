@@ -348,7 +348,7 @@ test('pushPack round trip: a reordered subset pushed to git http-backend lands, 
   const name = `push${n++}`;
   const bare = makeBareRepo(root, name);
   const t = unwrap(createTransport(`${srv.url}/${name}.git`));
-  const r = await pushPackChecked(t, { ref: REF, oldOid: ZERO_OID, newOid: packs.head, pack: built.stream, length: built.length, sideband: false });
+  const { result: r } = await pushPackChecked(t, { ref: REF, oldOid: ZERO_OID, newOid: packs.head, pack: built.stream, length: built.length, sideband: false });
   assert.equal(r.ok, true, r.ok ? '' : r.error.message);
   assert.equal(git(bare, ['rev-parse', REF]).trim(), packs.head);
   assert.deepEqual(fsckProblems(bare, { args: ['--strict'] }), []);
