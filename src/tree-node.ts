@@ -13,7 +13,7 @@
 import { readdir, readFile, readlink, lstat } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a file's path in the tree throughout this file
 import { join } from 'node:path';
-import { fail } from './errors.js';
+import { callbackFailed, describeThrown, fail } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf, parseLimits } from './limits.js';
 import type { LimitsInput } from './limits.js';
@@ -38,8 +38,9 @@ export type FilesFromDirConfig = { readonly limits: LimitsInput; readonly filter
 export type FilesFromDirOptions = Input<FilesFromDirConfig>;
 type DirError = ErrorOf<'bad_request' | 'limit_exceeded'>;
 
-// The walk as a value: a refused entry or bound is an Err. The file system's own failures (a missing directory, a
-// permission) reject as node:fs rejects them.
+// The walk as a value: a refused entry or bound is an Err, and so is the file system's own failure (a missing
+// directory, a permission): bad_request naming 'dir', with node:fs's error (its errno `code`, `path`) as `cause`.
+// Definite: the walk precedes any request. filesFromDir never rejects.
 export async function filesFromDir(dir: string, options: FilesFromDirOptions | null = null): Promise<Result<DirFile[], DirError>> {
   const { limits, filter } = withDefaults<FilesFromDirConfig>(options, { limits: DEFAULT_LIMITS, filter: null });
   const checked = parseLimits(limits);
@@ -63,7 +64,10 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
       const path = rel ? `${rel}/${name}` : name;
       const full = join(dir, path);
       const st = await lstat(full);
-      if (filter !== null && !filter(path, { directory: st.isDirectory(), symlink: st.isSymbolicLink() })) continue;
+      // the caller's filter: what it throws is an Err naming 'filter' (definite: the walk precedes any request)
+      let wanted = true;
+      if (filter !== null) { try { wanted = filter(path, { directory: st.isDirectory(), symlink: st.isSymbolicLink() }); } catch (e) { return err(callbackFailed('filter', e)); } }
+      if (!wanted) continue;
       let kept: Result<null, DirError>;
       if (st.isDirectory()) kept = await walk(path);
       else if (st.isSymbolicLink()) kept = keep(await readlink(full, { encoding: 'buffer' }), path, MODE_LINK);
@@ -75,7 +79,11 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
     }
     return ok(null);
   };
-  const walked = await walk('');
+  let walked: Result<null, DirError>;
+  try { walked = await walk(''); } catch (e) {
+    // `dir` is the caller's value: one that is not a string (node:fs refused it) may have no string form to print
+    return fail('bad_request', `${typeof dir === 'string' ? dir : 'dir'}: the directory could not be read: ${describeThrown(e)}`, { what: 'dir', cause: e });
+  }
   return walked.ok ? ok(out) : walked;
 }
 

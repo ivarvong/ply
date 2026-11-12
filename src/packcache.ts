@@ -32,7 +32,7 @@ import type { PlyError } from './errors.js';
 import type { FetchRequest } from './uprequest.js';
 import type { Option, Result } from './result.js';
 import { te, concat } from './bytes.js';
-import { fail } from './errors.js';
+import { callbackFailed, fail } from './errors.js';
 import { DEFAULT_LIMITS, LIMIT_MEMORY_CACHE_BYTES, LIMIT_MEMORY_CACHE_ENTRIES, limitExceeded, parseLimits } from './limits.js';
 import { streamingSha1, toHex } from './sha1.js';
 import { pktInit, pktStep, pktFinish } from './pktline.js';
@@ -364,6 +364,16 @@ function splitVerified(source: ReadableStream<Uint8Array>, gate: Gate, counters:
   return { client, cache, fate, unread: () => { finish({ kind: 'unread' }); } };
 }
 
+// One of the caller's own callbacks (shouldCache, the cache's match, delete and put, waitUntil), called. A fetch reports a
+// failure by rejecting, so what the callback throws when called is this fetch's rejection: the Err that names the
+// callback and carries the thrown value (bad_request: the caller's code, not the network; the transport returns a typed
+// error as it is). The answer is boxed: a promise the callback returns stays the call site's (a match that rejects is
+// a miss, as before).
+// oxlint-disable-next-line typescript/promise-function-async -- not async: the rejection is built here, as a value
+const calling = <T>(what: string, call: () => T): Promise<{ readonly got: T }> => {
+  try { return Promise.resolve({ got: call() }); } catch (e) { return Promise.reject(callbackFailed(what, e)); }
+};
+
 export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: CachingOptions = {}): CachingFetch {
   const { waitUntil, namespace, shouldCache, maxAge, limits } = withDefaults(options, cachingDefaults(getOrElse(readKey(options, 'verifyBeforeStore'), false)));
   const inner = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
@@ -374,14 +384,16 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
   const f = async (url: string | URL, init: RequestInit = {}): Promise<Response> => {
     const { init: wire, names } = peelRecordHeaders(init);
     const body = wire.body;
-    if (wire.method !== 'POST' || !String(url).endsWith('/git-upload-pack') || !(body instanceof Uint8Array) || !shouldCache(body)) { stats.bypass++; return inner(url, wire); }
+    if (wire.method !== 'POST' || !String(url).endsWith('/git-upload-pack') || !(body instanceof Uint8Array) || !(await calling('shouldCache', () => shouldCache(body))).got) { stats.bypass++; return inner(url, wire); }
     const mode = headerOf(headersOf(wire), CACHE_CONTROL_HEADER);
     const key = await cacheKey(String(url), headerOf(headersOf(wire), 'authorization'), body, namespace);
     // a failed delete is ignored
-    if (mode === 'bust') { stats.bust++; await cache.delete(key).catch(() => null); }
+    // oxlint-disable-next-line typescript/promise-function-async -- the cache's own promise, passed through
+    if (mode === 'bust') { stats.bust++; await (await calling('cache.delete', () => cache.delete(key))).got.catch(() => null); }
     else {
       // a failed match is a miss
-      const hit = await cache.match(key).then(fromNullish, (): Option<Response> => none);
+      // oxlint-disable-next-line typescript/promise-function-async -- the cache's own promise, passed through
+      const hit = await (await calling('cache.match', () => cache.match(key))).got.then(fromNullish, (): Option<Response> => none);
       // A HIT is streamed as stored, with no pass here: the store is untrusted and the client's own parse is the check
       // (a refused HIT comes back as `x-ply-cache: bust`, above).
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- a falsy answer is a miss, as before
@@ -405,8 +417,14 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
     const request = parseUploadPackRequest(body);
     const split = splitVerified(res.body, answerGate(request.ok && request.value.command === 'fetch', request.ok && request.value.command === 'fetch' && request.value.done, checked.value), counters);
     // The put's fate is observable: a cache that silently refuses to store would otherwise look like a permanent miss rate.
+    // A caller callback that throws when called (the put, then waitUntil) is this fetch's rejection, the named Err; the
+    // answer is abandoned first, so the origin is cancelled and nothing stays stored.
+    // oxlint-disable-next-line typescript/promise-function-async -- the callback's own promise, passed on once the answer is cancelled
+    const abandoning = <T>(called: Promise<T>): Promise<T> => called.catch(async () => { await split.client.cancel().catch(() => null); return called; });
+    // oxlint-disable-next-line typescript/promise-function-async -- the cache's own promise, passed through
+    const putting = (await abandoning(calling('cache.put', () => cache.put(key, new Response(split.cache, { status: 200, headers: stored }))))).got;
     const store = async (): Promise<void> => {
-      const failure = await cache.put(key, new Response(split.cache, { status: 200, headers: stored })).then((): Option<string> => none, (e: unknown): Option<string> => ({ tag: 'some', value: thrownText(e).slice(0, 200) }));
+      const failure = await putting.then((): Option<string> => none, (e: unknown): Option<string> => ({ tag: 'some', value: thrownText(e).slice(0, 200) }));
       // a store that settled without reading the answer to its end decided for itself
       split.unread();
       const fate = await split.fate;
@@ -423,7 +441,7 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
       await Promise.resolve().then(async () => { await cache.delete(key); return null; }).catch(() => null);
     };
     const put = store();
-    if (waitUntil) waitUntil(put);
+    if (waitUntil) await abandoning(calling('waitUntil', () => { waitUntil(put); }));
     return new Response(split.client, { status: 200, headers: h });
   };
   Object.defineProperty(f, CACHING_FETCH_BRAND, { value: true });

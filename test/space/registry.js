@@ -449,6 +449,17 @@ export const DECISIONS = [
   { match: 'src/push.ts#classifyReport:export', space: 'push-outcome', axisTag: 'status' },
   { match: 'src/push.ts#decideOutcome:*', space: 'push-outcome', axisTag: 'event' },
   { match: 'src/otel.ts#constructor:untyped:a span has a parent or follows one, not both', excluded: 'a caller programming error (a TypeError by design, never an outcome); test/span-contract.test.js holds it' },
+  // a caller-supplied callback that throws: the failure is the caller's own code, not an input ply decides on
+  { match: 'src/errors.ts#callbackFailed:bad_request:caller-supplied … threw: …', excluded: "a caller's callback threw (signer, filter, any callback at operation()'s edge), not a decision on an input; test/callback-throw.test.js holds the code, `what`, `cause` and the unchanged ref (git)" },
+  { match: 'src/tree-node.ts#filesFromDir:bad_request:…: the directory could not be read: …', excluded: "node:fs refused the walk (a missing directory, an unreadable file): the file system's state, not a decision on an input; test/callback-throw.test.js holds the code, `what: 'dir'`, node's errno on `cause` (ENOENT, EACCES) and the unchanged ref" },
+  { match: 'src/sign.ts#signCommit:bad_request:signer', excluded: "a caller's signer threw or rejected, not a decision on an input; test/callback-throw.test.js holds it (two rows, ref unchanged in git)" },
+  { match: 'src/sign.ts#signCommit:bad_request:caller-supplied signer returned a signature that is not …', excluded: "a caller's signer broke its type (a non-string signature), a caller programming error; no test holds this branch yet" },
+  { match: 'src/transport.ts#framesFailed:bad_request:transport.frames', excluded: "a caller's transport frames() threw or its stream rejected on a read request, not a decision on an input; test/callback-throw.test.js holds the code, `what`, `cause` and the unchanged ref (git), with the hostile thrown values" },
+  { match: 'src/transport.ts#framesFailed:ambiguous:caller-supplied transport.frames threw after the request…', excluded: "a caller's transport frames() threw or its stream rejected on the push request, not a decision on an input; test/callback-throw.test.js holds it (thrown when called for receive-pack, and after delivering the push: the ref read back in git)" },
+  { match: 'src/transport.ts#frames:ambiguous:<service>, <e>', excluded: "framesFailed's call site for a caller's frames() that throws when called; test/callback-throw.test.js holds both classes (upload-pack: bad_request, receive-pack: ambiguous)" },
+  { match: 'src/transport.ts#guardedFrames:ambiguous:<service>, <e>', excluded: "framesFailed's call site for a caller's stream that rejects on a read; test/callback-throw.test.js holds both classes (rejects on iteration: bad_request; after delivering the push: ambiguous)" },
+  { match: 'src/transport.ts#advertise:bad_request:transport.advertise', excluded: "a caller's transport advertise() threw or rejected, not a decision on an input; test/callback-throw.test.js holds the code, `what` and `cause` (one row)" },
+  { match: 'src/packcache.ts#calling:bad_request:<what>, <e>', excluded: "a caller's pack-cache callback threw when called (shouldCache, waitUntil, the cache's match, delete or put), not a decision on an input; test/callback-throw.test.js holds each of the five (code, `what`, `cause`)" },
   // generated, reviewed
   { match: "src/checkout-node.ts#collision:*", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout-node.ts#emptyDir:*", space: 'checkout-tree', axisTag: 'case' },
