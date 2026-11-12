@@ -691,3 +691,19 @@ test('#299: the visit charge refuses at the visit, before the delta is read (got
   assert.equal(r.ok, false);
   assert.deepEqual([r.error.code, r.error.what, r.error.got], ['limit_exceeded', 'resolve work bytes', 7]);
 });
+
+test('#299: a whole object whose REF lookup is empty is not made again (an id just below another\'s run; reads and work pinned by hand)', async () => {
+  // blob X with nothing resting on it, blob B, one REF identity delta on B, with id(X) < id(B). The scan hashes both
+  // blobs, so each root is made again only if it has kids. X's REF lookup is the empty range [0, 0) just below B's run at
+  // index 0: X has no kids, and reading index 0's done flag there would wrongly give it B's. By hand, head: B made again
+  // (1 read, 1 rebuilt, 6 inflated), the delta read (1 read, 4 inflated), applied (6) and visited (1): reads 2, inflated
+  // 10, rebuilt 1, work 6 + 4 + 6 + 1 = 17. Were X taken to have kids, X is made again too: reads 3, inflated 16,
+  // rebuilt 2, work 23.
+  let X = te.encode('xxxxx\n'); let B = te.encode('hello\n');
+  if (hashObject('blob', X) > hashObject('blob', B)) [X, B] = [B, X];
+  const r = await r299.resolve(r299.build([{ blob: X }, { blob: B }, { ref: fromHex(hashObject('blob', B)) }]));
+  assert.ok(r.ok, r.ok ? '' : r.error.message);
+  const st = r.value.stats;
+  assert.deepEqual([st.reads, st.inflated, st.rebuilt, st.work], [2, 10, 1, 17]);
+  assert.deepEqual([r.value.columns.base[2], r.value.columns.depth[2]], [1, 1]);
+});
