@@ -6,7 +6,7 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -84,6 +84,63 @@ test('a pull request that only moves code past a parser still mutates every line
     assert.ok(!ranges.some(([a, b]) => a <= otherAt + 1 && b >= otherAt + 1), `other() is in the plan: ${JSON.stringify(ranges)}`);
     // each planned mutant once: the parser's 40 conditions alone are well over 40
     assert.ok(plan.mutants > 40, String(plan.mutants));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 60_000);
+
+// #313: a shard of 43232620788 planned at 9,322 s ran 19,065 s (84 of 90 minutes), because its weights were measured on
+// a runner whose dry run took 28 s and it ran on one taking 50 s. --weights scales every duration to the reference
+// runner by the dry-run time of the runner that measured it, and refuses a report that does not say.
+const mutant = (line, ms) => ({ id: String(line), mutatorName: 'BooleanLiteral', replacement: 'true', status: 'Killed', duration: ms, location: { start: { line, column: 3 }, end: { line, column: 9 } } });
+const shardReport = (dryRunNetMs, mutants) => JSON.stringify({ shard: { i: 1, n: 1, files: ['src/a.ts'], dryRunNetMs }, files: { 'src/a.ts': { mutants } } });
+
+function scratch() {
+  const dir = mkdtempSync(join(tmpdir(), 'ply-mutate-weights-'));
+  mkdirSync(join(dir, 'src'));
+  mkdirSync(join(dir, 'scripts'));
+  mkdirSync(join(dir, '.github/workflows'), { recursive: true });
+  copyFileSync(join(ROOT, 'stryker.conf.json'), join(dir, 'stryker.conf.json'));
+  writeFileSync(join(dir, 'src/a.ts'), lines([other]));
+  return dir;
+}
+const run = (cwd, ...args) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd, env: { ...process.env, GITHUB_EVENT_NAME: 'push' }, encoding: 'utf8' });
+
+test('--weights stores seconds on the reference runner, scaled by each report\'s runner, and refuses an unscaled report', () => {
+  const dir = scratch();
+  try {
+    // 10 s on a 25 s runner is 20 s on the 50 s reference; 10 s on a 100 s runner is 5 s
+    writeFileSync(join(dir, 'fast.json'), shardReport(25_000, [mutant(2, 10_000)]));
+    writeFileSync(join(dir, 'slow.json'), shardReport(100_000, [mutant(1, 10_000)]));
+    const ok = run(dir, '--weights', 'fast.json', 'slow.json');
+    assert.equal(ok.status, 0, ok.stderr);
+    const w = JSON.parse(readFileSync(join(dir, 'scripts/mutate-weights.json'), 'utf8'))['src/a.ts'];
+    assert.deepEqual(w, { seconds: 25, mutants: 2, byLine: { 2: 20, 1: 5 } });
+
+    writeFileSync(join(dir, 'old.json'), shardReport(undefined, [mutant(2, 10_000)]));
+    const refused = run(dir, '--weights', 'old.json');
+    assert.equal(refused.status, 2, refused.stdout);
+    assert.match(refused.stderr, /without their runner's dry-run time/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test('--budget fails when the heaviest planned shard passes 60% of mutate.yml\'s timeout-minutes', () => {
+  const dir = scratch();
+  try {
+    const yml = limit => `jobs:\n  mutate-shard:\n    timeout-minutes: ${limit}\n    strategy:\n      matrix:\n        shard: [1, 2]\n  mutate:\n    timeout-minutes: 5\n`;
+    // src/a.ts at 3,000 s (all on line 2) on the reference runner is 3.84 + 3000 / 3.88 / 60 = 16.7 min in one
+    // shard (a unit is cut only at a line no mutant spans past, and the function's block mutant spans lines 1-3)
+    writeFileSync(join(dir, 'scripts/mutate-weights.json'), JSON.stringify({ 'src/a.ts': { seconds: 3000, mutants: 6, byLine: { 1: 0, 2: 3000, 3: 0 } } }));
+    writeFileSync(join(dir, '.github/workflows/mutate.yml'), yml(28)); // cap 16.8 min
+    const fits = run(dir, '--budget');
+    assert.equal(fits.status, 0, fits.stderr);
+    assert.match(fits.stdout, /in 2 shards; .* max 16\.7, .* cap 16\.8 \(60% of timeout-minutes 28\)/);
+    writeFileSync(join(dir, '.github/workflows/mutate.yml'), yml(27)); // cap 16.2 min
+    const over = run(dir, '--budget');
+    assert.equal(over.status, 1, over.stdout);
+    assert.match(over.stderr, /plans 16\.7 min, over 16\.2: src\/a\.ts/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

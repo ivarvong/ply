@@ -9,7 +9,10 @@
 //   node scripts/mutate.mjs --shard i/N      run shard i of N; write reports/mutation/shard-i.json; no verdict
 //   node scripts/mutate.mjs --merge DIR --shards N
 //                                            merge the N shard reports found under DIR and judge them
-//   node scripts/mutate.mjs --plan N         print the N-way partition (units, planned seconds, mutant counts) and exit
+//   node scripts/mutate.mjs --plan N         print the N-way partition (units, planned seconds and minutes, mutant
+//                                            counts) and exit
+//   node scripts/mutate.mjs --budget         fail unless the full run's heaviest planned shard fits BUDGET_SHARE of
+//                                            mutate.yml's timeout-minutes (CI: job lint + fuzz)
 //   node scripts/mutate.mjs --check          judge an existing reports/mutation/mutation.json
 //   node scripts/mutate.mjs --weights [REPORT...]  rewrite scripts/mutate-weights.json from full-run reports
 //   node scripts/mutate.mjs --weights-pr REPORT...  rewrite scripts/mutate-weights-pr.json from pull request shard
@@ -18,7 +21,7 @@
 // The rules live only in this file. Every mode judges with the same summarize() and the same
 // verdict(); a shard only runs Stryker. The merge recomputes the partition from the commit and
 // refuses a missing, extra, duplicated or partial shard, so a lost artifact cannot pass the gate.
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -269,6 +272,24 @@ const unitFile = unit => unit.replace(/:\d+-\d+$/, '');
 // On #243/#244 the PR runs cost attributes.ts:235-300 at 5,943-6,604 s (the full-run table said 413 s, so the
 // planner never cut it and one shard ran 36-51 min) and objects.ts:279-347 at 11 s (the full run measured 3,688 s).
 // A pull request plans from its table, falling back per line to the full-run table, then to a rate.
+//
+// Seconds are seconds on a reference runner. GitHub's ubuntu-latest runners are not one machine: the dry run of the same
+// 412 mutation tests took 28.6-94.0 s net across the 20 shards of 43232620788 (26.9-58.3 s on 43177287797), and a
+// mutant's duration scales with it. push.ts:293-1028 was measured on two 28 s runners (3502eef) and ran on two 48-50 s
+// ones (b65917f): 9,322 s planned, 19,065 s measured, an 84-minute shard against the 90-minute limit (#313). So each
+// shard records its runner's dry-run time (Stryker's "net" ms, report.shard.dryRunNetMs), and --weights scales every
+// duration to REF_DRY_MS. REF_DRY_MS is a slow runner (11 of those 20 ran 47-57 s), so a typical runner finishes under
+// its plan and a 57 s one within about 15% of it.
+const REF_DRY_MS = 50_000;
+// A shard's wall minutes from its seconds of mutant time: setup (checkout, npm ci, instrumenting, the dry run) plus
+// the mutants over Stryker's effective parallelism. Least squares over the 20 shards of 43232620788 (measured seconds
+// against job minutes), within 6 min on every shard.
+const WALL_SETUP_MIN = 3.84;
+const WALL_PARALLEL = 3.88;
+const plannedMinutes = seconds => WALL_SETUP_MIN + seconds / WALL_PARALLEL / 60;
+// --budget: the heaviest planned shard of a full run may take at most this share of the job limit on the reference
+// runner, leaving the rest for a slower runner (94 s, 1.9x the reference, was seen once) and for weights gone stale.
+const BUDGET_SHARE = 0.6;
 const WEIGHTS = 'scripts/mutate-weights.json';
 const WEIGHTS_PR = 'scripts/mutate-weights-pr.json';
 const readWeights = path => (existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {});
@@ -294,16 +315,22 @@ function costModel(pr) {
 // line wins it, so a file a full run split across shards, or that several pull requests each covered in part, keeps
 // every measured line (holding only a file's first report dropped the rest: inflatestream.ts on main's 16-way plan).
 // seconds and mutants are the totals over the kept lines.
+// Each duration is scaled to the reference runner by the dry-run time of the runner that measured it (a shard report's
+// shard.dryRunNetMs, or a merged report's per-mutant runnerDryMs); a report without one is refused, not guessed.
 function writeWeights(paths, target) {
   const out = {};
+  const unscaled = [];
   for (const path of paths) {
-    const files = JSON.parse(readFileSync(path, 'utf8')).files ?? {};
+    const report = JSON.parse(readFileSync(path, 'utf8'));
+    const files = report.files ?? {};
     for (const [file, info] of Object.entries(files)) {
       const lines = new Map();
       for (const m of info.mutants ?? []) {
+        const dry = m.runnerDryMs ?? report.shard?.dryRunNetMs ?? null;
+        if (!(dry > 0)) { unscaled.push(`${path}: ${file}:${m.location.start.line}`); continue; }
         const l = m.location.start.line;
         const e = lines.get(l) ?? { s: 0, n: 0 };
-        e.s += (m.duration ?? 0) / 1000;
+        e.s += ((m.duration ?? 0) / 1000) * (REF_DRY_MS / dry);
         if (m.status !== 'Ignored') e.n += 1;
         lines.set(l, e);
       }
@@ -315,6 +342,10 @@ function writeWeights(paths, target) {
         w.mutants += n;
       }
     }
+  }
+  if (unscaled.length) {
+    console.error(`mutate: ${unscaled.length} mutant(s) without their runner's dry-run time, so their seconds cannot be scaled to the reference runner (first: ${unscaled[0]}); refresh weights from reports a shard of this version wrote`);
+    process.exit(2);
   }
   for (const w of Object.values(out)) w.seconds = Math.round(w.seconds * 10) / 10;
   const sorted = Object.fromEntries(Object.keys(out).sort().map(k => [k, out[k]]));
@@ -338,6 +369,7 @@ async function runShard(i, n) {
   const p = await plan(n);
   const mine = p.shards[i - 1];
   console.log(`mutate: shard ${i}/${n} of ${p.full ? 'full src/' : `${p.files.length} file(s): changed and gated lines`}; planned seconds per shard ${p.shards.map(s => Math.round(s.weight)).join(', ')}`);
+  console.log(`mutate: planned minutes per shard on the reference runner ${p.shards.map(s => plannedMinutes(s.weight).toFixed(1)).join(', ')}`);
   mkdirSync('reports/mutation', { recursive: true });
   if (mine.files.length === 0) {
     writeFileSync(shardReport(i), JSON.stringify({ shard: { i, n, files: [] }, files: {} }));
@@ -351,11 +383,65 @@ async function runShard(i, n) {
     tempDirName: `.stryker-tmp/shard-${i}`,
     jsonReporter: { fileName: shardReport(i) },
   });
-  const r = spawnSync('npx', ['stryker', 'run', cfg, '--mutate', mine.files.join(',')], { stdio: 'inherit' });
-  if (r.status !== 0) process.exit(r.status ?? 1);
+  const dryRunNetMs = await strykerTimed(['stryker', 'run', cfg, '--mutate', mine.files.join(',')]);
+  if (dryRunNetMs === null) console.warn(`mutate: shard ${i}/${n}: no dry-run time in Stryker's output; this report cannot refresh weights`);
+  else console.log(`mutate: shard ${i}/${n}: runner dry run ${(dryRunNetMs / 1000).toFixed(1)} s net (reference ${REF_DRY_MS / 1000} s)`);
   const report = JSON.parse(readFileSync(shardReport(i), 'utf8'));
-  report.shard = { i, n, files: mine.files };
+  report.shard = { i, n, files: mine.files, dryRunNetMs };
   writeFileSync(shardReport(i), JSON.stringify(report));
+}
+
+// Stryker run with its output passed through as it comes, returning the runner's speed: the net ms of Stryker's dry run
+// ("Initial test run succeeded. Ran 412 tests in 58 seconds (net 49946.1 ms, overhead 8473.9 ms)"), or null when the
+// line is not there. A non-zero exit ends the shard with Stryker's status.
+const DRY_RUN = /Initial test run succeeded\. Ran \d+ tests? in [^(]*\(net ([0-9.]+) ms/;
+function strykerTimed(args) {
+  return new Promise(resolve => {
+    const child = spawn('npx', args, { stdio: ['inherit', 'pipe', 'pipe'] });
+    let dry = null;
+    let tail = '';
+    const watch = sink => chunk => {
+      sink.write(chunk);
+      if (dry !== null) return;
+      tail = (tail + chunk.toString('utf8')).slice(-8192);
+      const m = DRY_RUN.exec(tail);
+      if (m) dry = Number(m[1]);
+    };
+    child.stdout.on('data', watch(process.stdout));
+    child.stderr.on('data', watch(process.stderr));
+    child.on('close', code => {
+      if (code !== 0) process.exit(code ?? 1);
+      resolve(dry);
+    });
+  });
+}
+
+// The full run's plan against the job: the heaviest planned shard's minutes on the reference runner (plannedMinutes)
+// at most BUDGET_SHARE of mutate-shard's timeout-minutes, with the shard count and limit read from mutate.yml itself.
+// Cheap (the instrumenter, no test), so CI runs it on every push: a weights refresh, a new src file or a shard count
+// that would plan a shard near the limit fails here, not 85 minutes into a mutation run.
+async function budget() {
+  const yml = readFileSync('.github/workflows/mutate.yml', 'utf8');
+  // the job's own lines, each after a newline: from `  mutate-shard:` up to the next two-space key
+  const job = `\n${/\n {2}mutate-shard:\n([\s\S]*?)\n {2}[\w-]+:\n/.exec(yml)?.[1] ?? ''}`;
+  const limit = Number(/\n {4}timeout-minutes: (\d+)\n/.exec(job)?.[1]);
+  const matrix = /\n {8}shard: \[([\d, ]+)\]/.exec(job)?.[1];
+  const n = matrix ? matrix.split(',').length : NaN;
+  if (!(limit > 0) || !(n >= 1)) {
+    console.error('mutate: --budget cannot read the mutate-shard job\'s timeout-minutes and shard matrix from .github/workflows/mutate.yml');
+    process.exit(2);
+  }
+  process.env.MUTATE_FULL = '1';
+  const p = await plan(n);
+  const minutes = p.shards.map(s => plannedMinutes(s.weight));
+  const max = Math.max(...minutes);
+  const cap = BUDGET_SHARE * limit;
+  const heaviest = p.shards[minutes.indexOf(max)];
+  console.log(`mutate: full run in ${n} shards; planned minutes on the reference runner (dry run ${REF_DRY_MS / 1000} s) max ${max.toFixed(1)}, mean ${(minutes.reduce((t, m) => t + m, 0) / n).toFixed(1)}; cap ${cap} (${BUDGET_SHARE * 100}% of timeout-minutes ${limit})`);
+  if (max > cap) {
+    console.error(`mutate: shard ${minutes.indexOf(max) + 1}/${n} plans ${max.toFixed(1)} min, over ${cap}: ${heaviest.files.join(', ')}. Add shards (all three 20s of mutate.yml), or refresh weights with --weights`);
+    process.exit(1);
+  }
 }
 
 function findReports(dir) {
@@ -391,9 +477,12 @@ async function mergeReports(dir, n) {
     const keys = Object.keys(r.files ?? {}).sort();
     const wantFiles = [...new Set(want.map(unitFile))].sort();
     if (JSON.stringify(keys) !== JSON.stringify(wantFiles)) bad.push(`shard ${i}/${n}: report covers ${JSON.stringify(keys)}, plan is ${JSON.stringify(wantFiles)}`);
+    // each mutant keeps its runner's dry-run time, so --weights can scale the merged report too
+    const runnerDryMs = r.shard.dryRunNetMs ?? null;
     for (const [file, info] of Object.entries(r.files ?? {})) {
-      if (merged.files[file]) merged.files[file] = { ...merged.files[file], mutants: [...merged.files[file].mutants, ...(info.mutants ?? [])] };
-      else merged.files[file] = info;
+      const mutants = (info.mutants ?? []).map(m => ({ ...m, runnerDryMs }));
+      if (merged.files[file]) merged.files[file] = { ...merged.files[file], mutants: [...merged.files[file].mutants, ...mutants] };
+      else merged.files[file] = { ...info, mutants };
     }
     for (const k of Object.keys(r)) if (k !== 'files' && k !== 'shard' && !(k in merged)) merged[k] = r[k];
   }
@@ -503,6 +592,8 @@ if (process.argv.includes('--weights-pr')) {
   const k = process.argv.indexOf('--weights');
   const paths = process.argv.slice(k + 1).filter(a => !a.startsWith('--'));
   writeWeights(paths.length ? paths : [REPORT], WEIGHTS);
+} else if (process.argv.includes('--budget')) {
+  await budget();
 } else if (process.argv.includes('--plan')) {
   const n = Number(argValue('--plan'));
   if (!(n >= 1)) {
@@ -511,7 +602,8 @@ if (process.argv.includes('--weights-pr')) {
   }
   const p = await plan(n);
   const mutants = [...p.expected.values()].reduce((t, k) => t + k, 0);
-  console.log(JSON.stringify({ full: p.full, mutants, expected: Object.fromEntries(p.expected), shards: p.shards }, null, 2));
+  const shards = p.shards.map(s => ({ ...s, minutes: Math.round(plannedMinutes(s.weight) * 10) / 10 }));
+  console.log(JSON.stringify({ full: p.full, mutants, expected: Object.fromEntries(p.expected), shards }, null, 2));
 } else if (process.argv.includes('--shard')) {
   const { i, n } = parseShard(argValue('--shard'));
   await runShard(i, n);
