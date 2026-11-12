@@ -72,6 +72,31 @@ const chainOutside = (A: ReadonlyMap<Oid, Commit>, B: ReadonlyMap<Oid, Commit>, 
   for (let c = mapGet(A, id); c.tag === 'some' && c.value.parents.length === 1 && !B.has(id) && over <= max; over++) { id = getOrElse(at(c.value.parents, 0), id); c = mapGet(A, id); }
   return over;
 };
+// Pure: a walk's commits as parent lists only, what the windowed branch walk keeps of a window
+const parentsOf = (m: ReadonlyMap<Oid, Commit>): Map<Oid, readonly Oid[]> => { const o = new Map<Oid, readonly Oid[]>(); for (const [k, c] of m) o.set(k, c.parents); return o; };
+// Effect: the single-parent chain from `tip`, counted by position (the tip at 1), through `first` and then windows of
+// at most `window` commits fetched from the frontier, one held at a time as parent lists. It stops at a commit of the
+// onto walk (hit), at a merge or root (break), or past capA commits (cap).
+async function chainWindows(t: Transport, from: { readonly first: Map<Oid, readonly Oid[]>; readonly inOnto: ReadonlySet<Oid>; readonly tip: Oid }, capA: number, window: number): Promise<Result<{ readonly end: 'hit' | 'break' | 'cap'; readonly pos: number }, PlyError>> {
+  const { inOnto, tip } = from;
+  // a window is cleared before the next is fetched (the first one too, which the caller still names): one is live
+  let held = from.first;
+  let id: Oid = tip; let pos = 1;
+  for (;;) {
+    if (inOnto.has(id)) return ok({ end: 'hit', pos });
+    if (pos > capA) return ok({ end: 'cap', pos });
+    const c = mapGet(held, id);
+    if (c.tag === 'none') {
+      held.clear();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each window starts at the last one's frontier
+      const got = await ancestors(t, id, Math.min(window, capA - pos + 1));
+      if (!got.ok) return got;
+      held = parentsOf(got.value); continue;
+    }
+    if (c.value.length !== 1) return ok({ end: 'break', pos });
+    id = getOrElse(at(c.value, 0), id); pos++;
+  }
+}
 // Effect: the merge base of a rebase. Two walks, each under its own limit: the branch walk (from the tip) is the chain
 // walk, to maxRebaseCommits + 2 commits (the base of a chain of n commits is n + 1 from the tip, and one more shows a
 // chain one over the limit) or to maxMergeDepth where that is deeper; the onto walk is the merge-base search, to
@@ -83,6 +108,7 @@ const chainOutside = (A: ReadonlyMap<Oid, Commit>, B: ReadonlyMap<Oid, Commit>, 
 // of the branch walk may be an ancestor of onto beyond the cut (a short branch far behind onto looks the same as a
 // long one), and no request is spent to tell: the refusal is `merge-base search depth` against maxMergeDepth, with the
 // fields mergeBaseOf reports (got: twice the depth searched). Every max is a field of the caller's limits.
+type Settled = Exclude<Search<Oid>, { readonly tag: 'searching' }>;
 export async function rebaseBaseOf(t: Transport, tip: Oid, target: Oid): Promise<Result<MergeBase, PlyError>> {
   const { maxRebaseCommits, maxMergeDepth } = t.limits;
   const capB = Math.floor(maxMergeDepth);
@@ -94,22 +120,60 @@ export async function rebaseBaseOf(t: Transport, tip: Oid, target: Oid): Promise
   const top = Math.max(capA, capB);
   let A = new Map<Oid, Commit>(); let B = new Map<Oid, Commit>();
   let atA = 0; let atB = 0;
-  let s: Search<Oid> = { tag: 'searching', depth: Math.min(8, top) };
   let commits = new Map<Oid, Commit>();
-  while (s.tag === 'searching') {
-    const depth: number = s.depth;
-    const wantA = Math.min(depth, capA); const wantB = Math.min(depth, capB);
-    const heldA = A; const heldB = B;
-    // oxlint-disable-next-line eslint/no-await-in-loop -- each round deepens from what the last one found
-    const [ra, rb] = await Promise.all([
-      wantA === atA || (atA > 0 && whole(heldA)) ? ok(heldA) : ancestors(t, tip, wantA),
-      wantB === atB || (atB > 0 && whole(heldB)) ? ok(heldB) : ancestors(t, target, wantB),
-    ]);
-    if (!ra.ok) return ra;
-    if (!rb.ok) return rb;
-    A = ra.value; B = rb.value; atA = wantA; atB = wantB;
-    commits = new Map([...B, ...A]);
-    s = searchStep(depth, top, commits, tip, target);
+  // the merge-base search, the branch walk to capOfA; resumable at a depth
+  const search = async (start: number, capOfA: number): Promise<Result<Settled, PlyError>> => {
+    let st: Search<Oid> = { tag: 'searching', depth: start };
+    while (st.tag === 'searching') {
+      const depth: number = st.depth;
+      const wantA = Math.min(depth, capOfA); const wantB = Math.min(depth, capB);
+      const heldA = A; const heldB = B;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each round deepens from what the last one found
+      const [ra, rb] = await Promise.all([
+        wantA === atA || (atA > 0 && whole(heldA)) ? ok(heldA) : ancestors(t, tip, wantA),
+        wantB === atB || (atB > 0 && whole(heldB)) ? ok(heldB) : ancestors(t, target, wantB),
+      ]);
+      if (!ra.ok) return ra;
+      if (!rb.ok) return rb;
+      A = ra.value; B = rb.value; atA = wantA; atB = wantB;
+      commits = new Map([...B, ...A]);
+      st = searchStep(depth, capOfA === capA ? top : Math.max(capOfA, capB), commits, tip, target);
+    }
+    return ok(st);
+  };
+  // A branch cap within one doubling of maxMergeDepth is searched whole, as before (the chain walk holds at most twice
+  // the merge-base search). A deeper one is first walked to maxMergeDepth, as mergeBaseOf: what main holds.
+  const windowed = capA > capB * 2;
+  const first = await search(Math.min(8, top), windowed ? capB : capA);
+  if (!first.ok) return first;
+  let s: Settled = first.value;
+  if (s.tag === 'capped' && windowed) {
+    // Past maxMergeDepth the branch walk holds no more than the merge-base search did: from the cut frontier, in
+    // windows of maxMergeDepth commits (one window held at a time), it keeps the position along the single-parent
+    // chain, the frontier and whether a commit is in the onto walk. The chain's commits are fetched for the replay
+    // only once the base is found within capA.
+    const window = capB;
+    // onto-membership only: the onto walk's commits are dropped for the windows (refetched if the search goes on)
+    const ontoWhole = whole(B);
+    const inOnto: ReadonlySet<Oid> = new Set(B.keys());
+    const firstWindow = parentsOf(A);
+    A = new Map(); B = new Map(); atB = 0; commits = new Map();
+    const walked = await chainWindows(t, { first: firstWindow, inOnto, tip }, capA, window);
+    if (!walked.ok) return walked;
+    const { end, pos } = walked.value;
+    if (end === 'cap') {
+      // capA single-parent commits from the tip, none in the onto walk
+      if (ontoWhole) return err(limitError('rebase chain', Math.floor(maxRebaseCommits) + 1, maxRebaseCommits));
+      return err(limitError('merge-base search depth', capB * 2, maxMergeDepth));
+    }
+    // the chain reaches a commit of the onto walk at pos: a chain of pos - 1, over the limit when pos - 1 > max
+    if (end === 'hit' && pos - 1 > maxRebaseCommits) return err(limitError('rebase chain', Math.floor(maxRebaseCommits) + 1, maxRebaseCommits));
+    // the base within the limit, or a merge or root on the way: the search goes on as it did, with full commits
+    let d = capB; while (d < capA && d < pos + 1) d = Math.min(d * 2, capA);
+    atA = 0;
+    const rest = await search(d, capA);
+    if (!rest.ok) return rest;
+    s = rest.value;
   }
   switch (s.tag) {
     case 'capped': {

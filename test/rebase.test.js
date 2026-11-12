@@ -304,7 +304,7 @@ test('limits: a short branch whose onto is further than maxMergeDepth is refused
 //   WORKER_LIMITS: the branch walk is max(256 + 2, 1024) = 1024 deep, the same 8 depths: 1 + 8 + 8 = 17, no more
 //   DEFAULT_LIMITS: the branch walk goes on at 2048, 4096, 8192 and 10,002 (12 depths), the onto walk stops at 1024
 //     (8 depths): 1 + 12 + 8 = 21, four more (accepted; README, Limits)
-test('limits: refusing an over-long chain on a deep onto history costs no more requests than the merge-base search under WORKER_LIMITS (17), and at most 4 more under DEFAULT_LIMITS (21)', async () => {
+test('limits: refusing an over-long chain on a deep onto history costs no more requests than the merge-base search under WORKER_LIMITS (17), and 26 under DEFAULT_LIMITS (17 + 9 windows)', async () => {
   const { DEFAULT_LIMITS, WORKER_LIMITS } = await import('../src/limits.js');
   const r = repo();
   const L = []; let at = 1_700_000_000; let mark = 0;
@@ -323,10 +323,12 @@ test('limits: refusing an over-long chain on a deep onto history costs no more r
   const w = await run(WORKER_LIMITS);
   assert.deepEqual({ code: w.code, what: w.what, got: w.got, max: w.max }, { code: 'limit_exceeded', what: 'merge-base search depth', got: 2048, max: 1024 });
   assert.ok(w.requests <= 17, `WORKER_LIMITS refusal took ${w.requests} requests`);
-  // DEFAULT_LIMITS: the branch walk reaches the base at 10,002 commits; the chain is one over 10,000
+  // DEFAULT_LIMITS: the branch walk reaches the base at 10,002 commits; the chain is one over 10,000. Requests, by hand:
+  // the merge-base search to maxMergeDepth 1024 as under WORKER_LIMITS (17), then the branch walk past it in windows
+  // of 1024 from the cut frontier at position 1025 to the base at 10,002: ceil((10002 - 1024) / 1024) = 9; 17 + 9 = 26
   const d = await run(DEFAULT_LIMITS);
   assert.deepEqual({ code: d.code, what: d.what, got: d.got, max: d.max }, { code: 'limit_exceeded', what: 'rebase chain', got: 10_001, max: 10_000 });
-  assert.ok(d.requests <= 21, `DEFAULT_LIMITS refusal took ${d.requests} requests`);
+  assert.ok(d.requests <= 26, `DEFAULT_LIMITS refusal took ${d.requests} requests`);
   console.log(`refusing a 10,001-commit chain on a 10,101-commit onto history: WORKER_LIMITS ${w.requests} requests, DEFAULT_LIMITS ${d.requests}`);
 }, 120_000);
 
