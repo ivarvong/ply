@@ -85,6 +85,7 @@
   "test/path-trees-unit.test.js": 0,
   "test/path-trees.test.js": 33,
   "test/pick-empty.test.js": 5,
+  "test/plan-build.test.js": 4,
   "test/prefix-closure.test.js": 0,
   "test/props.test.js": 2,
   "test/protocol.test.js": 493,
