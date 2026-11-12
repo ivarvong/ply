@@ -147,6 +147,14 @@ export const LIMIT_REQUEST_TIMEOUT_MS = 0;
 export const LIMIT_FIRST_BYTE_TIMEOUT_MS = 60_000;
 /** The longest gap with no progress: no upload chunk pulled, no response body chunk read. 0 turns it off. */
 export const LIMIT_IDLE_TIMEOUT_MS = 60_000;
+/** How many idle limits a consumer may hold one chunk before the exchange is cut (#273). */
+const HELD_PER_IDLE = 4;
+/**
+ * The longest the consumer may hold a chunk (from taking it to asking for the next) before the exchange is cut as
+ * `timeout` naming heldTimeoutMs (#273). Network idle is not charged while the consumer holds; this is the consumer's own
+ * bound, so a stalled consumer does not keep a socket open forever. 4 x the idle default. 0 turns it off.
+ */
+export const LIMIT_HELD_TIMEOUT_MS: number = HELD_PER_IDLE * LIMIT_IDLE_TIMEOUT_MS;
 /**
  * What one held object costs beyond its bytes, charged against the byte budget that holds it: each parsed pack object
  * against maxInflatedTotal (parsePack, and resolvePack's room), each local object against it (pushRepo), each file or
@@ -223,6 +231,7 @@ export type Limits = {
   readonly requestTimeoutMs: number;
   readonly firstByteTimeoutMs: number;
   readonly idleTimeoutMs: number;
+  readonly heldTimeoutMs: number;
 };
 export type LimitKey = keyof Limits;
 
@@ -273,6 +282,7 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
   requestTimeoutMs: LIMIT_REQUEST_TIMEOUT_MS,
   firstByteTimeoutMs: LIMIT_FIRST_BYTE_TIMEOUT_MS,
   idleTimeoutMs: LIMIT_IDLE_TIMEOUT_MS,
+  heldTimeoutMs: LIMIT_HELD_TIMEOUT_MS,
 });
 
 /**
@@ -323,9 +333,9 @@ export const checkLimit = (value: unknown, what: string): Result<number, ErrorOf
     ? ok(value)
     : err(plyError('bad_request', `limits.${what} must be a finite non-negative number`, { what, got: value }));
 
-// The largest delay a platform timer holds: a signed 32-bit count of ms (24.8 days). The exchange's three timeouts.
+// The largest delay a platform timer holds: a signed 32-bit count of ms (24.8 days). The exchange's four timeouts.
 export const MAX_TIMER_MS = 2_147_483_647;
-const TIMER_KEYS: ReadonlySet<string> = new Set(['requestTimeoutMs', 'firstByteTimeoutMs', 'idleTimeoutMs']);
+const TIMER_KEYS: ReadonlySet<string> = new Set(['requestTimeoutMs', 'firstByteTimeoutMs', 'idleTimeoutMs', 'heldTimeoutMs']);
 
 // The caller's limits record (any subset), or none (null), parsed once where it enters. A key it gives must pass
 // checkLimit (the refusal names the key, `got` is what was passed; keys are checked in DEFAULT_LIMITS order); a key it

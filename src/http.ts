@@ -365,6 +365,7 @@ export type HttpSettings = {
   readonly requestTimeoutMs: number;
   readonly firstByteTimeoutMs: number;
   readonly idleTimeoutMs: number;
+  readonly heldTimeoutMs: number;
   readonly maxPackBytes: number;
   readonly streamRedirect: StreamRedirect;
 };
@@ -419,7 +420,7 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
     [CHECKED_HTTP]: true, url: approved.value, crossOrigin: approved.value.origin !== offeredOrigin, policy: checkedPolicy.value,
     userAgent: agent.value, recordNames: names.value, given, authorization, explicitBasic, quirks,
     fetch: fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl, tracer, parent, signal, allowUrl, limits: checkedLimits.value,
-    requestTimeoutMs: checkedLimits.value.requestTimeoutMs, firstByteTimeoutMs: checkedLimits.value.firstByteTimeoutMs, idleTimeoutMs: checkedLimits.value.idleTimeoutMs, maxPackBytes: checkedLimits.value.maxPackBytes, streamRedirect: streamRedirect(),
+    requestTimeoutMs: checkedLimits.value.requestTimeoutMs, firstByteTimeoutMs: checkedLimits.value.firstByteTimeoutMs, idleTimeoutMs: checkedLimits.value.idleTimeoutMs, heldTimeoutMs: checkedLimits.value.heldTimeoutMs, maxPackBytes: checkedLimits.value.maxPackBytes, streamRedirect: streamRedirect(),
   });
 }
 
@@ -429,7 +430,7 @@ const protocolHeader = (service: string): Record<string, string> => (service ===
 
 // oxlint-disable-next-line max-lines-per-function -- the transport's state and its two methods share one closure
 function transportOf(settings: HttpSettings): HttpTransport {
-  const { policy, userAgent, recordNames, given, authorization, explicitBasic, quirks, fetch: f, tracer, parent, signal, allowUrl, limits, requestTimeoutMs, firstByteTimeoutMs, idleTimeoutMs, maxPackBytes } = settings;
+  const { policy, userAgent, recordNames, given, authorization, explicitBasic, quirks, fetch: f, tracer, parent, signal, allowUrl, limits, requestTimeoutMs, firstByteTimeoutMs, idleTimeoutMs, heldTimeoutMs, maxPackBytes } = settings;
   const startBase = settings.url.toString().replace(/\/$/, '');
   let base = startBase;
   // cachingFetch reads this and strips it (packcache.ts). Any other fetchImpl must not see it: it would go to the origin.
@@ -521,10 +522,10 @@ function transportOf(settings: HttpSettings): HttpTransport {
   };
   // The exchange's clock (src/deadline.ts): first byte, idle, and the opt-in total. The span records the limit that
   // fired. It is cancelled when the exchange ends, so a finished request does not abort later.
-  const timeouts = { firstByteMs: firstByteTimeoutMs, idleMs: idleTimeoutMs, totalMs: requestTimeoutMs };
+  const timeouts = { firstByteMs: firstByteTimeoutMs, idleMs: idleTimeoutMs, heldMs: heldTimeoutMs, totalMs: requestTimeoutMs };
   const requestClock = (span: Span): ExchangeClock =>
     exchangeClock(timeouts, signal, (key, ms) => { span.set({ 'git.timeout.limit': key, 'git.timeout.ms': ms }); });
-  const limitAttrs = (): Attrs => ({ 'git.limits.request_timeout_ms': requestTimeoutMs, 'git.limits.first_byte_timeout_ms': firstByteTimeoutMs, 'git.limits.idle_timeout_ms': idleTimeoutMs });
+  const limitAttrs = (): Attrs => ({ 'git.limits.request_timeout_ms': requestTimeoutMs, 'git.limits.first_byte_timeout_ms': firstByteTimeoutMs, 'git.limits.idle_timeout_ms': idleTimeoutMs, 'git.limits.held_timeout_ms': heldTimeoutMs });
   // The platform's fetch(): its rejection is the network error it is (wrapNet). The one catch of each request.
   // `redirect`: 'manual' (a 3xx is read as the redirect error) unless the body is a stream: undici answers 'manual' and
   // 'follow' by cloning the request, which tees the body and holds every chunk the unread branch never takes (a 64 MiB

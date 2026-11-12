@@ -576,7 +576,7 @@ test('the POST span: status, content type, a time to first byte from the request
 
 test('a timeout a timer cannot hold (above 2^31-1 ms) is refused where the options enter; 0 (off) and 2^31-1 pass', () => {
   // setTimeout's delay is a signed 32-bit count of ms: 2147483647 is the largest it holds (HTML timers; Node warns)
-  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'requestTimeoutMs']) {
+  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'heldTimeoutMs', 'requestTimeoutMs']) {
     for (const bad of [2 ** 31, 2 ** 32, Number.MAX_SAFE_INTEGER]) {
       const r = createTransport('https://h/r', { limits: { [key]: bad } });
       assert.deepEqual([r.ok, r.error?.code, r.error?.what, r.error?.got], [false, 'bad_request', key, bad], `${key}=${bad}`);
@@ -589,7 +589,7 @@ test('a timeout a timer cannot hold (above 2^31-1 ms) is refused where the optio
 // way to turn the timer off. Hand-written here, not read from src. The bound is the timers' alone: a limit that is not
 // a timer passes above it.
 test('a timeout above 2^31-1 ms is refused with a message naming the key and the bound; a limit that is no timer passes above it', () => {
-  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'requestTimeoutMs']) {
+  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'heldTimeoutMs', 'requestTimeoutMs']) {
     const message = `limits.${key} must be at most 2147483647 ms (0 turns the timer off)`;
     for (const r of [createTransport('https://h/r', { limits: { [key]: 2147483648 } }), parseHttpOptions('https://h/r', { limits: { [key]: 2147483648 } }), parseLimits({ [key]: 2147483648 })]) {
       assert.deepEqual([r.ok, r.error?.code, r.error?.message, r.error?.what, r.error?.got], [false, 'bad_request', message, key, 2147483648], key);
@@ -644,4 +644,12 @@ test('an allowUrl that maps an http(s) base to another scheme is refused as allo
     assert.equal(settings.ok, true, url);
     assert.equal(settings.value.url.href, 'https://real.example/team/r.git', url);
   }
+});
+// #273: heldTimeoutMs is parsed as its sibling timers are: a negative, NaN or infinite value is bad_request naming it.
+test('limits.heldTimeoutMs: not a finite non-negative number is bad_request naming the key', () => {
+  for (const bad of [-1, Number.NaN, Infinity, '1000']) {
+    const r = parseLimits({ heldTimeoutMs: bad });
+    assert.deepEqual([r.ok, r.error?.code, r.error?.what], [false, 'bad_request', 'heldTimeoutMs'], String(bad));
+  }
+  assert.deepEqual([parseLimits({ heldTimeoutMs: 0 }).value?.heldTimeoutMs, parseLimits({}).value?.heldTimeoutMs], [0, 240_000]);
 });
