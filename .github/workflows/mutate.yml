@@ -3,9 +3,11 @@ name: mutate
 # Stryker, out of band (since 2026-11-10): the same shards, plan and gate (scripts/mutate.mjs, thresholds and
 # rules unchanged) that ci.yml ran as its `mutate` job, in a workflow of its own, so a push's ci run (tests, lint, fuzz,
 # limit sweep) finishes without waiting about an hour for mutation. It still runs on every push to main and every pull
-# request, and the check is still named `mutate`. A newer push to main cancels the older main run (only the newest main
-# is worth judging; a pull request run is cancelled by its next push, as in ci.yml). A failed verdict on main opens or
-# comments on the issue "mutation survivors <date>" with the survivor list, the way nightly.yml reports.
+# request, and the check is still named `mutate`. A newer push to main (or a workflow_dispatch) does not cancel a
+# running main run: the running run finishes so it always reaches a verdict, and GitHub keeps at most one pending run
+# in the group (the newest pending replaces older pending ones). A pull request uses its own group, so a later push
+# on that PR likewise waits rather than cancelling. A failed verdict on main opens or comments on the issue
+# "mutation survivors <date>" with the survivor list, the way nightly.yml reports.
 on:
   pull_request:
   push:
@@ -16,7 +18,7 @@ permissions: {}
 
 concurrency:
   group: mutate-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   # Stryker over the src lines a PR changed plus every strictly gated line (each parser function and bounds file, changed
@@ -68,7 +70,7 @@ jobs:
   mutate:
     name: mutate
     needs: mutate-shard
-    # not always(): a run cancelled by a newer push to main (concurrency below) is not a failure to report
+    # not always(): a cancelled run (manual, or a pending run replaced in the concurrency group) is not a failure to report
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
