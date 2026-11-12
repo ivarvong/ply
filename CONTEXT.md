@@ -211,6 +211,11 @@ This session (2026-10-19 → 20):
 | An explicit `auth` that sends nothing is `bad_request`; `{ user }` alone is refused, not `user:` | git's own credential API (a helper giving a username alone) asks for the password and sends nothing; a library cannot ask. `{ user, token: '' }` is the explicit `user:`. Explicit fields go out as UTF-8 bytes, as git sends a helper's. SAFETY I6e (issue #40) |
 | `planPackBatches`' `crossBatchRef` stays opt-in, and its cost when on is accepted (2026-11-11) | a delta whose base is in an earlier batch is written as REF_DELTA, a thin pack whether a host takes is the host's to say. With it off, planning is within 3% of main 8e3939d. With it on, each cut base's id is asked of `resolved` and checked: measured at 02374d4 against 8e3939d over 15 interleaved process rounds, 1.03 to 1.06 times on packs cut nowhere and 1.16 times (minimums 1.24) on an OFS pack in which nearly every push cuts a chain. README.md, planPackBatches |
 | A rebase walks its branch past `maxMergeDepth` in windows, and its refusal's request count is stated and asserted (2026-11-11) | the branch walk goes on from the cut frontier in windows of `maxMergeDepth` commits, one window held at a time as parent lists, so it holds no more than the merge-base search. A refusal costs 17 requests under `WORKER_LIMITS` (the merge-base search alone) and 26 under `DEFAULT_LIMITS`, both asserted in `test/rebase.test.js` on an `onto` history deeper than `maxMergeDepth`. README.md, rebaseBaseOf |
+| `limits.heldTimeoutMs` bounds how long a consumer may hold a chunk (default 4 x idle, its own `limit` name); SAFETY I1 is plain "No hang" again (Ivar, 2026-11-11, #273 option B; #281) | network idle is charged only while ply waits on the network, so before this nothing bounded a stalled consumer with default limits; the hold starts at the first clock read after the take (no clock read per chunk), so a cut is never early and at most min(idle, held) late |
+| `cachingFetch({ verifyBeforeStore: true })` stores only an answer `verifyFetchAnswer` accepted (wants present, objects hashed); without the flag the store path is main's eager put (2026-11-11, #270; #282) | #269 had kept the option's name while it did less (a want-less answer with a valid trailer was stored); `openBlob` has no bust path, so a poisoned entry must never be written |
+| `maxResolveWork` below `maxInflatedTotal` is refused at parse, `null` is refused like every key, and the resolver's ceiling is the parsed value (2026-11-11, #271; #280) | the old `Math.max` raised a caller's tight budget silently, and telemetry disagreed with the configuration |
+| A push whose body the transport never pulled is not a push: no settle reads, not counted, never `lastPush: 'refused'` (2026-11-11, #272; #283) | the command list never left the process, so no ref can have moved; the fact is carried in the type (`{ sent, result }`), not in the error code |
+| Regexes on remote text are linear-time, with no knownBad rows left in the regex inventory (2026-11-11, #274; #284) | the fetch filter-refusal matcher was quadratic on remote input (344 ms at 56 KB) |
 
 ## 6. Verification — how to rerun everything
 
@@ -374,12 +379,7 @@ In order of value:
 6. Rebase niceties: patch-id skipping of already-upstream commits; merges in the chain (`not_linear` today).
 7. Protocol/transport limits: SHA-256 repositories; servers without protocol v2; no SSH transport (removed 2026-10-31;
    history on branch archive/ssh).
-8. Contract changes from 2026-11-11 still under review (open pull requests against main, not on main or on
-   train/review-2 when this was written): `limits.heldTimeoutMs` bounds a consumer that holds a chunk, with SAFETY I1
-   restated for it (#281); `verifyBeforeStore` stores only what `verifyFetchAnswer` accepted, as it meant before
-   (#282); `maxResolveWork` below `maxInflatedTotal`, and null, refused (#280); a push whose body was never pulled is
-   not a push (#283); a linear-time filter-refusal matcher (#284). Move each to §5 when it merges.
-9. Features not built: annotated tags, multi-file edits on top of the parent tree (pushTree replaces the whole tree),
+8. Features not built: annotated tags, multi-file edits on top of the parent tree (pushTree replaces the whole tree),
    LFS beyond the guard, merges of files over 8 MiB, a `ply push <dir>` CLI and `.gitignore` reading for `pushDir`;
    for checkoutTree: submodule recursion, `.gitattributes` (eol/filters) and LFS smudging, sparse fetching of only `path`'s
    trees, and checkout into a non-empty directory.
