@@ -544,13 +544,47 @@ export const spAttrs = (st: SpState, prefix = 'git.pack'): Attrs => ({ [`${prefi
 // computed hash, and the other commits and trees are harvested into `t.objects` (bounded by limits.maxHarvestBytes):
 // the next tree:0 fetch of any of them is answered locally. Spans: `git.fetch.filter.fallback`, `git.fetch.wide.*`.
 // The phrases a server uses when it refuses a fetch filter. Cloudflare Artifacts (observed 2026-10-23) is HTTP 400
-// plus the first one. One regex, shared: ply-web used to keep a copy of it next to the cache.
-const FILTER_REFUSAL = /only blob:none is supported|unsupported (git )?fetch filter|filter .* not (supported|allowed)/i;
+// plus the first one; git's upload-pack says "filter '<spec>' not supported" (upload-pack.c). One predicate, shared:
+// ply-web used to keep a copy of it next to the cache. The text is remote, so it is read in linear time: the fixed
+// phrases by one regex with no run, and "filter <anything on the line> not supported|allowed" by hand, since a regex
+// `filter .* not` restarts its run at every "filter " (quadratic, ply#274). Case is folded for ASCII only, as /i
+// without /u does.
+const FILTER_PHRASE = /only blob:none is supported|unsupported (git )?fetch filter/i;
+const FILTER_WORD = 'filter ';
+const FILTER_NOT = [' not supported', ' not allowed'] as const;
+const CHAR_A = 65;
+const CHAR_Z = 90;
+const CASE_BIT = 32;
+const LINE_FEED = 10;
+const CARRIAGE_RETURN = 13;
+const LINE_SEPARATOR = 8232;
+const PARAGRAPH_SEPARATOR = 8233;
+// A line terminator as `.` sees one: the four that end its run (U+2028, U+2029 by number). codePointAt at a high
+// surrogate is above all four and above Z, so the line still gets that code unit as it is.
+const isLineEnd = (c: number): boolean => c === LINE_FEED || c === CARRIAGE_RETURN || c === LINE_SEPARATOR || c === PARAGRAPH_SEPARATOR;
+// One line, ASCII-lowered: "filter " somewhere, and " not supported" or " not allowed" starting after it. The first
+// "filter " is the earliest start any match can have, so the last "not" phrase is compared with it once.
+const lineRefuses = (line: string): boolean => {
+  const from = line.indexOf(FILTER_WORD);
+  return from >= 0 && FILTER_NOT.some(p => line.lastIndexOf(p) >= from + FILTER_WORD.length);
+};
+const isFilterPhrase = (text: string): boolean => {
+  if (FILTER_PHRASE.test(text)) return true;
+  let line = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text.codePointAt(i) ?? 0;
+    if (isLineEnd(c)) {
+      if (lineRefuses(line)) return true;
+      line = '';
+    } else line += c >= CHAR_A && c <= CHAR_Z ? String.fromCodePoint(c | CASE_BIT) : text.charAt(i);
+  }
+  return lineRefuses(line);
+};
 // oxlint-disable-next-line no-magic-numbers -- RFC 9110 Bad Request: Artifacts' refusal, and the only status this predicate accepts
 const FILTER_REFUSAL_STATUS = 400;
 // A raw upload-pack answer (the HTTP status and the body, or the text an error quoted from it). Status is part of the
 // answer: a 500 that happens to contain the phrase is not a filter refusal.
-export const isFilterRefusal = (status: number, text: string): boolean => status === FILTER_REFUSAL_STATUS && FILTER_REFUSAL.test(text);
+export const isFilterRefusal = (status: number, text: string): boolean => status === FILTER_REFUSAL_STATUS && isFilterPhrase(text);
 // A thrown value is not a PlyError until it is: message may be no string, and `status` is only on an http error.
 export const isFilterRejection = (e: unknown): boolean => {
   const code = getOrElse(thrownCode(e), null);
