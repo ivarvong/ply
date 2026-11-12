@@ -48,9 +48,20 @@ const MUTATION_FILES = [
   'test/inflate-codesets.test.js',
   'test/inflate-pos.test.js',
 ];
+// A test that hangs under a mutant fails at its own timeout, not at Stryker's per-mutant one. vitest.config.ts turns both
+// timers off (0), so a hung await ran until Stryker's timeout: 2 × the covering tests' dry-run time + 8 s
+// (stryker.conf.json timeoutFactor, timeoutMS), and for a mutant every test reaches (a static one) that is about 2 × 48 s
+// + 8 s on a CI runner. 622 of the 29,604 mutants of a full run timed out (#307: shard 5 of 3502eef held 21 of them
+// and hit the 90-minute job limit at 692/698). 60 s is 5× the slowest mutation test (push-outcome `every cell`,
+// 11.8 s on an M-series Mac, 2026-11-12) and above Stryker's own bound for any single test (2 × 11.8 + 8 s), so no
+// test a mutant leaves correct but slower is cut sooner than Stryker would cut it; a cut test is a failed test, a
+// detected mutant, exactly as a Timeout is (scripts/mutate.mjs DETECTED).
+const MUTATION_TEST_TIMEOUT_MS = 60_000;
 const config = mergeConfig(base, defineConfig({
   test: {
     env: { PROP_N: '4', PUSH_SPACE: 'quick', PUSH_SPACE_WORKERS: '0', MUTATION: '1' },
+    testTimeout: MUTATION_TEST_TIMEOUT_MS,
+    hookTimeout: MUTATION_TEST_TIMEOUT_MS,
   },
 }));
 config.test = { ...config.test, include: MUTATION_FILES };

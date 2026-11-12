@@ -20,16 +20,16 @@ concurrency:
 
 jobs:
   # Stryker over the src lines a PR changed plus every strictly gated line (each parser function and bounds file, changed
-  # or not: a moved parser is not a changed line), all of src/ on main, split into 18 shards balanced by measured cost
-  # (scripts/mutate.mjs --plan 18, weights in scripts/mutate-weights.json). A file is the unit, or a line range of a file
+  # or not: a moved parser is not a changed line), all of src/ on main, split into 20 shards balanced by measured cost
+  # (scripts/mutate.mjs --plan 20, weights in scripts/mutate-weights.json). A file is the unit, or a line range of a file
   # costing more than a shard's share. Shards only run Stryker; the job named `mutate` merges their reports, checks
   # every mutant of every planned file is there exactly once, and judges them with the same rules as an unsharded run.
-  # The 18 appears here three times; the merge refuses a missing or extra shard, so changing one and not the others
+  # The 20 appears here three times; the merge refuses a missing or extra shard, so changing one and not the others
   # fails the gate.
   mutate-shard:
-    name: mutate-shard (${{ matrix.shard }}/18)
+    name: mutate-shard (${{ matrix.shard }}/20)
     runs-on: ubuntu-latest
-    # Planned from measured seconds (scripts/mutate.mjs --plan 18): a pull request from scripts/mutate-weights-pr.json
+    # Planned from measured seconds (scripts/mutate.mjs --plan 20): a pull request from scripts/mutate-weights-pr.json
     # (refresh with --weights-pr from recent PR shard reports), main from scripts/mutate-weights.json (--weights from a
     # full run). Without a limit a runaway shard holds the job, and the mutate gate, for GitHub's 6 h default.
     timeout-minutes: 90
@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -55,7 +55,7 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
           SHARD: ${{ matrix.shard }}
-        run: node scripts/mutate.mjs --shard "${SHARD}/18"
+        run: node scripts/mutate.mjs --shard "${SHARD}/20"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mutation-shard-${{ matrix.shard }}
@@ -103,7 +103,7 @@ jobs:
           MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
         run: |
           set -o pipefail
-          node scripts/mutate.mjs --merge shard-reports --shards 18 2>&1 | tee reports/mutation/verdict.txt
+          node scripts/mutate.mjs --merge shard-reports --shards 20 2>&1 | tee reports/mutation/verdict.txt
       # The merged report, for per-file history (weights for a future partition, or a look at what survived).
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: success() || failure()
