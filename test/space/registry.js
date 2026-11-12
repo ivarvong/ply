@@ -302,6 +302,7 @@ export const DECISIONS = [
   { match: 'src/packsubset.ts#*', space: 'pack-subset', axisTag: 'case' },
   { match: 'src/rangesource.ts#*', space: 'pack-subset', axisTag: 'case' },
   { match: "src/transferload.ts#scanned:aborted:transfer load", space: 'pack-subset', axisTag: 'case' },
+  { match: 'src/transferload.ts#fromSaved:limit_exceeded:*', space: 'pack-saved', axisTag: 'case' },
   { match: 'src/packrangeresolve.ts#*', space: 'pack-range-resolve', axisTag: 'case' },
   { match: 'src/packplan.ts#*', space: 'pack-plan', axisTag: 'case' },
   { match: 'src/transferplan.ts#*', space: 'transfer', axisTag: 'case' },

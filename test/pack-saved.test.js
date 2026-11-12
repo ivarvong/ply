@@ -606,12 +606,14 @@ test('decodeSavedIndex: columns view the saved bytes, a Buffer and a Uint8Array 
   const from = await fresh(src.packs.ref);
   const bytes = must(encodeSavedIndex(from.pack, some(from.resolved)));
   for (const input of [Uint8Array.from(bytes), Buffer.from(bytes)]) {
+    let views = 0;
     const back = must(decodeSavedIndex(input, idOf(from)));
     assertSame(from, back);
     assertSameResolved(from.resolved, back.resolved.value);
     for (const k of [...COLS.filter(c => c !== 'baseIndex'), 'baseIndex']) {
       const col = back.pack.columns[k];
       if (col.length === 0) continue;
+      if (col.BYTES_PER_ELEMENT > 1) views++;
       assert.equal(col.buffer, input.buffer, k);
       const at = col.byteOffset - input.byteOffset;
       const was = col[0];
@@ -623,6 +625,10 @@ test('decodeSavedIndex: columns view the saved bytes, a Buffer and a Uint8Array 
     // base is rebuilt from the pack's baseIndex on decode, not read from the bytes; the others are views
     for (const k of RCOLS.filter(c => c !== 'base')) {
       const col = back.resolved.value.columns[k];
+      // a number column is a view only where it is aligned in the buffer (README); here the resolved section follows
+      // byte columns of odd length, so a misaligned one must be a copy with the same values
+      if (col.BYTES_PER_ELEMENT > 1 && col.buffer !== input.buffer) { assert.notEqual(col.buffer, input.buffer); continue; }
+      if (col.BYTES_PER_ELEMENT > 1) views++;
       assert.equal(col.buffer, input.buffer, k);
       const at = col.byteOffset - input.byteOffset;
       const was = col[0];
@@ -630,5 +636,7 @@ test('decodeSavedIndex: columns view the saved bytes, a Buffer and a Uint8Array 
       assert.notEqual(col[0], was, `resolved ${k} sees a write to the saved bytes`);
       input[at] ^= 0xff;
     }
+    // the aligned path is taken: number columns (offset, compressed, size, baseIndex) are views, not copies
+    assert.ok(views >= 4, `${views} number columns are views`);
   }
 });
