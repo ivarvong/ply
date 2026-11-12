@@ -471,3 +471,51 @@ test('pushPackChecked says whether the request was sent: not for a refusal, a fi
     assert.equal(o.result.ok ? null : o.result.error.code, code, what);
   }
 });
+
+// #272: a failed pushPack's error is its git.receive-pack span's error (OTel semconv: status ERROR = code 2, OK = 1;
+// error.type, an 'exception' event), whether or not the body was pulled; a landed push's span is not an error.
+test('pushPackChecked records the outcome\'s error on its git.receive-pack span, sent or not', async () => {
+  const { url } = repo();
+  const unpulled = routed(async () => { throw new TypeError('connect failed'); });
+  const pulled = routed(async init => { await init.body.getReader().read(); throw new TypeError('network gone'); });
+  const cases = [
+    ['body never pulled', unpulled, 'network'],
+    ['lost after the first pull', pulled, 'ambiguous'],
+    ['landed', undefined, null],
+  ];
+  for (const [what, fetchImpl, code] of cases) {
+    const ex = arrayExporter();
+    const o = await pushPackChecked(transport(url, { fetchImpl, tracer: new Tracer({ exporter: ex }) }), { ...create(), pack: streamOf(source.pack).stream, sideband: false });
+    assert.equal(o.result.ok ? null : o.result.error.code, code, what);
+    const spans = ex.lines.flatMap(flattenLine).filter(s => s.name === 'git.receive-pack');
+    assert.equal(spans.length, 1, what);
+    const [span] = spans;
+    const exceptions = span.events.filter(e => e.name === 'exception');
+    assert.deepEqual(
+      { status: span.status.code, type: span.attrs['error.type'] ?? null, exceptions: exceptions.length },
+      code === null ? { status: 1, type: null, exceptions: 0 } : { status: 2, type: code, exceptions: 1 },
+      what,
+    );
+  }
+});
+
+// #272: a raise (a tracer or transport the caller handed in that throws) is 'protocol' and counts as sent: nothing says
+// the body was not pulled, so runTransfer settles it rather than treat a request that may have reached git as unsent.
+test('pushPackChecked: a raise is protocol and sent, before the first pull or after it', async () => {
+  const { url } = repo();
+  const raising = when => {
+    const tracer = new Tracer();
+    const start = tracer.start.bind(tracer);
+    tracer.start = (name, options) => {
+      if (when === 'start' && name === 'git.receive-pack') throw new TypeError('tracer raised');
+      const span = start(name, options);
+      if (when === 'set') { const set = span.set.bind(span); span.set = attrs => { if ('git.push.pack.bytes' in attrs) throw new TypeError('span raised'); return set(attrs); }; }
+      return span;
+    };
+    return tracer;
+  };
+  for (const when of ['start', 'set']) {
+    const o = await pushPackChecked(transport(url, { tracer: raising(when) }), { ...create(), pack: streamOf(source.pack).stream, sideband: false });
+    assert.deepEqual({ sent: o.sent, code: o.result.ok ? null : o.result.error.code }, { sent: 'yes', code: 'protocol' }, when);
+  }
+});
