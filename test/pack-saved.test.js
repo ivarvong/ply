@@ -584,21 +584,62 @@ test('maxPackObjects: a saved index over it is refused from the header with got/
   assert.equal(decodeSavedIndex(head, idOf(from)).error.tag, 'truncated');
 });
 
-// The bound on the consumer path: loadTransferPack refuses an over-cap saved index with limit_exceeded from the
-// caller's resolve limits, without a scan (no spool byte past the trailer is read).
-test('loadTransferPack: a saved index over the caller\'s maxPackObjects is limit_exceeded, not rescanned', async () => {
+// The bound on the consumer path: the cap is the scan's (opts.scan.limits.maxPackObjects), and a saved index over it
+// is refused like any other stored bytes and rescanned (README: stored bytes are untrusted, loadTransferPack then scans
+// again); a pack really over the cap is refused by the scan's own header-count check.
+test('loadTransferPack: a saved index over the scan\'s maxPackObjects is refused and rescanned; the scan refuses a pack over it', async () => {
   const { t } = traced();
   const first = must(await loadTransferPack(t, rangeFromBytes(src.packs.ref), none));
-  const n = first.from.pack.count;
+  const n = git(work, ['rev-list', '--objects', '--no-walk', src.head]).trim().split('\n').length;
+  assert.equal(first.from.pack.count, n);
   const over = counted(src.packs.ref);
-  const r = await loadTransferPack(t, over.source, some(first.saved), { resolve: { limits: { maxPackObjects: n - 1 } } });
+  const r = await loadTransferPack(t, over.source, some(first.saved), { scan: { limits: { maxPackObjects: n - 1 } } });
   assert.equal(r.ok, false);
   assert.equal(r.error.code, 'limit_exceeded');
-  assert.deepEqual([r.error.what, r.error.got, r.error.max], ['pack objects', n, n - 1]);
-  assert.deepEqual(over.c, { reads: 1, bytes: 20 }, 'only the trailer is read: no scan');
-  const at = must(await loadTransferPack(t, rangeFromBytes(src.packs.ref), some(first.saved), { resolve: { limits: { maxPackObjects: n } } }));
+  assert.ok(over.c.bytes > 20, `rescanned: ${over.c.bytes} B read`);
+  // a resolve limit is not the cap: the index is used
+  const at = must(await loadTransferPack(t, rangeFromBytes(src.packs.ref), some(first.saved), { resolve: { limits: { maxPackObjects: n - 1 } } }));
   assert.deepEqual(at.loaded, { tag: 'saved' });
 });
+
+// A corrupt stored count (bit 0x02 of byte 18, the third byte of the little-endian u32 count at 16, adds 0x20000) is
+// untrusted data: refused, rescanned, and the load succeeds.
+test('loadTransferPack: a saved index whose stored count is corrupt past the cap is rescanned, with the refusal', async () => {
+  const { t, spans } = traced();
+  const first = must(await loadTransferPack(t, rangeFromBytes(src.packs.ref), none));
+  const n = git(work, ['rev-list', '--objects', '--no-walk', src.head]).trim().split('\n').length;
+  const bad = Uint8Array.from(first.saved);
+  assert.equal(bad[18] & 0x02, 0);
+  bad[18] ^= 0x02;
+  const r = must(await loadTransferPack(t, rangeFromBytes(src.packs.ref), some(bad)));
+  assert.deepEqual(r.loaded, { tag: 'scanned', refused: some({ tag: 'limit_exceeded', what: 'pack objects', got: n + 0x20000, max: 100_000 }) });
+  assert.equal(r.from.pack.count, n);
+  assert.deepEqual(r.saved, first.saved);
+  const span = spans().filter(s => s.name === 'git.transfer.load').at(-1);
+  assert.equal(span.attrs['git.transfer.load.refused'], 'limit_exceeded');
+});
+
+// Raised scan cap: a pack of 100 005 blobs (git pack-objects) scans under scan.limits.maxPackObjects 200 000 and
+// resumes from its own saved bytes with the same opts.
+test('loadTransferPack: a pack over the default cap scanned under a raised scan cap resumes from its saved bytes', async () => {
+  const dir = join(root, 'big');
+  initRepo(dir);
+  const N = 100_005;
+  let fi = '';
+  for (let i = 0; i < N; i++) { const d = `b${i}\n`; fi += `blob\ndata ${d.length}\n${d}`; }
+  gitBuf(dir, ['fast-import', '--quiet', '--export-marks=marks'], Buffer.from(fi));
+  const oids = git(dir, ['cat-file', '--batch-all-objects', '--batch-check=%(objectname)'], { maxBuffer: 1 << 26 });
+  assert.equal(oids.trim().split('\n').length, N);
+  const pack = new Uint8Array(gitBuf(dir, ['pack-objects', '--stdout', '-q'], Buffer.from(oids)));
+  const { t } = traced();
+  const opts = { scan: { limits: { maxPackObjects: 200_000 } } };
+  const first = must(await loadTransferPack(t, rangeFromBytes(pack), none, opts));
+  assert.equal(first.from.pack.count, N);
+  const again = counted(pack);
+  const r = must(await loadTransferPack(t, again.source, some(first.saved), opts));
+  assert.deepEqual(r.loaded, { tag: 'saved' });
+  assert.deepEqual(again.c, { reads: 1, bytes: 20 });
+}, 120_000);
 
 // #299 items 5 and 6: decoded columns are views into the saved bytes (one copy, not two), the same for a Node Buffer
 // and a Uint8Array (README 'Saved pack index'): a byte the caller changes after the decode shows in the column.

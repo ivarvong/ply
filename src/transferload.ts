@@ -10,8 +10,10 @@
 //     saved:  the bytes to keep for the next request (the saved ones when they were used, else a fresh encoding)
 //
 // Limits: opts.resolve.limits is parsed once, before anything is read (one that does not parse is bad_request), and
-// is what both the resolve and the saved index's check run under: an index saved under a raised maxDeltaChain is used
-// under that limit again, and refused (then rescanned, and the resolve says limit_exceeded) under a lower one.
+// is what both the resolve and the saved index's chain check run under: an index saved under a raised maxDeltaChain is
+// used under that limit again, and refused (then rescanned, and the resolve says limit_exceeded) under a lower one.
+// The saved index's entry count is held to opts.scan.limits.maxPackObjects, the scan's cap (parsed here too); over it
+// the index is refused and rescanned like any other refusal.
 //
 // Span: git.transfer.load (under dst's parent) with git.transfer.load.from, .refused, .saved_bytes, .entries and
 // git.pack.trailer; a scan's refusal is the span's error.
@@ -21,14 +23,14 @@ import { ok, err, some, none } from './result.js';
 import type { Input } from './absent.js';
 import { withDefaults } from './absent.js';
 import type { ScanIndexOpts, ScannedPack } from './packscanindex.js';
-import { scanPackIndex } from './packscanindex.js';
+import { scanPackIndex, scanLimitsOf } from './packscanindex.js';
 import type { ResolveRangeOpts } from './packrangeresolve.js';
 import { resolvePackRange, resolveOptsOf } from './packrangeresolve.js';
 import type { RangeSource } from './rangesource.js';
 import { UNCANCELLABLE, HALTED, haltOn, cancelLate, aborted } from './rangesource.js';
 import type { TransferPack } from './transferplan.js';
 import type { SavedIndex, SavedIndexRefusal } from './packsaved.js';
-import { decodeSavedIndex, encodeSavedIndex, describeRefusal, packIdentity, refusalLimitError } from './packsaved.js';
+import { decodeSavedIndex, encodeSavedIndex, describeRefusal, packIdentity } from './packsaved.js';
 import type { Span } from './otel.js';
 import { KIND } from './otel.js';
 import type { Transport } from './transport.js';
@@ -62,8 +64,8 @@ async function scanned(source: RangeSource, cfg: LoadConfig, refused: Option<Sav
 // A saved index read back: used as it is, resolved again when it has no resolved columns, or refused (a scan, and why).
 async function fromSaved(source: RangeSource, cfg: LoadConfig, span: Span, bytes: Uint8Array, decoded: Result<SavedIndex, SavedIndexRefusal>): Promise<Result<LoadedPack, PlyError>> {
   if (!decoded.ok) {
-    // over maxPackObjects: refused, not scanned (a scan of the same pack under the same cap is refused the same way)
-    if (decoded.error.tag === 'limit_exceeded') return err(refusalLimitError(decoded.error));
+    // every refusal, limit_exceeded too, is rescanned: the stored count is unverified bytes (checked before the SHA-1
+    // and the pack identity), and a pack really over the cap is refused by the scan's own header-count check
     span.set({ 'git.transfer.load.refused': decoded.error.tag, 'git.transfer.load.refused_reason': describeRefusal(decoded.error) });
     const again = await scanned(source, cfg, some(decoded.error));
     return again;
@@ -85,11 +87,14 @@ export async function loadTransferPack(dst: Transport, source: RangeSource, save
     // the saved index is held to the chain limit its resolve would run under
     const resolve = resolveOptsOf(input.resolve);
     if (!resolve.ok) return resolve;
+    // the entry-count bound is the scan's cap (scan.limits.maxPackObjects), parsed as the scan parses it
+    const scanLimits = scanLimitsOf(input.scan);
+    if (!scanLimits.ok) return scanLimits;
     const cfg: LoadConfig = { scan: input.scan, resolve: resolve.value, signal: input.signal };
     const id = await packIdentity(source, cfg.signal);
     if (!id.ok) return id;
     span.set({ 'git.pack.trailer': id.value.trailer });
-    const out = saved.tag === 'none' ? await scanned(source, cfg, none) : await fromSaved(source, cfg, span, saved.value, decodeSavedIndex(saved.value, id.value, resolve.value.limits.maxDeltaChain, resolve.value.limits.maxPackObjects));
+    const out = saved.tag === 'none' ? await scanned(source, cfg, none) : await fromSaved(source, cfg, span, saved.value, decodeSavedIndex(saved.value, id.value, resolve.value.limits.maxDeltaChain, scanLimits.value.maxPackObjects));
     if (out.ok) span.set({ 'git.transfer.load.from': out.value.loaded.tag, 'git.transfer.load.saved_bytes': out.value.saved.length, 'git.transfer.load.entries': out.value.from.pack.count });
     return out;
   });
