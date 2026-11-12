@@ -404,3 +404,43 @@ test('done reports a temp ref left behind; the spans: run > status, step, settle
   const [sweep] = named('git.transfer.sweep').length ? named('git.transfer.sweep') : ex.lines.flatMap(flattenLine).filter(s => s.name === 'git.transfer.sweep');
   assert.equal(sweep.attrs['git.transfer.sweep.deleted'], 1);
 });
+
+// The names a plan read back is checked with (src/transfernames.ts), one case per decision. Expected values come from
+// git, not from ply: git check-ref-format decides which refs are pushable, git hash-object gives a real id, and the
+// Option shape is the one the module documents ({"tag":"none"} or {"tag":"some","value":<id>}).
+test('transfer names: the temp ref must sit under a prefix ending in "/", and each refusal names its field', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { targetRef, tempRefOf, isOptionOid } = await import('../src/transfernames.js');
+  const pushable = ref => { try { execFileSync('git', ['check-ref-format', ref], { stdio: 'ignore' }); return true; } catch { return false; } };
+  // git accepts refs/ply/transferabc (two components under refs/, as receive-pack wants), so only the prefix rule refuses it.
+  assert.equal(pushable('refs/ply/transferabc'), true);
+  const noSlash = tempRefOf('refs/ply/transfer', 'abc');
+  assert.equal(noSlash.ok, false);
+  assert.equal(noSlash.error.code, 'bad_request');
+  assert.equal(noSlash.error.details?.what ?? noSlash.error.what, 'tempPrefix');
+  assert.equal(noSlash.error.message, 'transfer: tempPrefix must end in "/"');
+  assert.equal(pushable('refs/ply-transfer/abc'), true);
+  assert.deepEqual(tempRefOf('refs/ply-transfer/', 'abc'), { ok: true, value: 'refs/ply-transfer/abc' });
+  // git refuses a..b: the ref check refuses first, and says which field.
+  assert.equal(pushable('refs/a..b/k'), false);
+  const badPrefix = tempRefOf('refs/a..b/', 'k');
+  assert.equal(badPrefix.ok, false);
+  assert.match(badPrefix.error.message, /^transfer: tempPrefix: \S/u);
+  assert.equal(pushable('refs/heads/a..b'), false);
+  const badRef = targetRef('refs/heads/a..b');
+  assert.equal(badRef.ok, false);
+  assert.equal(badRef.error.code, 'bad_request');
+  assert.match(badRef.error.message, /^transfer: ref: \S/u);
+  assert.equal(pushable('refs/heads/main'), true);
+  assert.deepEqual(targetRef('refs/heads/main'), { ok: true, value: 'refs/heads/main' });
+  // isOptionOid, against git's id for the empty blob.
+  const oid = execFileSync('git', ['hash-object', '--stdin'], { input: '' }).toString().trim();
+  assert.equal(isOptionOid({ tag: 'none' }), true);
+  assert.equal(isOptionOid({ tag: 'some', value: oid }), true);
+  assert.equal(isOptionOid({ tag: 'some', value: 'junk' }), false);
+  assert.equal(isOptionOid({ tag: 'some' }), false);
+  assert.equal(isOptionOid({ tag: 'other', value: oid }), false);
+  assert.equal(isOptionOid({ tag: 'other' }), false);
+  assert.equal(isOptionOid({}), false);
+  for (const v of [null, undefined, 'none', 0, true]) assert.equal(isOptionOid(v), false);
+});
