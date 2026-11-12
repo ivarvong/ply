@@ -11,8 +11,11 @@
 // Delta families stay together: a whole object and every delta resting on it, directly or through other deltas, go in
 // one batch, so every base a batch needs is in it. A family too big for one batch is refused unless `crossBatchRef`:
 // then it is split in chain order, and a delta whose base landed in an earlier batch is written as REF_DELTA to the
-// base's oid (an OFS_DELTA is rewritten; a REF_DELTA, which is all a Cloudflare Artifacts pack holds, already is). That
-// is a thin pack resting on objects the server already has; git's receive-pack runs index-pack --fix-thin and accepts
+// base's oid (an OFS_DELTA is rewritten; a REF_DELTA, which is all a Cloudflare Artifacts pack holds, already is). How
+// an entry is written given where its base is, is packSubset's own rule (`entryWrite`, `baseId`), called here: a batch
+// this plans is one packSubset builds when it is given the same `resolved` (a base that is itself a delta has an id
+// only there). An entry that rule cannot write fails the plan (bad_request), before anything is pushed. A cut is a
+// thin pack resting on objects the server already has; git's receive-pack runs index-pack --fix-thin and accepts
 // it, but whether a host does is the host's to say, so it is opt-in. A selected delta whose base is not selected, or a
 // thin pack's delta whose base is outside the pack, likewise needs `crossBatchRef` (the destination must hold the base).
 //
@@ -33,7 +36,8 @@ import { limitExceeded } from './limits.js';
 import type { ScannedPack } from './packscanindex.js';
 import type { ResolvedIndex } from './packrangeresolve.js';
 import { NO_BASE, THIN_BASE } from './packrangeresolve.js';
-import { encodeOfsDistance } from './pack.js';
+import type { Threw, Nothing } from './packsubset.js';
+import { entryWrite, baseId, ofsDistanceBytes, WRITE_OFS, WRITE_REFUSED } from './packsubset.js';
 import { Sha1 } from './sha1.js';
 import { te } from './bytes.js';
 import { withDefaults, mapGet, at } from './absent.js';
@@ -94,7 +98,7 @@ const COMMIT = OBJ_COMMIT;
 const OFS_DELTA = OBJ_OFS_DELTA;
 const TAG = OBJ_TAG;
 const TREE = OBJ_TREE;
-const ofsLen = (distance: number): number => encodeOfsDistance(distance).length;
+const ofsLen = ofsDistanceBytes;
 
 function checkBudget(b: PushBudget): PlyError | null {
   const fields: ReadonlyArray<readonly [string, number]> = [
@@ -131,6 +135,13 @@ type Ctx = {
   readonly batchOf: Int32Array;
   // bytes of an OFS distance counted for a delta written as OFS: the length the largest distance in a push needs
   readonly ofsMax: number;
+  // entries the builder's rule cannot write where the plan put them (none, unless `resolved` lacks a base's id)
+  readonly unbuildable: number[];
+  // what the caller's `resolved.oid()` threw, the first time it did, or that it returned nothing (at most one): the
+  // plan's refusal, with what was thrown as its cause
+  readonly threw: Array<Threw | Nothing>;
+  // what the last wireBytes call found besides the bytes (see wireBytes)
+  readonly last: { rewrite: boolean; refused: boolean };
 };
 
 // The entry's base inside the selection, or -1 (a whole object, a thin base, or a base not selected).
@@ -138,22 +149,42 @@ function inBase(c: Ctx, i: number): number {
   const b = c.resolved.columns.base[i] as number;
   return b >= 0 && c.chosen[b] === 1 ? b : -1;
 }
+// An OFS_DELTA's part of wireBytes, kept out of it so the whole-object and REF_DELTA path stays as small as main's.
+function ofsWire(c: Ctx, i: number, sameBatch: boolean, header: number, compressed: number): number {
+  const cols = c.pack.columns;
+  const last = c.last;
+  const storedBase = cols.baseIndex[i] as number;
+  const typeSize = header - ofsLen((cols.offset[i] as number) - (cols.offset[storedBase] as number));
+  // the builder's own rule: OFS beside its base, else a REF_DELTA to the base's id, which `resolved` must know. The
+  // id is asked for only when it would be written (the base is outside this batch): this runs per entry per try
+  const id = sameBatch ? null : baseId(c.pack, c.resolved, storedBase);
+  if (id !== null && typeof id !== 'string' && c.threw.length === 0) c.threw.push(id);
+  const write = entryWrite(OFS_DELTA, sameBatch, sameBatch || typeof id === 'string', c.cross ? 'ref' : 'refuse');
+  last.refused = write === WRITE_REFUSED;
+  if (write === WRITE_OFS) { last.rewrite = false; return typeSize + c.ofsMax + compressed; }
+  last.rewrite = true;
+  return typeSize + OID_BYTES + compressed;
+}
 // Bytes the entry takes in a batch whose number is `batch`: its header as it will be written, then its compressed bytes.
-function wireBytes(c: Ctx, i: number, batch: number): { readonly bytes: number; readonly rewrite: boolean } {
+// It returns the bytes and leaves in `c.last` whether the entry is written as a REF_DELTA where it was not stored as one
+// (`rewrite`) and whether the builder's rule cannot write it there at all (`refused`: an OFS_DELTA outside its base's
+// batch without a known base id). Nothing is allocated per call: this runs per entry per try, and a returned record per
+// call (two shapes of it once OFS cuts were checked) made the REF-only planner 5-9% slower than main 8e3939db.
+function wireBytes(c: Ctx, i: number, batch: number): number {
   const cols = c.pack.columns;
   const compressed = cols.compressed[i] as number;
   const header = cols.headerBytes[i] as number;
   const stored = cols.storedType[i] as number;
   const b = inBase(c, i);
   const isDelta = (c.resolved.columns.base[i] as number) !== NO_BASE;
-  if (!isDelta) return { bytes: header + compressed, rewrite: false };
+  const last = c.last;
+  if (!isDelta) { last.rewrite = false; last.refused = false; return header + compressed; }
   const sameBatch = b >= 0 && (c.batchOf[b] as number) === batch;
-  if (stored === OFS_DELTA) {
-    const typeSize = header - ofsLen((cols.offset[i] as number) - (cols.offset[cols.baseIndex[i] as number] as number));
-    return sameBatch ? { bytes: typeSize + c.ofsMax + compressed, rewrite: false } : { bytes: typeSize + OID_BYTES + compressed, rewrite: true };
-  }
+  if (stored === OFS_DELTA) return ofsWire(c, i, sameBatch, header, compressed);
   // a REF_DELTA is written as it is stored, wherever its base is
-  return { bytes: header + compressed, rewrite: !sameBatch };
+  last.rewrite = !sameBatch;
+  last.refused = false;
+  return header + compressed;
 }
 
 // Every planned entry checked against the per-object budget and the type it resolved to.
@@ -220,16 +251,17 @@ const fitsObjects = (c: Ctx, count: number): boolean => count + c.budget.reserve
 function familyBytes(c: Ctx, list: readonly number[], batch: number): number {
   for (const i of list) c.batchOf[i] = batch;
   let sum = 0;
-  for (const i of list) sum += wireBytes(c, i, batch).bytes;
+  for (const i of list) sum += wireBytes(c, i, batch);
   for (const i of list) c.batchOf[i] = -1;
   return sum;
 }
 function place(c: Ctx, b: Open, batch: number, i: number): void {
   c.batchOf[i] = batch;
-  const w = wireBytes(c, i, batch);
+  b.bytes += wireBytes(c, i, batch);
   b.entries.push(i);
-  b.bytes += w.bytes;
-  if (w.rewrite) b.refRewrites += 1;
+  if (!c.last.rewrite) return;
+  b.refRewrites += 1;
+  if (c.last.refused) c.unbuildable.push(i);
 }
 const done = (b: Open): PlannedBatch => ({ kind: b.kind, entries: b.entries, packBytes: b.bytes, objects: b.entries.length, refRewrites: b.refRewrites });
 
@@ -261,13 +293,13 @@ function planBlobs(c: Ctx, fams: ReadonlyArray<readonly number[]>): Result<Plann
     for (const i of list) {
       let batch2 = out.length;
       let w = wireBytes(c, i, batch2);
-      if (!(fitsBytes(c, cur.bytes + w.bytes) && fitsObjects(c, cur.entries.length + 1)) && cur.entries.length > 0) {
+      if (!(fitsBytes(c, cur.bytes + w) && fitsObjects(c, cur.entries.length + 1)) && cur.entries.length > 0) {
         out.push(done(cur));
         cur = open('blobs');
         batch2 = out.length;
         w = wireBytes(c, i, batch2);
       }
-      if (!fitsBytes(c, cur.bytes + w.bytes)) return err(limitExceeded(`entry bytes (entry ${i})`, PACK_OVERHEAD + w.bytes + c.budget.reserveBytes, c.budget.maxRequestBytes));
+      if (!fitsBytes(c, cur.bytes + w)) return err(limitExceeded(`entry bytes (entry ${i})`, PACK_OVERHEAD + w + c.budget.reserveBytes, c.budget.maxRequestBytes));
       place(c, cur, batch2, i);
     }
   }
@@ -326,7 +358,7 @@ export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, inpu
   if (!chosen.ok) return chosen;
   const c: Ctx = {
     pack, resolved, budget: opts.budget, cross: opts.crossBatchRef, chosen: chosen.value,
-    batchOf: new Int32Array(pack.count).fill(-1), ofsMax: ofsLen(opts.budget.maxRequestBytes),
+    batchOf: new Int32Array(pack.count).fill(-1), ofsMax: ofsLen(opts.budget.maxRequestBytes), unbuildable: [], threw: [], last: { rewrite: false, refused: false },
   };
   const bad = checkEntries(c);
   if (bad !== null) return err(bad);
@@ -339,9 +371,17 @@ export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, inpu
     else restFams.push(list);
   }
   const blobs = planBlobs(c, blobFams);
-  if (!blobs.ok) return blobs;
-  const batches = planFinal(c, restFams, blobs.value);
+  const batches = blobs.ok ? planFinal(c, restFams, blobs.value) : blobs;
+  // an exception out of the caller's `resolved.oid()` is the cause, ahead of any other refusal: never swallowed
+  const threw = at(c.threw, 0);
+  if (threw.tag === 'some') {
+    return 'threw' in threw.value
+      ? fail('bad_request', 'the resolved index\'s oid() threw when a cut base\'s id was asked for', { cause: threw.value.threw })
+      : fail('bad_request', 'the resolved index\'s oid() returned nothing when a cut base\'s id was asked for');
+  }
   if (!batches.ok) return batches;
+  const stuck = at(c.unbuildable, 0);
+  if (stuck.tag === 'some') return fail('bad_request', `entry ${stuck.value} is an OFS_DELTA cut from its base, and the resolved index has no id (40 lowercase hex) for that base to write it as a REF_DELTA`);
   const entries = batches.value.reduce((s, b) => s + b.objects, 0);
   const body = { version: PLAN_VERSION, trailer: pack.trailer, budget: { ...opts.budget }, crossBatchRef: opts.crossBatchRef, select: opts.select === null ? null : [...opts.select], batches: batches.value, entries } as const;
   return ok({ ...body, hash: planHash(body) });
