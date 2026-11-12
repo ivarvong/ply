@@ -145,8 +145,10 @@ Migration path:
    API still called.
 3. **Cut-over (done, 0.2.0).** Public entry points return `Result`; `thrown`, `orThrow` and every throwing wrapper
    are deleted; `index` exports `fail` (an Err) and `plyError` (the error value), not a throwing constructor. What
-   may still raise: `assertNever`, an `internal` invariant, a stream (a ReadableStream errors, an iterator rejects),
-   and a value the caller's own callback threw, which `operation()` passes back unchanged. In ply-web,
+   may still raise: `assertNever`, an `internal` invariant, and a stream (a ReadableStream errors, an iterator
+   rejects). A value the caller's own callback threw does not raise: it is returned as an `Err` (`bad_request`, or `ambiguous`
+   once the push request was handed to the transport; `what: 'callback'`, the value as `cause`; README "`operation()`:
+   your body's outcomes"). In ply-web,
    in the same window: bump the pin, replace `try { … } catch (e) { code = e.code }` with `if (!r.ok)` and a
    `switch (r.error.code)` with no `default` and `assertNever` after it (ply-web already maps codes to HTTP statuses; it becomes
    exhaustive), delete `src/ply.d.ts` (ply ships its own types).

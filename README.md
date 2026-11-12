@@ -322,7 +322,9 @@ value, untouched, as `error.cause` (ply writes nothing on it), and `error.what` 
 | `cachingFetch`'s `shouldCache`, `waitUntil`, or the cache's `match` / `delete` / `put` throws when called | `'shouldCache'`, `'waitUntil'`, `'cache.match'`, `'cache.delete'`, `'cache.put'` | `bad_request` |
 
 Every other function you pass ends in the backstop: a throw from it that reaches the end of an operation (`editFile`,
-`commitChanges`, `pushTree`, merge, rebase, pick) is `what: 'callback'` with the thrown value as `error.cause`. Three things are not failures of the operation: a cache
+`commitChanges`, `pushTree`, merge, rebase, pick, and an `operation()` body together with every callback reached from
+it) is `what: 'callback'` with the thrown value as `error.cause`. For an `operation()` body this is a **breaking change
+since #277**: before it, the body's throw reached you unchanged; see "`operation()`: your body's outcomes" below. Three things are not failures of the operation: a cache
 whose `match` or `delete` promise rejects is a miss, a `put` that rejects is counted in `stats` (`putFailed`,
 `putError`; a `put` that throws when called is the fetch's `'cache.put'` failure, since it is called inside the fetch; under `verifyBeforeStore` the `put` is called only after `verifyFetchAnswer` accepted the answer, after the fetch answered, so one that throws there is counted in `putFailed` too, `putError` holding the `'cache.put'` Err's message, which names the thrown value, and the fetch is unaffected),
 and an `advertise()` ply calls only to confirm a refused push or an empty answer confirms nothing when it fails. A thrown value that already carries one of ply's codes (a transport or fetch that wraps ply's own) is that
@@ -347,7 +349,7 @@ service other than `git-upload-pack`) when it was thrown:
 
 | `body` … | before the push request was handed over | after |
 | --- | --- | --- |
-| throws a value that is not a `PlyError` | `bad_request`, `what: 'callback'`, `cause` the thrown value | `ambiguous`, `what: 'callback'`, `cause` the thrown value |
+| throws a value that is not a `PlyError` | `bad_request`, `what: 'callback'`, `cause` the thrown value | `ambiguous`, `what: 'callback'`, `cause` the thrown value, its `code` in `original` if it has a string one (a node `ECONNRESET` error, say) |
 | throws a `PlyError` | that `PlyError`, as itself | `ambiguous`, `what: 'callback'`, `cause` the thrown error, its code in `original` (a thrown `ambiguous` is itself) |
 | returns a `Result` | that `Result`, as it is | that `Result`, as it is |
 
