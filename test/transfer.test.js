@@ -400,12 +400,14 @@ test('sweepTransfers: a prefix outside refs/ply/transfer/ is bad_request before 
   must(await runTransfer(t, from, plan, src.commit, { maxSteps: 2, ref: REF }));
   const tip = git(bare, ['rev-parse', plan.tempRef]).trim();
   // refs no transfer made: a branch, a tag, a sibling namespace, a near-miss name, a deeper name under the prefix
-  const others = ['refs/heads/main', 'refs/tags/v1', 'refs/ply/transfer-old/x', 'refs/ply/transferx', `refs/ply/transfer/${'0'.repeat(39)}`, 'refs/ply/transfer/sub/x'];
+  const others = ['refs/heads/main', 'refs/tags/v1', 'refs/ply/transfer-old/x', 'refs/ply/transferx', `refs/ply/transfer/${'0'.repeat(39)}`, 'refs/ply/transfer/sub/x',
+    // 40 characters that are not a lowercase-hex oid (git's object names are lowercase hex): not a temp key
+    `refs/ply/transfer/${'A'.repeat(40)}`, `refs/ply/transfer/${'g'.repeat(40)}`];
   for (const r of others) git(bare, ['update-ref', r, tip]);
   const listing = () => git(bare, ['for-each-ref', '--format=%(refname)']).trim().split('\n').sort();
   const before = listing();
   requests = 0;
-  for (const prefix of ['', 'refs/', 'refs/heads/', 'refs/tags/', 'refs/ply/transfer', 'refs/ply/transfer-old/', 'refs/ply/', 'refs/ply/transfer/../', 'refs/heads/ply/transfer/']) {
+  for (const prefix of ['', 'refs/', 'refs/heads/', 'refs/tags/', 'refs/ply/transfer', 'refs/ply/transfer-old/', 'refs/ply/', 'refs/ply/transfer/../', 'refs/heads/ply/transfer/', 'refs/ply/transfer/sub', 42, {}]) {
     const r = await sweepTransfers(t, { prefix });
     assert.equal(r.ok, false, `prefix ${JSON.stringify(prefix)} is refused`);
     assert.equal(r.error.code, 'bad_request', JSON.stringify(prefix));

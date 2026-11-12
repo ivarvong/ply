@@ -47,6 +47,7 @@ const MUTATION_FILES = [
   'test/pullstream.test.js',
   'test/inflate-codesets.test.js',
   'test/inflate-pos.test.js',
+  'test/transfer.test.js',
 ];
 // A test that hangs under a mutant fails at its own timeout, not at Stryker's per-mutant one. vitest.config.ts turns both
 // timers off (0), so a hung await ran until Stryker's timeout: 2 × the covering tests' dry-run time + 8 s
