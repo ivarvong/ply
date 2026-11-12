@@ -17,7 +17,7 @@
 // git.pack.trailer; a scan's refusal is the span's error.
 import type { PlyError } from './errors.js';
 import type { Option, Result } from './result.js';
-import { ok, some, none } from './result.js';
+import { ok, err, some, none } from './result.js';
 import type { Input } from './absent.js';
 import { withDefaults } from './absent.js';
 import type { ScanIndexOpts, ScannedPack } from './packscanindex.js';
@@ -25,6 +25,7 @@ import { scanPackIndex } from './packscanindex.js';
 import type { ResolveRangeOpts } from './packrangeresolve.js';
 import { resolvePackRange, resolveOptsOf } from './packrangeresolve.js';
 import type { RangeSource } from './rangesource.js';
+import { UNCANCELLABLE, HALTED, haltOn, cancelLate, aborted } from './rangesource.js';
 import type { TransferPack } from './transferplan.js';
 import type { SavedIndex, SavedIndexRefusal } from './packsaved.js';
 import { decodeSavedIndex, encodeSavedIndex, describeRefusal, packIdentity } from './packsaved.js';
@@ -35,19 +36,25 @@ import { spanned } from './transport.js';
 
 export type Loaded = { readonly tag: 'saved' } | { readonly tag: 'resolved' } | { readonly tag: 'scanned'; readonly refused: Option<SavedIndexRefusal> };
 export type LoadedPack = { readonly from: TransferPack; readonly loaded: Loaded; readonly saved: Uint8Array };
-export type LoadConfig = { readonly scan: Partial<ScanIndexOpts>; readonly resolve: Partial<ResolveRangeOpts> };
+// `signal` aborts the load wherever it is (the trailer read, the scan, the resolve): each await on `source` is raced
+// against it, so the call settles `aborted` at once even when the spool never answers. It is the signal of the scan and
+// the resolve too (one in `scan` or `resolve` is replaced). Default: never aborts.
+export type LoadConfig = { readonly scan: Partial<ScanIndexOpts>; readonly resolve: Partial<ResolveRangeOpts>; readonly signal: AbortSignal };
 export type LoadOpts = Input<LoadConfig>;
 
 async function resolved(source: RangeSource, pack: ScannedPack, cfg: LoadConfig, loaded: Loaded): Promise<Result<LoadedPack, PlyError>> {
-  const r = await resolvePackRange(pack, source, cfg.resolve);
+  const r = await resolvePackRange(pack, source, { ...cfg.resolve, signal: cfg.signal });
   if (!r.ok) return r;
   const saved = encodeSavedIndex(pack, some(r.value));
   return saved.ok ? ok({ from: { source, pack, resolved: r.value }, loaded, saved: saved.value }) : saved;
 }
 async function scanned(source: RangeSource, cfg: LoadConfig, refused: Option<SavedIndexRefusal>): Promise<Result<LoadedPack, PlyError>> {
-  const whole = await source.read(0, source.size);
+  // opening the spool is raced here; reading it is the scan's, raced there against the same signal
+  const halt = haltOn(cfg.signal);
+  const whole = await halt.race(source.read(0, source.size, halt.signal), cancelLate).finally(halt.release);
+  if (whole === HALTED) return err(aborted('transfer load'));
   if (!whole.ok) return whole;
-  const pack = await scanPackIndex(whole.value, cfg.scan);
+  const pack = await scanPackIndex(whole.value, { ...cfg.scan, signal: cfg.signal });
   if (!pack.ok) return pack;
   return resolved(source, pack.value, cfg, { tag: 'scanned', refused });
 }
@@ -69,15 +76,15 @@ async function fromSaved(source: RangeSource, cfg: LoadConfig, span: Span, bytes
 
 // See the top of this file.
 export async function loadTransferPack(dst: Transport, source: RangeSource, saved: Option<Uint8Array>, opts: LoadOpts = {}): Promise<Result<LoadedPack, PlyError>> {
-  const input = withDefaults<LoadConfig>(opts, { scan: {}, resolve: {} });
+  const input = withDefaults<LoadConfig>(opts, { scan: {}, resolve: {}, signal: UNCANCELLABLE });
   const span0 = { parent: dst.parent, kind: KIND.INTERNAL, attrs: { 'git.transfer.load.saved_in': saved.tag === 'some' ? saved.value.length : 0, 'git.transfer.spool.bytes': source.size }, scrub: dst.scrub };
   const r = await spanned(dst, 'git.transfer.load', span0, async (span: Span): Promise<Result<LoadedPack, PlyError>> => {
     // the caller's resolve options, read once as the resolver reads them (an inherited one counts), limits parsed:
     // the saved index is held to the chain limit its resolve would run under
     const resolve = resolveOptsOf(input.resolve);
     if (!resolve.ok) return resolve;
-    const cfg: LoadConfig = { scan: input.scan, resolve: resolve.value };
-    const id = await packIdentity(source);
+    const cfg: LoadConfig = { scan: input.scan, resolve: resolve.value, signal: input.signal };
+    const id = await packIdentity(source, cfg.signal);
     if (!id.ok) return id;
     span.set({ 'git.pack.trailer': id.value.trailer });
     const out = saved.tag === 'none' ? await scanned(source, cfg, none) : await fromSaved(source, cfg, span, saved.value, decodeSavedIndex(saved.value, id.value, resolve.value.limits.maxDeltaChain));

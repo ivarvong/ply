@@ -87,7 +87,10 @@ export const LIMIT_INFLATED_TOTAL: number = LIMIT_OBJECT * LIMIT_INFLATED_OBJECT
  * filed under its base and resolved when the base lands), a REF_DELTA base is one Map lookup, never a scan or a pass.
  */
 export const LIMIT_PACK_OBJECTS = 100_000;
-/** ls-refs lines, and the rebase chain walked from them. */
+/**
+ * ls-refs lines, and the rebase chain walked from them. rebaseBranch walks the branch as deep as this chain bound
+ * needs (maxRebaseCommits + 2, or LIMIT_MERGE_DEPTH where that is deeper) and `onto` to LIMIT_MERGE_DEPTH (rebaseBaseOf, src/rebase.ts): each walk has its limit.
+ */
 export const LIMIT_REFS = 10_000;
 export const LIMIT_REBASE_COMMITS: number = LIMIT_REFS;
 /** shallow, ack, and any other v2 section lines per fetch. */
@@ -300,6 +303,12 @@ export const WORKER_LIMITS: CheckedLimits = grant({
   maxMergeBlobBytes: 2 * MIB,
   maxMergeWork: LIMIT_MERGE_WORK_WORKER,
   maxTreeEntries: 32_768,
+  // A rebase replays one commit at a time, about one request a commit whatever the depth of the path it changes, and a
+  // Worker request may make 1,000 subrequests (standard plan). 256 commits, each changing one file onto did not touch:
+  // 268 requests with a counting transport, at most 800 asserted (test/rebase.test.js, the WORKER_LIMITS test). A file
+  // that must be line-merged with onto costs about three more requests per commit, and this limit does not bound that
+  // (README, Limits).
+  maxRebaseCommits: 256,
   maxReportReasonBytes: LIMIT_REPORT_REASON_BYTES_WORKER,
 });
 /* oxlint-enable no-magic-numbers */

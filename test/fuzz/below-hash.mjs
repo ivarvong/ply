@@ -32,6 +32,10 @@ const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.start
 const N = parseInt(args.n ?? '20', 10);
 const SEED = parseInt(args.seed ?? '1', 10);
 const ONLY = args.case && args.case !== true ? String(args.case) : null;
+// The seed is printed on start and on every failing line, with the command that replays that case: a fixed case by
+// its name, a random case by its own seed, under the run's --n and --seed (they decide which random cases exist).
+console.log(`below-hash: seed ${SEED}, n ${N}`);
+const replay = c => `  seed=${SEED}  replay: node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --n ${N} --seed ${SEED} --case ${c.seed ?? c.name}`;
 const LIMITS = withLimits({ requestTimeoutMs: 4000 });
 const AUTHOR = unwrap(ident(unwrap(validateIdent({ name: 'A', email: 'a@b.c', time: 1700000000 }))));
 const REJECT = new Set(['pack_corrupt', 'protocol', 'remote_error', 'not_found', 'unsupported']);
@@ -223,7 +227,7 @@ try {
     const ply = await plyAccepts(c.focus, head);
     if (!ply.accepted && !REJECT.has(ply.code)) {
       fails.push(c.name);
-      console.log(`FAIL ${c.name}: untyped ${ply.code}: ${ply.message}`);
+      console.log(`FAIL ${c.name}: untyped ${ply.code}: ${ply.message}${replay(c)}`);
       continue;
     }
     const fsckNo = judged.rejected;
@@ -234,7 +238,7 @@ try {
     else if (!fsckNo && plyNo) { verdict = 'stricter'; stricter.push({ name: c.name, code: ply.code, message: ply.message, fsck: judged.errors }); }
     rows.push(verdict);
     const detail = verdict === 'ok' ? '' : ` fsck=${judged.errors[0] ?? 'accept'} ply=${ply.accepted ? 'accept' : ply.code + ' ' + String(ply.message).slice(0, 80)}`;
-    console.log(`${verdict.padEnd(13)} ${c.name.padEnd(22)} ${c.focus.padEnd(6)}${detail}`);
+    console.log(`${verdict.padEnd(13)} ${c.name.padEnd(22)} ${c.focus.padEnd(6)}${detail}${verdict === 'DIVERGE' || verdict === 'STRICT-NORMAL' ? replay(c) : ''}`);
   }
 } finally {
   await new Promise(resolve => server.close(resolve));

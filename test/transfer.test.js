@@ -3,6 +3,8 @@
 //   - end to end (REF-only and OFS packs, several batches): the ref is the planned head, no temp ref is left,
 //     fsck --strict is clean, exactly the tree's objects and the one new commit are reachable, ls-tree -r is the
 //     source's, the commit has no parents and keeps the source's author, committer and message
+//   - an OFS pack whose delta chain a small budget cuts below a delta base (crossBatchRef): done in one run and after
+//     a pause and resume, no temp ref, the same checks
 //   - resume: paused after every single push and resumed, the same head; a push that dies mid-stream (the spool
 //     fails) leaves the refs where they were and the next run finishes; a step already landed, sent again, is refused
 //     and moves nothing
@@ -30,6 +32,7 @@ import { createTransport } from '../src/http.js';
 import { planTransfer, checkTransferPlan, rootCommit, batchTrees, TRANSFER_REF_PREFIX } from '../src/transferplan.js';
 import { transferStatus, transferStep, runTransfer, copyTree, sweepTransfers } from '../src/transfer.js';
 import { te } from '../src/bytes.js';
+import { TYPE } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap } from './unwrap.js';
 
@@ -133,6 +136,107 @@ test('end to end, REF-only and OFS packs: several pushes under the cap, fsck --s
     assert.ok(checkTransferPlan(JSON.parse(JSON.stringify(plan)), { ref: REF }).ok);
     assert.deepEqual(must(await transferStatus(t, plan, { ref: REF })), { tag: 'done', head: plan.head, tempLeft: false });
   }
+});
+
+test('an OFS pack cut below a delta base (crossBatchRef): the transfer finishes and resumes; git holds exactly the tree', async () => {
+  const from = await spooled(src.packs.ofs);
+  const c = from.pack.columns;
+  // 258 generated objects and 3 of the pack's entries a push (the three trees need that): the chain0..4 family (a blob
+  // and deltas on deltas) cannot fit one push, so it is refused without crossBatchRef and cut in chain order with it
+  const budget = { ...BUDGET, maxObjects: 261 };
+  assert.equal(planTransfer(from.pack, from.resolved, { budget, ref: REF, commit: src.commit }).error.code, 'limit_exceeded');
+  const plan = must(planTransfer(from.pack, from.resolved, { budget, ref: REF, commit: src.commit, crossBatchRef: true }));
+  // the fixture, read from git's pack and the plan's batches: an OFS_DELTA whose base is itself an OFS_DELTA, pushed in
+  // an earlier batch. Its base id is not in the scan index (a delta's id is known only once it is applied).
+  const batchOf = new Map(plan.pack.batches.flatMap((b, k) => b.entries.map(i => [i, k])));
+  const cut = [...batchOf.keys()].filter(i => c.storedType[i] === TYPE.OFS_DELTA && c.storedType[c.baseIndex[i]] === TYPE.OFS_DELTA && batchOf.get(c.baseIndex[i]) < batchOf.get(i));
+  assert.ok(cut.length >= 1, `OFS deltas cut from a delta base: ${cut.length}`);
+  const lastCut = Math.max(...cut.map(i => batchOf.get(i)));
+  // one run to the end
+  const whole = repo();
+  const run = must(await runTransfer(whole.t, from, plan, src.commit, { ref: REF }));
+  assert.deepEqual(run, { tag: 'done', head: plan.head, pushes: plan.steps.length, tempLeft: false });
+  assertCopied(whole.bare, plan);
+  // paused before the last cut batch, then resumed: the temp ref is there in between, gone at the end
+  const { bare, t } = repo();
+  const paused = must(await runTransfer(t, from, plan, src.commit, { maxSteps: lastCut, ref: REF }));
+  assert.equal(paused.tag, 'paused');
+  assert.equal(paused.pushes, lastCut);
+  assert.match(refsOf(bare), new RegExp(`^${plan.tempRef} [0-9a-f]{40}$`, 'u'));
+  const resumed = must(await runTransfer(t, from, plan, src.commit, { ref: REF }));
+  assert.equal(resumed.tag, 'done');
+  assert.equal(resumed.pushes, plan.steps.length - lastCut);
+  assert.equal(resumed.tempLeft, false);
+  assertCopied(bare, plan);
+});
+
+test('a `resolved` whose oid() answers an id, then something else: one id asked per rewritten entry; too few is a coded refusal, never a rejection', async () => {
+  const from = await spooled(src.packs.ofs);
+  const c = from.pack.columns;
+  const budget = { ...BUDGET, maxObjects: 261 };
+  const plan = must(planTransfer(from.pack, from.resolved, { budget, ref: REF, commit: src.commit, crossBatchRef: true }));
+  // from git's pack columns and the plan: an OFS_DELTA whose base is not in its own batch is rewritten as a REF_DELTA,
+  // and each rewrite needs one id. Counted per batch.
+  const batchOf = new Map(plan.pack.batches.flatMap((b, k) => b.entries.map(i => [i, k])));
+  const rewrites = plan.pack.batches.map((b, k) => b.entries.filter(i => c.storedType[i] === TYPE.OFS_DELTA && batchOf.get(c.baseIndex[i]) !== k).length);
+  const total = rewrites.reduce((a, b) => a + b, 0);
+  assert.ok(total >= 1, `rewrites: ${total}`);
+  const lastCut = rewrites.findLastIndex(r => r > 0);
+  const isRewrite = (i, k) => c.storedType[i] === TYPE.OFS_DELTA && batchOf.get(c.baseIndex[i]) !== k;
+  // How often each entry's id is needed to push `steps`, by hand: once for its line in its batch's temp tree
+  // (transferplan's entryAt, as on main), and once for each REF_DELTA header that names it as a base.
+  const needed = steps => {
+    const m = new Map();
+    const add = i => m.set(i, (m.get(i) ?? 0) + 1);
+    for (const k of steps) for (const i of plan.pack.batches[k].entries) { add(i); if (isRewrite(i, k)) add(c.baseIndex[i]); }
+    return m;
+  };
+  // an index that answers honestly as often as `allow` says (one time fewer for `shortOn`), then with what is not an id
+  const flipping = (allow, shortOn = -1) => {
+    const state = { lies: 0 };
+    const asked = new Map();
+    const oid = i => {
+      const nth = (asked.get(i) ?? 0) + 1;
+      asked.set(i, nth);
+      if (nth <= (allow.get(i) ?? 0) - (i === shortOn ? 1 : 0)) return from.resolved.oid(i);
+      state.lies++;
+      return { tag: 'some', value: 'z'.repeat(40) };
+    };
+    return { state, from: { ...from, resolved: { ...from.resolved, oid } } };
+  };
+  const everyStep = plan.pack.batches.map((_, k) => k);
+  // a base a rewritten entry of the last cut batch rests on
+  const lastBase = c.baseIndex[plan.pack.batches[lastCut].entries.find(i => isRewrite(i, lastCut))];
+  // runTransfer with exactly the answers needed: done without one lie told, and git holds exactly the tree
+  const whole = repo();
+  const enough = flipping(needed(everyStep));
+  const run = await runTransfer(whole.t, enough.from, plan, src.commit, { ref: REF });
+  assert.equal(run.ok, true, run.ok ? '' : `${run.error.code}: ${run.error.message}`);
+  assert.deepEqual(run.value, { tag: 'done', head: plan.head, pushes: plan.steps.length, tempLeft: false });
+  assert.equal(enough.state.lies, 0, 'an id was asked for more often than once per use');
+  assertCopied(whole.bare, plan);
+  // one honest answer too few for that base: the run ends with the builder's refusal (a Result); the ref is not created
+  const short = repo();
+  const few = await runTransfer(short.t, flipping(needed(everyStep), lastBase).from, plan, src.commit, { ref: REF });
+  assert.equal(few.ok, false);
+  assert.equal(few.error.code, 'bad_request');
+  assert.equal(few.error.what, 'pack subset base');
+  assert.equal(git(short.bare, ['for-each-ref', REF]).trim(), '');
+  // transferStep on the last cut batch: too few answers is the same refusal and nothing moves; enough, and it lands
+  const { bare, t } = repo();
+  must(await runTransfer(t, from, plan, src.commit, { maxSteps: lastCut, ref: REF }));
+  const step = must(await transferStatus(t, plan, { ref: REF })).step;
+  assert.equal(step, lastCut);
+  const before = refsOf(bare);
+  const refused = await transferStep(t, flipping(needed([lastCut]), lastBase).from, plan, step, { commit: src.commit, ref: REF });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.code, 'bad_request');
+  assert.equal(refused.error.what, 'pack subset base');
+  assert.equal(refsOf(bare), before);
+  const landed = await transferStep(t, flipping(needed([lastCut])).from, plan, step, { commit: src.commit, ref: REF });
+  assert.equal(landed.ok, true, landed.ok ? '' : `${landed.error.code}: ${landed.error.message}`);
+  assert.equal(must(await runTransfer(t, from, plan, src.commit, { ref: REF })).tag, 'done');
+  assertCopied(bare, plan);
 });
 
 test('everything in one push: no temp ref; atomic off: one plain push', async () => {
@@ -403,4 +507,53 @@ test('done reports a temp ref left behind; the spans: run > status, step, settle
   assert.deepEqual(must(await sweepTransfers(t)), [plan.tempRef]);
   const [sweep] = named('git.transfer.sweep').length ? named('git.transfer.sweep') : ex.lines.flatMap(flattenLine).filter(s => s.name === 'git.transfer.sweep');
   assert.equal(sweep.attrs['git.transfer.sweep.deleted'], 1);
+});
+
+test('an exception out of resolved.oid() is the cause of a coded refusal: planTransfer, transferStep and runTransfer never reject, and the refs stay as they were', async () => {
+  const from = await spooled(src.packs.ofs);
+  const c = from.pack.columns;
+  const config = { budget: { ...BUDGET, maxObjects: 261 }, ref: REF, commit: src.commit, crossBatchRef: true };
+  const plan = must(planTransfer(from.pack, from.resolved, config));
+  // the first batch holding an OFS_DELTA whose stored base is in another batch: packSubset must ask for that base's id
+  const batchOf = new Map(plan.pack.batches.flatMap((b, k) => b.entries.map(i => [i, k])));
+  const isRewrite = (i, k) => c.storedType[i] === TYPE.OFS_DELTA && batchOf.get(c.baseIndex[i]) !== k;
+  const cutBatch = plan.pack.batches.findIndex((b, k) => b.entries.some(i => isRewrite(i, k)));
+  assert.ok(cutBatch > 0, 'the fixture cuts a chain after the first batch');
+  const cutBase = c.baseIndex[plan.pack.batches[cutBatch].entries.find(i => isRewrite(i, cutBatch))];
+  const baseBatch = batchOf.get(cutBase);
+  assert.ok(baseBatch < cutBatch);
+  // the expected cause is the test's own object: the refusal must carry this very Error, not a copy or its message
+  const marker = new Error('caller boom');
+  // every entry: reached building the temp tree. Only the cut base: at step `cutBatch`, reached only inside packSubset
+  const always = { ...from, resolved: { ...from.resolved, oid: () => { throw marker; } } };
+  const onlyBase = { ...from, resolved: { ...from.resolved, oid: i => { if (i === cutBase) throw marker; return from.resolved.oid(i); } } };
+  // a rejection (the exception escaping) fails the test at the await; a swallowed one has no cause
+  const refused = (r, label) => {
+    assert.equal(r.ok, false, label);
+    assert.equal(r.error.code, 'bad_request', label);
+    assert.equal(r.error.cause, marker, `${label}: the cause`);
+  };
+  refused(planTransfer(from.pack, always.resolved, config), 'planTransfer, oid() throws for every entry');
+  {
+    const { bare, t } = repo();
+    assert.equal(must(await runTransfer(t, from, plan, src.commit, { maxSteps: cutBatch, ref: REF })).tag, 'paused');
+    const before = refsOf(bare);
+    refused(await transferStep(t, onlyBase, plan, cutBatch, { commit: src.commit, ref: REF }), 'transferStep, oid() throws only for the cut base');
+    assert.equal(refsOf(bare), before, 'refs after transferStep, cut base');
+    refused(await transferStep(t, always, plan, cutBatch, { commit: src.commit, ref: REF }), 'transferStep, oid() throws for every entry');
+    assert.equal(refsOf(bare), before, 'refs after transferStep, every entry');
+  }
+  {
+    const { bare, t } = repo();
+    refused(await runTransfer(t, always, plan, src.commit, { ref: REF }), 'runTransfer, oid() throws for every entry');
+    assert.equal(refsOf(bare), '', 'no ref was created');
+  }
+  {
+    // the batch holding the cut base is the first to ask for its id: the refs are what an honest run paused there left
+    const honest = repo();
+    assert.equal(must(await runTransfer(honest.t, from, plan, src.commit, { maxSteps: baseBatch, ref: REF })).tag, 'paused');
+    const { bare, t } = repo();
+    refused(await runTransfer(t, onlyBase, plan, src.commit, { ref: REF }), 'runTransfer, oid() throws only for the cut base');
+    assert.equal(refsOf(bare), refsOf(honest.bare), 'refs after runTransfer, cut base');
+  }
 });
