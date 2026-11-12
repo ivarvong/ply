@@ -210,3 +210,36 @@ for (const [name, make] of [['a Symbol', () => Symbol('d')], ...Object.entries(h
     assert.equal(head(), before, 'git says the ref did not move');
   });
 }
+
+// A put or waitUntil that throws when called ends the fetch with the named Err, and the answer is abandoned first
+// (src/packcache.ts): the origin's body is cancelled before the rejection, and nothing of it stays stored. The origin
+// here is a stream that records its own cancel(); the order of events is the oracle (the WHATWG Streams standard:
+// cancelling a reader calls the underlying source's cancel), not anything ply reports. The origin sends one chunk and
+// then holds the stream open, so only a cancel can end it.
+for (const [what, cacheOf, optionsOf] of [
+  ['cache.put', thrown => ({ ...memoryCache(), put: () => { throw thrown; } }), () => ({})],
+  ['waitUntil', () => memoryCache(), thrown => ({ waitUntil: () => { throw thrown; } })],
+]) {
+  test(`cachingFetch: ${what} throws synchronously: the origin is cancelled before the fetch rejects with bad_request naming '${what}', and nothing stays stored`, async () => {
+    const thrown = new Error(`boom ${what}`);
+    const events = [];
+    const origin = async () => {
+      await null;
+      const body = new ReadableStream({
+        start(ctl) { ctl.enqueue(new Uint8Array([0x30, 0x30, 0x30, 0x38, 0x4e, 0x41, 0x4b, 0x0a])); },
+        pull() { return new Promise(() => null); },
+        cancel() { events.push('origin cancelled'); },
+      });
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+    };
+    const cache = cacheOf(thrown);
+    const f = cachingFetch(origin, cache, { shouldCache: () => true, ...optionsOf(thrown) });
+    const e = await f(`${url}/git-upload-pack`, { method: 'POST', body: new Uint8Array(4) }).then(() => assert.fail('the fetch resolved'), x => { events.push('rejected'); return x; });
+    assert.deepEqual([e.code, e.what], ['bad_request', what]);
+    assert.equal(e.cause, thrown, 'the Err carries the very value the callback threw as its cause');
+    assert.deepEqual(events, ['origin cancelled', 'rejected'], "the origin's body is cancelled before the fetch rejects");
+    // let a store that was started (the waitUntil row) settle and clean up
+    for (let i = 0; i < 20; i++) await new Promise(r => setImmediate(r));
+    assert.equal(cache.entries.size, 0, 'nothing of the abandoned answer stays stored');
+  });
+}
