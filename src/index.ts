@@ -84,7 +84,7 @@ export { pkt, pkts, pktInit, pktStep, pktFinish } from './pktline.js';
 
 // ---- tracing, limits, errors, transport ----
 export { Tracer, Span, KIND, arrayExporter, consoleExporter, flattenLine, fromAny } from './otel.js';
-export { DEFAULT_LIMITS, WORKER_LIMITS, LIMIT_OBJECT_OVERHEAD, LIMIT_MEMORY_CACHE_BYTES, LIMIT_MEMORY_CACHE_ENTRIES, withLimits, withDerivedWork, parseLimits, limitError } from './limits.js';
+export { DEFAULT_LIMITS, WORKER_LIMITS, LIMIT_OBJECT_OVERHEAD, LIMIT_HELD_TIMEOUT_MS, LIMIT_MEMORY_CACHE_BYTES, LIMIT_MEMORY_CACHE_ENTRIES, withLimits, withDerivedWork, parseLimits, limitError } from './limits.js';
 export { CODES, RETRY, fail, plyError, isPlyCode, retryPolicy, isRetryable, ambiguousAfterPush } from './errors.js';
 export { CODE_DOCS } from './errors-doc.js';
 export { operation, verifyRef } from './operation.js';
