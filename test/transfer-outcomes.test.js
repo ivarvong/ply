@@ -3,6 +3,8 @@
 //   - a push whose response is dropped after the server applied it: the refs show it, the run goes on to done
 //   - a push that never gets an answer and never lands, with maxSteps: the run is `ambiguous`, never `paused`
 //   - the final push applied, its response dropped, and the read after it failing: `ambiguous`, never the read's error
+//   - the final push acknowledged, the first settle read replaying the refs from before it (a lagging ls-refs) and
+//     the second failing: `done` with `tempLeft: false` on the report alone
 //   - two runners on one plan at once, 20 times: both end done, the destination is the planned head, fsck clean
 //   - two runners on one plan, gated so the second's push of every step reaches git only after the first's landed, on
 //     a destination whose pre-receive hook refuses a push of what is already there: both end done; with the loser's
@@ -160,6 +162,37 @@ test('the final push applied, its response dropped, the read after it failing: a
   // a clean resume: done, nothing sent
   failReads = false;
   assert.deepEqual(must(await runTransfer(t, from, p, src.commit, { ref: REF })), { tag: 'done', head: p.head, pushes: 0, tempLeft: false });
+});
+
+test('the final push acknowledged, the first settle read lagging (it does not show the push) and the next failing: done, tempLeft false, on the report alone', async () => {
+  const p = plan();
+  const final = p.steps.length - 1;
+  // every ls-refs answer is kept; after the final push's report, read 0 replays the answer from before the push (a
+  // host's ls-refs lagging a push it acknowledged) and every later read fails
+  let last = null, pushes = 0, after = -1;
+  const seen = { stale: 0, failed: 0 };
+  const fetchImpl = async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url;
+    const method = init?.method ?? (typeof input === 'string' ? 'GET' : input.method);
+    if (method === 'POST' && url.endsWith('/git-receive-pack')) {
+      const res = await fetch(input, init);
+      if (pushes++ === final) { const body = await res.arrayBuffer(); after = 0; return new Response(body, { status: res.status, headers: res.headers }); }
+      return res;
+    }
+    if (method === 'POST' && url.endsWith('/git-upload-pack')) {
+      if (after === 0) { after++; seen.stale++; return new Response(last.body, { status: last.status, headers: last.headers }); }
+      if (after > 0) { seen.failed++; throw new TypeError('injected: read failed'); }
+      const res = await fetch(input, init);
+      last = { body: await res.clone().arrayBuffer(), status: res.status, headers: res.headers };
+      return res;
+    }
+    return fetch(input, init);
+  };
+  const { bare, t } = repo({ fetchImpl });
+  const run = await runTransfer(t, from, p, src.commit, { settle: FAST, ref: REF });
+  assert.deepEqual([seen.stale, seen.failed], [1, 1], 'read 0 lagged (the refs before the final push), read 1 failed, no read after');
+  assertPublished(bare, p); // git: the final push landed, the temp ref is gone
+  assert.deepEqual(must(run), { tag: 'done', head: p.head, pushes: p.steps.length, tempLeft: false });
 });
 
 test('two runners on one plan at once, 20 times: both end done; the destination is the planned head', async () => {
