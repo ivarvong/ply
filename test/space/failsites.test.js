@@ -32,6 +32,13 @@ test('the recorder ran: stacks were recorded by the runners of this suite', { sk
 });
 test('gate c: every fail() site in src/ is reached by a cell', { skip }, gate('failsites', 'fail site(s) no cell reached'));
 test('gate c: every fail site the registry gives a merged space is reached by that space', { skip }, gate('claims', 'registry claim(s) the named space does not reach'));
+// Reached is not judged. This prints the sites that were reached while no test read the error; it does not fail yet:
+// the category has no baseline in test/space/ratchet.json (it needs one recorded run of the whole suite).
+test('gate c, report only: reached fail sites whose error no test read', { skip }, () => {
+  if (all.holes.observed === null) { console.log('observed: these records carry no observation data; not judged'); return; }
+  console.log(`observed: ${all.holes.observed.length} of ${all.sites.length - all.holes.failsites.length - SAMPLED.length} reached fail site(s) had their error read by no test (report only, no ratchet baseline yet)`);
+  for (const id of all.holes.observed.slice(0, 400)) console.log(`  ${id}`);
+});
 // CI is Linux. A macOS pass hides cells (APFS cannot store a non-UTF-8 ref name as a file, #43), so it never counts.
 const notLinux = !skip && all.holes.linux === null;
 if (notLinux) console.log(`these records are from ${[...new Set([...records.platforms.values()].flatMap(p => [...p]))].join(', ')}, not Linux: this pass does not count for the Linux gate (CI decides)`);

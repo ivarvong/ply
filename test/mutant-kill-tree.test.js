@@ -535,15 +535,16 @@ test('editFile and pushTree: a non-Error from the first attempt is a rejection, 
   const tree = await settled(unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'm', time: T0 }, e.opts)));
   assert.deepEqual(tree, { settled: 'rejected', reason: plain });
   assert.equal(calls, 1);
-  // a string thrown after the protocol (the caller's signer) is not wrapped, and is not the return value
+  // a string thrown after the protocol (the caller's signer) is not the return value: it is the caller's own code
+  // failing, the Err that names the signer and carries the string untouched (README "Your own code failing")
   const e2 = env(r);
   const before = r.pushes().length;
   const signer = { kind: 'ssh-ed25519', publicKeyLine: 'ssh-ed25519 AAAA', sign() { throw 'x'; } };
   const signed = await settled(unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'B\n' }, author: A, message: 'm', time: T0 }, { ...e2.opts, signer })));
-  assert.deepEqual(signed, { settled: 'rejected', reason: 'x' });
+  assert.deepEqual([signed.settled, signed.reason.code, signed.reason.what, signed.reason.cause], ['rejected', 'bad_request', 'signer', 'x']);
   assert.equal(r.pushes().length, before);
   const editSigned = await settled(unwrapAsync(editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, { ...env(r).opts, signer: { ...signer, sign() { throw 'y'; } } })));
-  assert.deepEqual(editSigned, { settled: 'rejected', reason: 'y' });
+  assert.deepEqual([editSigned.settled, editSigned.reason.code, editSigned.reason.what, editSigned.reason.cause], ['rejected', 'bad_request', 'signer', 'y']);
 });
 
 test('pushTree: git.push_tree.diff belongs to the operation tracer, in the root span\'s trace', async () => {
@@ -990,10 +991,15 @@ test('an advertised unborn HEAD is empty for readCommit and head_unborn otherwis
   const plain = { code: 'not_found', miss: { kind: 'head_unborn', target } };
   const liar = remote({ hook: async req => { if (req.command === 'ls-refs') throw plain; } });
   await assert.rejects(unwrapAsync(readCommit('http://fake/r.git', {}, { tracer: new Tracer(), transport: { ...liar.transport({ tracer: new Tracer() }), advertise } })), e => e === plain);
-  // a primitive a transport raises is no object to code: coded() builds the exchange's error around it
+  // a primitive a transport raises is no object to code: coded() builds the exchange's error around it (a low-level
+  // call on the transport itself: nothing between the transport and the exchange)
   const raw = remote({ hook: async req => { if (req.command === 'ls-refs') throw 'reset'; } });
+  const rawLow = errOf(await resolveCommit({ ...raw.transport({ tracer: new Tracer() }), advertise }, 'HEAD'));
+  assert.deepEqual([rawLow.code, rawLow.message, rawLow.cause], ['protocol', 'reset', 'reset']);
+  // handed to an operation as its `transport`, the same raise is the caller's own code failing on a read request: the
+  // Err names the method and carries the primitive as its cause (README "Your own code failing": bad_request)
   const rawErr = errOf(await readCommit('http://fake/r.git', {}, { tracer: new Tracer(), transport: { ...raw.transport({ tracer: new Tracer() }), advertise } }));
-  assert.deepEqual([rawErr.code, rawErr.message, rawErr.cause], ['protocol', 'reset', 'reset']);
+  assert.deepEqual([rawErr.code, rawErr.what, rawErr.cause], ['bad_request', 'transport.frames', 'reset']);
   const typed = remote({ hook: async req => { if (req.command === 'ls-refs') throw fail('pack_corrupt', 'odd', { miss: { kind: 'head_unborn', target } }); } });
   await rejects(unwrapAsync(readCommit('http://fake/r.git', {}, { tracer: new Tracer(), transport: { ...typed.transport({ tracer: new Tracer() }), advertise } })), 'pack_corrupt', 'odd');
   const blank = server('unborn HEAD symref-target:\n');

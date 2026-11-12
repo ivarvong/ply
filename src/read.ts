@@ -40,7 +40,7 @@ import { packStream, objectAt, objectId, spInit, spStep, spFinish, treeEntries }
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
 import { bufferSource, concat } from './bytes.js';
-import { KIND } from './otel.js';
+import { KIND, spanOn } from './otel.js';
 import type { Span } from './otel.js';
 import { DEFAULT_LIMITS, limitsOf } from './limits.js';
 import type { CheckedLimits, LimitsInput } from './limits.js';
@@ -301,7 +301,7 @@ async function walkFrom(t: Transport, treeOid: Oid, comps: readonly string[], op
   let entry: TreeEntry | null = null;
   for (const [depth, name] of comps.entries()) {
     // oxlint-disable-next-line no-loop-func -- the span runs to completion inside this iteration (awaited)
-    const level = await t.tracer.span('git.read.tree', { parent: t.parent, attrs: { 'git.read.tree.depth': depth, 'git.read.tree.oid': here, 'git.read.tree.lookup': name } }, async (span): Promise<Result<TreeEntry, PlyError>> => {
+    const level = await spanOn(t.tracer, 'git.read.tree', { parent: t.parent, attrs: { 'git.read.tree.depth': depth, 'git.read.tree.oid': here, 'git.read.tree.lookup': name } }, async (span): Promise<Result<TreeEntry, PlyError>> => {
       span.set({ 'git.read.tree.cache_hit': isSome(mapGet(cache, here)) });
       const entries = await treeAt(t, cache, here, t.limits);
       if (!entries.ok) return spanErr(span, entries);
