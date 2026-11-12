@@ -701,7 +701,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
         if (chunks === 0) first = Date.now() - t0;
         bytes += chunk.length; chunks++; if (chunk.length > maxChunk) maxChunk = chunk.length;
         // The chunk arrived and goes straight to the consumer (no await between). The take reads no clock: the hold
-        // (heldTimeoutMs) runs from the last network mark, the ask that brought this chunk; the consumer's time with it
+        // (heldTimeoutMs) starts at the clock's next read (src/deadline.ts); the consumer's time with it
         // is not the server's silence: the idle wait starts again when it asks.
         sig.feed('consumer_took');
         yield ok(chunk);

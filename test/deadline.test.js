@@ -421,14 +421,16 @@ test('frames(): a consumer that holds a chunk past heldTimeoutMs is cut as timeo
     assert.equal((await a.frames.next()).done, false);
     assert.equal(a.fired(), null);
     await a.frames.return();
-    // held past it: cut at take + 1000
+    // held past it. The take reads no clock: the hold starts at the first clock read that sees it, here the idle timer
+    // pending since the headers (t1 + 300), so the cut is at t1 + 300 + 1000: never before take + 1000, late by at
+    // most one idle interval (README Limits)
     const b = exchange();
     const t1 = time();
     assert.equal((await b.frames.next()).done, false);
-    advance(t1 + 999);
+    advance(t1 + 1299);
     assert.equal(b.fired(), null);
-    advance(t1 + 1000);
-    assert.equal(b.fired(), t1 + 1000);
+    advance(t1 + 1300);
+    assert.equal(b.fired(), t1 + 1300);
     await new Promise(r => setImmediate(r));
     assert.notEqual(b.cancelled(), null, 'the upstream body is cancelled when the hold is cut');
     const e = await refusal(b.frames.next());
@@ -438,7 +440,7 @@ test('frames(): a consumer that holds a chunk past heldTimeoutMs is cut as timeo
     assert.match(e.message, /held a chunk for 1000 ms .*limits\.heldTimeoutMs/);
   });
 });
-test('exchangeClock: heldTimeoutMs runs from the last network mark before the take and stops at consumer_asked; 0 turns it off', async () => {
+test('exchangeClock: heldTimeoutMs runs from the first clock read after the take and stops at consumer_asked; 0 turns it off', async () => {
   await manualTimers(({ advance, time }) => {
     const run = (t, script) => {
       const t0 = time();
@@ -449,8 +451,9 @@ test('exchangeClock: heldTimeoutMs runs from the last network mark before the ta
       return fired;
     };
     const lim = { firstByteMs: 1000, idleMs: 1000, heldMs: 4000, totalMs: 0 };
-    // took at 20, never asks: 20 + 4000
-    assert.equal(run(lim, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('body_chunk'); c.feed('consumer_took'); at(200_000); }), 'heldTimeoutMs@4020');
+    // took at 20, never asks. The take reads no clock; the first read after it is the first-byte timer armed at 0 for
+    // 1000 (still pending: the headers' idle deadline 1010 is later), so the hold runs from 1000: 1000 + 4000
+    assert.equal(run(lim, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('body_chunk'); c.feed('consumer_took'); at(200_000); }), 'heldTimeoutMs@5000');
     // held 3990 each time, five times, the network answering at once: never cut; then silence after the last ask at
     // 10 + 5 * 3990 = 19960: idle at 19960 + 1000
     assert.equal(run(lim, (c, at) => {
@@ -458,10 +461,12 @@ test('exchangeClock: heldTimeoutMs runs from the last network mark before the ta
       for (let i = 1; i <= 5; i++) { c.feed('body_chunk'); c.feed('consumer_took'); at(10 + i * 3990); c.feed('consumer_asked'); }
       at(200_000);
     }), 'idleTimeoutMs@20960');
-    // held shorter than idle: the held limit is earlier than the pending idle timer and still fires on time. The take
-    // at 20 reads no clock: the hold runs from the last network mark (the headers at 10), so 10 + 200, a delivery time
-    // (10 ms) early, as README Limits states
-    assert.equal(run({ ...lim, heldMs: 200 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'heldTimeoutMs@210');
+    // held shorter than idle: the pending timer (1000) is later than mark + held (10 + 200), so the take arms a new
+    // one, and that arm's clock read is the take's own time: 20 + 200, exactly on time
+    assert.equal(run({ ...lim, heldMs: 200 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'heldTimeoutMs@220');
+    // idle off: the first-byte timer armed at 0 for 1000 is still pending at the take and due before 10 + 4000, so its
+    // fire starts the hold: 1000 + 4000 (late by 980 ms, under one held interval)
+    assert.equal(run({ ...lim, idleMs: 0 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'heldTimeoutMs@5000');
     // 0 turns it off: only the total cap bounds the hold
     assert.equal(run({ ...lim, heldMs: 0, totalMs: 9000 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'requestTimeoutMs@9000');
   });
@@ -477,4 +482,25 @@ test('exchangeClock: a chunk (consumer_took + consumer_asked) reads the clock on
   for (let i = 0; i < 1000; i++) { c.feed('consumer_took'); c.feed('consumer_asked'); }
   c.cancel();
   assert.equal(reads - before, 1000);
+});
+// #273 review round 3 (reproduced at 626a4c7d, passes on main 8e3939db): a chunk whose network delivery took
+// heldTimeoutMs or longer must not be cut the moment it is taken. idle off, and idle (600 s) above held (240 s): headers
+// at 10, the ask at 20, the network silent 300 s, the chunk taken at 300 020 and held 5 ms. The README contract: a hold
+// is never cut before take + heldTimeoutMs.
+for (const idleMs of [0, 600_000]) test(`exchangeClock: idle ${idleMs}, a 5 ms hold after a 300 s network wait is not cut as heldTimeoutMs`, async () => {
+  await manualTimers(({ advance, time }) => {
+    const t0 = time();
+    let fired = 'none';
+    const c = exchangeClock({ firstByteMs: 60_000, idleMs, heldMs: 240_000, totalMs: 0 }, null, k => { fired = `${k}@${time() - t0}`; });
+    const at = ms => { advance(t0 + ms); };
+    at(10); c.feed('headers'); c.feed('consumer_took'); at(20); c.feed('consumer_asked');
+    at(300_020); c.feed('consumer_took'); at(300_025); c.feed('consumer_asked'); at(300_030);
+    assert.equal(fired, 'none');
+    // and a hold past it is still cut, no earlier than take + 240 000
+    c.feed('consumer_took'); at(300_030 + 239_999);
+    assert.equal(fired, 'none');
+    at(300_030 + 240_000 + Math.min(idleMs || 240_000, 240_000));
+    assert.equal(fired.startsWith('heldTimeoutMs@'), true, fired);
+    c.cancel();
+  });
 });

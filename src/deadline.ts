@@ -13,13 +13,14 @@
 // says. Two rules it cannot break: a state never moves backwards (headers seen means the first byte is satisfied for
 // good, whatever the upload does after), and time is charged only while ply waits on the network: while the consumer
 // holds a chunk, or has not asked for the next one (`held`), neither the first-byte nor the idle limit runs: the held
-// limit does, from the last network mark before the take (the take reads no clock), so network idle and a stalled
+// limit does, from the first clock read after the take (the take reads no clock: never early, late by at most one
+// pending timer's interval), so network idle and a stalled
 // consumer are distinct limits with distinct names.
 //
 // One timer. An event moves the mark; the timer is set again only when none is pending or the new deadline is earlier
 // than the pending one, and when it fires it re-arms for what is left: a body chunk costs no setTimeout and no
 // clearTimeout (test/deadline.test.js counts them). While the consumer holds a chunk, a timer that fires re-arms for
-// take + heldTimeoutMs (or the total cap, if earlier); with both 0 it is not set again until the consumer asks. The timer is the strong owner of the
+// the hold's start + heldTimeoutMs (or the total cap, if earlier); with both 0 it is not set again until the consumer asks. The timer is the strong owner of the
 // AbortController: AbortSignal.any holds its sources weakly and an AbortSignal.timeout is held only by its own weak
 // timer, so after a GC it never fires and a stalled body hangs forever (Node 20/22; found by the calibration harness).
 // A controller owned by a live timer cannot be collected. Date.now in a Worker advances only across I/O; every mark is
@@ -111,7 +112,8 @@ const earlier = (a: Due | null, b: Due | null): Due | null => {
   if (b === null) return a;
   return a.at <= b.at ? a : b;
 };
-// The deadline to arm in `state`, whose wait began at `mark`, in an exchange that began at `start`; null is none.
+// The deadline to arm in `state`, whose wait began at `mark`, in an exchange that began at `start`; null is none. In
+// `held`, `mark` is when the clock first saw the hold (the first clock read after the take), never the network mark.
 export function deadlineOf(state: ClockState, mark: number, start: number, t: ExchangeTimeouts): Due | null {
   if (state === 'done') return null;
   const total: Due | null = t.totalMs > 0 ? { at: start + t.totalMs, key: 'requestTimeoutMs', ms: t.totalMs } : null;
@@ -135,15 +137,23 @@ export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, on
   const start = now();
   let state: ClockState = 'connecting';
   let mark = start;
+  // The hold is timed from the first clock read that sees it (a timer firing, or an arm), never from a read of its own:
+  // the take reads no clock. `heldFrom` is that read; `anchored` says the current hold has one.
+  let heldFrom = start;
+  let anchored = true;
   let timer: ReturnType<typeof setTimeout> | null = null;
   // when the pending timer fires
   let armedFor = 0;
-  const due = (): Due | null => deadlineOf(state, mark, start, t);
+  const due = (): Due | null => deadlineOf(state, state === 'held' ? heldFrom : mark, start, t);
+  // A clock read seeing a hold for the first time starts it there: so a hold is cut no earlier than take + heldMs.
+  const anchor = (at: number): void => { if (state === 'held' && !anchored) { heldFrom = at; anchored = true; } };
   const clear = (): void => { if (timer !== null) clearTimeout(timer); timer = null; };
   // A pending timer that fires no later than the deadline is left alone: fire() re-arms for what is left. So is one
   // pending when there is nothing to wait for (held, no total cap): it finds that out when it fires and is not set again.
   const arm = (): void => {
     if (state === 'done') { clear(); return; }
+    // the take is synchronous with this arm when an unanchored hold reaches it from feed: this read is the take's time
+    if (state === 'held' && !anchored) anchor(now());
     const d = due();
     if (d === null) return;
     if (timer !== null && armedFor <= d.at) return;
@@ -157,9 +167,11 @@ export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, on
   };
   function fire(): void {
     timer = null;
+    const at = now();
+    anchor(at);
     const d = due();
     if (d === null) return;
-    if (now() < d.at) { arm(); return; }
+    if (at < d.at) { arm(); return; }
     state = 'done';
     onFire(d.key, d.ms);
     ac.abort(timeoutReason(d.key, d.ms));
@@ -169,11 +181,13 @@ export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, on
     const next = transition(from, event);
     state = next.state;
     if (next.restart) mark = now();
+    if (state === 'held' && from !== 'held') anchored = false;
     // The per-chunk path makes no timer call: a pending timer that fires no later than the new deadline is left alone
     // and re-arms for what is left when it fires. That covers a restart inside a state (marks only advance) and
     // a move between streaming and held whose new step deadline (mark + idle, or mark + held) is no earlier than the
     // pending timer. A move between them that brings the deadline earlier (a timer set for take + held, or the total
     // cap, and then the ask; or a held limit shorter than the pending idle one) is the one that sets it again.
+    // An unanchored hold keeps a pending timer due by mark + heldMs (mark is before the take): its fire starts the hold.
     if (timer !== null && (state === from || (pastHeaders(from) && pastHeaders(state) && !steppedEarlier(state, t, mark, armedFor)))) return;
     arm();
   };
