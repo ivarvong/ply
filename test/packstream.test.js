@@ -614,9 +614,17 @@ test('sidebandStep: band 1 is pack bytes, band 2 progress, band 3 the remote err
 
 // ---- edges: the boundaries and paths the properties above meet only by chance ----
 // A deflate bit writer: fixed-Huffman blocks (literals, matches, end of block) and stored blocks, LSB first.
-const LIT = huffCodes(huffBuild(Array.from({ length: 288 }, (_, i) => (i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8))));
-const DIST = huffCodes(huffBuild(Array.from({ length: 30 }, () => 5)));
+// Built on first use inside a test, never while the file loads (#307): Stryker counts a src line reached during
+// module load as a static mutant and runs each mutant on it against the whole mutation suite instead of the tests
+// that cover it.
+let fixtureMemo = null;
+const fixture = () => (fixtureMemo ??= (() => {
+  const LIT = huffCodes(huffBuild(Array.from({ length: 288 }, (_, i) => (i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8))));
+  const DIST = huffCodes(huffBuild(Array.from({ length: 30 }, () => 5)));
+  return { LIT, DIST };
+})());
 function deflateBits() {
+  const { LIT, DIST } = fixture();
   const bits = [];
   const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
   const code = rec => { for (let i = rec.len - 1; i >= 0; i--) bits.push((rec.code >> i) & 1); };

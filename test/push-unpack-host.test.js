@@ -70,9 +70,17 @@ const transportOf = (...frames) => {
 const oid = n => n.toString(16).padStart(2, '0').repeat(20);
 const update = sideband => ({ commands: [{ ref: A, oldOid: oid(1), newOid: oid(3) }], sideband });
 // the band-1 payload Artifacts sent (its outer pkt "005c\x01…" and final flush are the transport's framing)
-const inner = concat([unwrap(pkt(`unpack ${T0}\n`)), unwrap(pkt(`ng ${A} ${T0}\n`)), FLUSH]);
+// Built on first use inside a test, never while the file loads (#307): Stryker counts a src line reached during
+// module load as a static mutant and runs each mutant on it against the whole mutation suite instead of the tests
+// that cover it.
+let fixtureMemo = null;
+const fixture = () => (fixtureMemo ??= (() => {
+  const inner = concat([unwrap(pkt(`unpack ${T0}\n`)), unwrap(pkt(`ng ${A} ${T0}\n`)), FLUSH]);
+  return { inner };
+})());
 
 test('push(): Artifacts\' side-band and plain reports are push_rejected with the host\'s reason, no read-back', async () => {
+  const { inner } = fixture();
   const cases = [
     { sideband: true, frames: [concat([Uint8Array.of(1), inner]), null] },
     { sideband: false, frames: [te.encode(`unpack ${T0}\n`), te.encode(`ng ${A} ${T0}\n`), null] },
@@ -90,6 +98,7 @@ test('push(): Artifacts\' side-band and plain reports are push_rejected with the
 });
 
 test('push(): the same failure for a delete-only push is ambiguous', async () => {
+  const { inner } = fixture();
   const { t } = transportOf(concat([Uint8Array.of(1), inner]), null);
   const r = await push(t, { commands: [{ ref: A, oldOid: oid(1), newOid: ZERO_OID }], sideband: true });
   assert.equal(r.ok, false);
