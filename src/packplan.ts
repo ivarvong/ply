@@ -140,6 +140,8 @@ type Ctx = {
   // what the caller's `resolved.oid()` threw, the first time it did, or that it returned nothing (at most one): the
   // plan's refusal, with what was thrown as its cause
   readonly threw: Array<Threw | Nothing>;
+  // what the last wireBytes call found besides the bytes (see wireBytes)
+  readonly last: { rewrite: boolean; refused: boolean };
 };
 
 // The entry's base inside the selection, or -1 (a whole object, a thin base, or a base not selected).
@@ -147,34 +149,42 @@ function inBase(c: Ctx, i: number): number {
   const b = c.resolved.columns.base[i] as number;
   return b >= 0 && c.chosen[b] === 1 ? b : -1;
 }
+// An OFS_DELTA's part of wireBytes, kept out of it so the whole-object and REF_DELTA path stays as small as main's.
+function ofsWire(c: Ctx, i: number, sameBatch: boolean, header: number, compressed: number): number {
+  const cols = c.pack.columns;
+  const last = c.last;
+  const storedBase = cols.baseIndex[i] as number;
+  const typeSize = header - ofsLen((cols.offset[i] as number) - (cols.offset[storedBase] as number));
+  // the builder's own rule: OFS beside its base, else a REF_DELTA to the base's id, which `resolved` must know. The
+  // id is asked for only when it would be written (the base is outside this batch): this runs per entry per try
+  const id = sameBatch ? null : baseId(c.pack, c.resolved, storedBase);
+  if (id !== null && typeof id !== 'string' && c.threw.length === 0) c.threw.push(id);
+  const write = entryWrite(OFS_DELTA, sameBatch, sameBatch || typeof id === 'string', c.cross ? 'ref' : 'refuse');
+  last.refused = write === WRITE_REFUSED;
+  if (write === WRITE_OFS) { last.rewrite = false; return typeSize + c.ofsMax + compressed; }
+  last.rewrite = true;
+  return typeSize + OID_BYTES + compressed;
+}
 // Bytes the entry takes in a batch whose number is `batch`: its header as it will be written, then its compressed bytes.
-// Only an OFS_DELTA written outside its base's batch carries `refused` (the builder's rule cannot write it there): a
-// whole object, a REF_DELTA and an OFS_DELTA beside its base return the two fields alone, so their path costs nothing more.
-type Wire = { readonly bytes: number; readonly rewrite: boolean };
-type CutWire = Wire & { readonly refused: boolean };
-function wireBytes(c: Ctx, i: number, batch: number): Wire | CutWire {
+// It returns the bytes and leaves in `c.last` whether the entry is written as a REF_DELTA where it was not stored as one
+// (`rewrite`) and whether the builder's rule cannot write it there at all (`refused`: an OFS_DELTA outside its base's
+// batch without a known base id). Nothing is allocated per call: this runs per entry per try, and a returned record per
+// call (two shapes of it once OFS cuts were checked) made the REF-only planner 5-9% slower than main 8e3939db.
+function wireBytes(c: Ctx, i: number, batch: number): number {
   const cols = c.pack.columns;
   const compressed = cols.compressed[i] as number;
   const header = cols.headerBytes[i] as number;
   const stored = cols.storedType[i] as number;
   const b = inBase(c, i);
   const isDelta = (c.resolved.columns.base[i] as number) !== NO_BASE;
-  if (!isDelta) return { bytes: header + compressed, rewrite: false };
+  const last = c.last;
+  if (!isDelta) { last.rewrite = false; last.refused = false; return header + compressed; }
   const sameBatch = b >= 0 && (c.batchOf[b] as number) === batch;
-  if (stored === OFS_DELTA) {
-    const storedBase = cols.baseIndex[i] as number;
-    const typeSize = header - ofsLen((cols.offset[i] as number) - (cols.offset[storedBase] as number));
-    // the builder's own rule: OFS beside its base, else a REF_DELTA to the base's id, which `resolved` must know. The
-    // id is asked for only when it would be written (the base is outside this batch): this runs per entry per try
-    const id = sameBatch ? null : baseId(c.pack, c.resolved, storedBase);
-    if (id !== null && typeof id !== 'string' && c.threw.length === 0) c.threw.push(id);
-    const write = entryWrite(stored, sameBatch, sameBatch || typeof id === 'string', c.cross ? 'ref' : 'refuse');
-    return write === WRITE_OFS
-      ? { bytes: typeSize + c.ofsMax + compressed, rewrite: false }
-      : { bytes: typeSize + OID_BYTES + compressed, rewrite: true, refused: write === WRITE_REFUSED };
-  }
+  if (stored === OFS_DELTA) return ofsWire(c, i, sameBatch, header, compressed);
   // a REF_DELTA is written as it is stored, wherever its base is
-  return { bytes: header + compressed, rewrite: !sameBatch };
+  last.rewrite = !sameBatch;
+  last.refused = false;
+  return header + compressed;
 }
 
 // Every planned entry checked against the per-object budget and the type it resolved to.
@@ -241,18 +251,17 @@ const fitsObjects = (c: Ctx, count: number): boolean => count + c.budget.reserve
 function familyBytes(c: Ctx, list: readonly number[], batch: number): number {
   for (const i of list) c.batchOf[i] = batch;
   let sum = 0;
-  for (const i of list) sum += wireBytes(c, i, batch).bytes;
+  for (const i of list) sum += wireBytes(c, i, batch);
   for (const i of list) c.batchOf[i] = -1;
   return sum;
 }
 function place(c: Ctx, b: Open, batch: number, i: number): void {
   c.batchOf[i] = batch;
-  const w = wireBytes(c, i, batch);
+  b.bytes += wireBytes(c, i, batch);
   b.entries.push(i);
-  b.bytes += w.bytes;
-  if (!w.rewrite) return;
+  if (!c.last.rewrite) return;
   b.refRewrites += 1;
-  if ('refused' in w && w.refused) c.unbuildable.push(i);
+  if (c.last.refused) c.unbuildable.push(i);
 }
 const done = (b: Open): PlannedBatch => ({ kind: b.kind, entries: b.entries, packBytes: b.bytes, objects: b.entries.length, refRewrites: b.refRewrites });
 
@@ -284,13 +293,13 @@ function planBlobs(c: Ctx, fams: ReadonlyArray<readonly number[]>): Result<Plann
     for (const i of list) {
       let batch2 = out.length;
       let w = wireBytes(c, i, batch2);
-      if (!(fitsBytes(c, cur.bytes + w.bytes) && fitsObjects(c, cur.entries.length + 1)) && cur.entries.length > 0) {
+      if (!(fitsBytes(c, cur.bytes + w) && fitsObjects(c, cur.entries.length + 1)) && cur.entries.length > 0) {
         out.push(done(cur));
         cur = open('blobs');
         batch2 = out.length;
         w = wireBytes(c, i, batch2);
       }
-      if (!fitsBytes(c, cur.bytes + w.bytes)) return err(limitExceeded(`entry bytes (entry ${i})`, PACK_OVERHEAD + w.bytes + c.budget.reserveBytes, c.budget.maxRequestBytes));
+      if (!fitsBytes(c, cur.bytes + w)) return err(limitExceeded(`entry bytes (entry ${i})`, PACK_OVERHEAD + w + c.budget.reserveBytes, c.budget.maxRequestBytes));
       place(c, cur, batch2, i);
     }
   }
@@ -349,7 +358,7 @@ export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, inpu
   if (!chosen.ok) return chosen;
   const c: Ctx = {
     pack, resolved, budget: opts.budget, cross: opts.crossBatchRef, chosen: chosen.value,
-    batchOf: new Int32Array(pack.count).fill(-1), ofsMax: ofsLen(opts.budget.maxRequestBytes), unbuildable: [], threw: [],
+    batchOf: new Int32Array(pack.count).fill(-1), ofsMax: ofsLen(opts.budget.maxRequestBytes), unbuildable: [], threw: [], last: { rewrite: false, refused: false },
   };
   const bad = checkEntries(c);
   if (bad !== null) return err(bad);
