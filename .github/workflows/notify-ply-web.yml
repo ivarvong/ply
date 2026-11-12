@@ -3,8 +3,12 @@ name: Notify ply-web
 # ply-web deploys what this announces, so a commit is announced only after ci judged it green. `push` fired before
 # anything had run: on 2026-11-11 three red commits on main were each dispatched. workflow_run fires when a ci run
 # finishes; the job below sends only for a successful run of a push to this repository's main.
+# zizmor's dangerous-triggers audit flags every workflow_run. It is safe here: nothing from the triggering run is
+# checked out or executed (no checkout step, no artifact download), permissions are empty, the job runs only for a
+# successful push run in this repository to main, and the one value used from the event, head_sha, is checked as
+# 40-hex before use.
 on:
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [ci]
     types: [completed]
 
