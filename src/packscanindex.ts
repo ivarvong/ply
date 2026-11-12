@@ -19,14 +19,14 @@
 // base is another delta stays unknown: linking it needs that delta's oid, which means applying it (#248).
 // Measured: 71 bytes per entry on a REF-only pack (31 + whole oid 20 + REF base 20), plus 4 per whole object while
 // settling.
-import type { PlyError } from './errors.js';
+import type { PlyError, ErrorOf } from './errors.js';
 import { plyError } from './errors.js';
 import type { Option, Result } from './result.js';
 import { ok, err, some, none, assertNever } from './result.js';
 import type { Halt, Halted } from './rangesource.js';
 import { UNCANCELLABLE, HALTED, haltOn, drop, aborted } from './rangesource.js';
 import { withDefaults } from './absent.js';
-import type { LimitsInput } from './limits.js';
+import type { LimitsInput, CheckedLimits } from './limits.js';
 import { DEFAULT_LIMITS, limitExceeded, parseLimits } from './limits.js';
 import type { Oid } from './sha1.js';
 import { Sha1, fromHex, toOid } from './sha1.js';
@@ -421,6 +421,11 @@ async function onPiece(sc: Scanner, st: PackScan, pull: Pull, p: PackPiece): Pro
 
 // Scan `source` and index every entry (see the top of this file). A refusal is a Result and cancels the source; a source
 // that errors rejects with its own error, and so does a content callback that throws.
+// The limits a scan with these options runs under (the cap a saved index's entry count is held to, transferload.ts).
+export function scanLimitsOf(input: Partial<ScanIndexOpts>): Result<CheckedLimits, ErrorOf<'bad_request'>> {
+  return parseLimits(withDefaults<ScanIndexOpts>(input, defaultOpts()).limits);
+}
+
 export async function scanPackIndex(source: ScanSource, input: Partial<ScanIndexOpts> = {}): Promise<Result<ScannedPack, ScanError>> {
   const opts = withDefaults(input, defaultOpts());
   const limits = parseLimits(opts.limits);

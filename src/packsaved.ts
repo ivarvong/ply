@@ -61,7 +61,8 @@ export type SavedIndexRefusal =
   | { readonly tag: 'truncated'; readonly bytes: number; readonly want: number }
   | { readonly tag: 'corrupt' }
   | { readonly tag: 'other_pack'; readonly saved: PackIdentity; readonly want: PackIdentity }
-  | { readonly tag: 'malformed'; readonly field: string; readonly index: number };
+  | { readonly tag: 'malformed'; readonly field: string; readonly index: number }
+  | { readonly tag: 'limit_exceeded'; readonly what: 'pack objects'; readonly got: number; readonly max: number };
 
 const refused = (r: SavedIndexRefusal): Result<never, SavedIndexRefusal> => err(r);
 const malformed = (field: string, index = -1): Result<never, SavedIndexRefusal> => refused({ tag: 'malformed', field, index });
@@ -118,6 +119,7 @@ export function describeRefusal(r: SavedIndexRefusal): string {
     case 'truncated': return `saved index is ${r.bytes} bytes, its header gives ${r.want}`;
     case 'corrupt': return 'saved index check does not match its bytes';
     case 'other_pack': return `saved index is of pack ${r.saved.trailer} (${r.saved.bytes} B), not ${r.want.trailer} (${r.want.bytes} B)`;
+    case 'limit_exceeded': return `saved index has ${r.got} entries by its header, over limits.maxPackObjects ${r.max}`;
     case 'malformed': return `saved index ${r.field} is not one a scan gives${r.index >= 0 ? ` (entry ${r.index})` : ''}`;
   }
   // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
@@ -136,9 +138,21 @@ const cursorOf = (bytes: Uint8Array): Cursor => ({ bytes, view: new DataView(byt
 function putF64s(c: Cursor, col: Float64Array): void { for (const v of col) { c.view.setFloat64(c.at, v, true); c.at += 8; } }
 function putI32s(c: Cursor, col: Int32Array): void { for (const v of col) { c.view.setInt32(c.at, v, true); c.at += 4; } }
 function putBytes(c: Cursor, b: Uint8Array): void { c.bytes.set(b, c.at); c.at += b.length; }
-function getF64s(c: Cursor, n: number): Float64Array { const out = new Float64Array(n); for (let i = 0; i < n; i++) { out[i] = c.view.getFloat64(c.at, true); c.at += 8; } return out; }
-function getI32s(c: Cursor, n: number): Int32Array { const out = new Int32Array(n); for (let i = 0; i < n; i++) { out[i] = c.view.getInt32(c.at, true); c.at += 4; } return out; }
-function getBytes(c: Cursor, n: number): Uint8Array { const out = c.bytes.slice(c.at, c.at + n); c.at += n; return out; }
+// Decoded columns are views into the saved bytes where the platform allows (#299): byte columns always, number columns
+// on a little-endian platform where the column is aligned in its buffer; otherwise a copy. The decoded index then holds
+// one copy of the columns, not the saved bytes plus a second one, and a Node Buffer behaves as any Uint8Array.
+const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+function getF64s(c: Cursor, n: number): Float64Array {
+  const at = c.bytes.byteOffset + c.at;
+  if (LITTLE_ENDIAN && at % 8 === 0) { c.at += n * 8; return new Float64Array(c.bytes.buffer, at, n); }
+  const out = new Float64Array(n); for (let i = 0; i < n; i++) { out[i] = c.view.getFloat64(c.at, true); c.at += 8; } return out;
+}
+function getI32s(c: Cursor, n: number): Int32Array {
+  const at = c.bytes.byteOffset + c.at;
+  if (LITTLE_ENDIAN && at % 4 === 0) { c.at += n * 4; return new Int32Array(c.bytes.buffer, at, n); }
+  const out = new Int32Array(n); for (let i = 0; i < n; i++) { out[i] = c.view.getInt32(c.at, true); c.at += 4; } return out;
+}
+function getBytes(c: Cursor, n: number): Uint8Array { const out = c.bytes.subarray(c.at, c.at + n); c.at += n; return out; }
 
 // `pack` (complete: every entry the header counts) and, when given, its resolved columns, as bytes (see the top).
 export function encodeSavedIndex(pack: ScannedPack, resolved: Option<ResolvedIndex>): Result<Uint8Array, PlyError> {
@@ -185,7 +199,7 @@ export function encodeSavedIndex(pack: ScannedPack, resolved: Option<ResolvedInd
 }
 
 type Header = { readonly flags: number; readonly version: number; readonly count: number; readonly n: number; readonly bytes: number; readonly trailer: string; readonly resolvedN: number };
-function readHeader(bytes: Uint8Array): Result<Header, SavedIndexRefusal> {
+function readHeader(bytes: Uint8Array, maxObjects: number): Result<Header, SavedIndexRefusal> {
   if (bytes.length < HEADER + CHECK) return MAGIC.every((m, i) => i >= bytes.length || bytes[i] === m) ? refused({ tag: 'truncated', bytes: bytes.length, want: HEADER + CHECK }) : refused({ tag: 'not_saved_index' });
   if (!MAGIC.every((m, i) => bytes[i] === m)) return refused({ tag: 'not_saved_index' });
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -194,6 +208,10 @@ function readHeader(bytes: Uint8Array): Result<Header, SavedIndexRefusal> {
   const flags = v.getUint16(6, true);
   const n = v.getUint32(16, true);
   const want = layoutOf(n, flags & FLAGS_KNOWN).total;
+  // the scan's own cap (maxPackObjects on the header count, packstream.ts), so a saved index is never bigger than one a
+  // scan under the same limits builds; the limit as the caller passed it, as maxDeltaChain below: NaN is within nothing
+  const within = n <= maxObjects;
+  if (!within) return refused({ tag: 'limit_exceeded', what: 'pack objects', got: n, max: maxObjects });
   if (bytes.length < want) return refused({ tag: 'truncated', bytes: bytes.length, want });
   const body = bytes.subarray(0, bytes.length - CHECK);
   if (toHex(new Sha1().update(body).digest()) !== toHex(bytes.subarray(bytes.length - CHECK))) return refused({ tag: 'corrupt' });
@@ -333,9 +351,13 @@ function statsOf(v: DataView, at: number): ResolveStats {
 // default (64), so an index saved from a pack resolved under a raised limit is refused unless the same limit is passed
 // here. loadTransferPack passes its opts.resolve.limits, parsed. The value is not parsed here: it is the right side of
 // one comparison (depth <= maxDeltaChain), so one JavaScript reads as a number there ('200', 200n, [200], true) acts as
-// that number, and one the comparison is false for (NaN, an object) refuses every delta.
-export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity, maxDeltaChain: number = DEFAULT_LIMITS.maxDeltaChain): Result<SavedIndex, SavedIndexRefusal> {
-  const head = readHeader(bytes);
+// that number, and one the comparison is false for (NaN, an object) refuses every delta. `maxPackObjects` (limits,
+// #299; the cap scanPackIndex holds a pack's header count to) refuses, as limit_exceeded, an index whose header counts
+// more entries than it, before the check or any column.
+// The columns returned are views into `bytes` where they can be (see getF64s): keep `bytes` unchanged while the index
+// is in use, as loadTransferPack does (it hands the same bytes back as `saved`).
+export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity, maxDeltaChain: number = DEFAULT_LIMITS.maxDeltaChain, maxPackObjects: number = DEFAULT_LIMITS.maxPackObjects): Result<SavedIndex, SavedIndexRefusal> {
+  const head = readHeader(bytes, maxPackObjects);
   if (!head.ok) return head;
   const h = head.value;
   if (h.trailer !== want.trailer || h.bytes !== want.bytes) return refused({ tag: 'other_pack', saved: { trailer: h.trailer, bytes: h.bytes }, want });

@@ -147,7 +147,8 @@ test('refusals: not a saved index, another version, every truncation, every corr
   for (let i = 6; i < bytes.length; i++) {
     const b = Uint8Array.from(bytes); b[i] ^= 0x01;
     const e = count(decodeSavedIndex(b, want));
-    assert.ok(['corrupt', 'truncated'].includes(e.tag), `byte ${i}: ${e.tag}`);
+    // a flip in the count's top bytes (16-19) claims more entries than maxPackObjects: refused by count first (#299)
+    assert.ok(['corrupt', 'truncated'].includes(e.tag) || (e.tag === 'limit_exceeded' && i >= 16 && i < 20), `byte ${i}: ${e.tag}`);
     if (i >= 20) assert.equal(e.tag, 'corrupt', `byte ${i}`);
   }
   // another pack: the trailer, the length
@@ -155,7 +156,7 @@ test('refusals: not a saved index, another version, every truncation, every corr
   assert.equal(count(decodeSavedIndex(bytes, idOf(other))).tag, 'other_pack');
   assert.deepEqual(count(decodeSavedIndex(bytes, { ...want, bytes: want.bytes + 1 })), { tag: 'other_pack', saved: want, want: { ...want, bytes: want.bytes + 1 } });
   assert.ok(tags.truncated >= bytes.length, `${tags.truncated} truncations`);
-  assert.equal(tags.corrupt + (tags.truncated - bytes.length), bytes.length - 6);
+  assert.equal(tags.corrupt + (tags.truncated - bytes.length) + (tags.limit_exceeded || 0), bytes.length - 6);
 });
 
 test('malformed with a valid check: each field a scan could not produce is refused by name', async () => {
@@ -465,6 +466,13 @@ test('loadTransferPack: a pack chained deeper than 64 is used from its saved ind
     assert.equal(bad.error.code, 'bad_request');
     assert.match(bad.error.message, /limits\.maxDeltaChain/u);
   }
+  // and so are scan.limits, the cap the saved index's entry count is held to (#310 review)
+  for (const saved of [none, some(first.saved)]) {
+    const bad = await loadTransferPack(t, source, saved, { scan: { limits: { maxPackObjects: -1 } } });
+    assert.equal(bad.ok, false);
+    assert.equal(bad.error.code, 'bad_request');
+    assert.match(bad.error.message, /limits\.maxPackObjects/u);
+  }
   // a direct caller of decodeSavedIndex passes the same limit; without it the default 64 applies
   const id = { trailer: first.from.pack.trailer, bytes: first.from.pack.bytes };
   assert.ok(decodeSavedIndex(first.saved, id, 200).ok);
@@ -557,4 +565,126 @@ test('packIdentity aborted before the call, at the trailer read, and in the trai
     never: { code: 'aborted', reads: 1, cancelled: 0, aborted: 1 },
     stall: { code: 'aborted', reads: 1, cancelled: 1, aborted: 1 },
   });
+});
+
+// #299 item 5: a saved index is held to maxPackObjects, the cap a scan holds the pack's header count to, from its
+// header, before any column is built: one entry over is limit_exceeded (got = the header's count, max = the limit),
+// at the bound it decodes. The count comes from git (rev-list --objects of the packed commit), not from ply.
+test('maxPackObjects: a saved index over it is refused from the header with got/max, at the bound decodes, a 1M-entry header refused before its body is read', async () => {
+  const from = await fresh(src.packs.ref);
+  const bytes = must(encodeSavedIndex(from.pack, some(from.resolved)));
+  const n = git(work, ['rev-list', '--objects', '--no-walk', src.head]).trim().split('\n').length;
+  assert.equal(from.pack.count, n);
+  const r = decodeSavedIndex(bytes, idOf(from), 64, n - 1);
+  assert.deepEqual(r, { ok: false, error: { tag: 'limit_exceeded', what: 'pack objects', got: n, max: n - 1 } });
+  assert.equal(describeRefusal(r.error), `saved index has ${n} entries by its header, over limits.maxPackObjects ${n - 1}`);
+  assertSame(from, must(decodeSavedIndex(bytes, idOf(from), 64, n)));
+  // a header claiming 1,000,000 entries (flags 1: oids) and nothing after it: refused by count, not truncated
+  const head = Uint8Array.from(bytes.subarray(0, 84));
+  const v = new DataView(head.buffer);
+  v.setUint16(6, 1, true);
+  v.setUint32(16, 1_000_000, true);
+  assert.deepEqual(decodeSavedIndex(head, idOf(from), 64, 100_000), { ok: false, error: { tag: 'limit_exceeded', what: 'pack objects', got: 1_000_000, max: 100_000 } });
+  // the default bound is DEFAULT_LIMITS.maxPackObjects, 100 000 (README): the same header is refused, 100 000 is truncated
+  assert.deepEqual(decodeSavedIndex(head, idOf(from)).error, { tag: 'limit_exceeded', what: 'pack objects', got: 1_000_000, max: 100_000 });
+  v.setUint32(16, 100_000, true);
+  assert.equal(decodeSavedIndex(head, idOf(from)).error.tag, 'truncated');
+});
+
+// The bound on the consumer path: the cap is the scan's (opts.scan.limits.maxPackObjects), and a saved index over it
+// is refused like any other stored bytes and rescanned (README: stored bytes are untrusted, loadTransferPack then scans
+// again); a pack really over the cap is refused by the scan's own header-count check.
+test('loadTransferPack: a saved index over the scan\'s maxPackObjects is refused and rescanned; the scan refuses a pack over it', async () => {
+  const { t } = traced();
+  const first = must(await loadTransferPack(t, rangeFromBytes(src.packs.ref), none));
+  const n = git(work, ['rev-list', '--objects', '--no-walk', src.head]).trim().split('\n').length;
+  assert.equal(first.from.pack.count, n);
+  const over = counted(src.packs.ref);
+  const r = await loadTransferPack(t, over.source, some(first.saved), { scan: { limits: { maxPackObjects: n - 1 } } });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'limit_exceeded');
+  assert.ok(over.c.bytes > 20, `rescanned: ${over.c.bytes} B read`);
+  // a resolve limit is not the cap: the index is used
+  const at = must(await loadTransferPack(t, rangeFromBytes(src.packs.ref), some(first.saved), { resolve: { limits: { maxPackObjects: n - 1 } } }));
+  assert.deepEqual(at.loaded, { tag: 'saved' });
+});
+
+// A corrupt stored count (bit 0x02 of byte 18, the third byte of the little-endian u32 count at 16, adds 0x20000) is
+// untrusted data: refused, rescanned, and the load succeeds.
+test('loadTransferPack: a saved index whose stored count is corrupt past the cap is rescanned, with the refusal', async () => {
+  const { t, spans } = traced();
+  const first = must(await loadTransferPack(t, rangeFromBytes(src.packs.ref), none));
+  const n = git(work, ['rev-list', '--objects', '--no-walk', src.head]).trim().split('\n').length;
+  const bad = Uint8Array.from(first.saved);
+  assert.equal(bad[18] & 0x02, 0);
+  bad[18] ^= 0x02;
+  const r = must(await loadTransferPack(t, rangeFromBytes(src.packs.ref), some(bad)));
+  assert.deepEqual(r.loaded, { tag: 'scanned', refused: some({ tag: 'limit_exceeded', what: 'pack objects', got: n + 0x20000, max: 100_000 }) });
+  assert.equal(r.from.pack.count, n);
+  assert.deepEqual(r.saved, first.saved);
+  const span = spans().filter(s => s.name === 'git.transfer.load').at(-1);
+  assert.equal(span.attrs['git.transfer.load.refused'], 'limit_exceeded');
+});
+
+// Raised scan cap: a pack of 100 005 blobs (git pack-objects) scans under scan.limits.maxPackObjects 200 000 and
+// resumes from its own saved bytes with the same opts.
+test('loadTransferPack: a pack over the default cap scanned under a raised scan cap resumes from its saved bytes', async () => {
+  const dir = join(root, 'big');
+  initRepo(dir);
+  const N = 100_005;
+  let fi = '';
+  for (let i = 0; i < N; i++) { const d = `b${i}\n`; fi += `blob\ndata ${d.length}\n${d}`; }
+  gitBuf(dir, ['fast-import', '--quiet', '--export-marks=marks'], Buffer.from(fi));
+  const oids = git(dir, ['cat-file', '--batch-all-objects', '--batch-check=%(objectname)'], { maxBuffer: 1 << 26 });
+  assert.equal(oids.trim().split('\n').length, N);
+  const pack = new Uint8Array(gitBuf(dir, ['pack-objects', '--stdout', '-q'], Buffer.from(oids)));
+  const { t } = traced();
+  const opts = { scan: { limits: { maxPackObjects: 200_000 } } };
+  const first = must(await loadTransferPack(t, rangeFromBytes(pack), none, opts));
+  assert.equal(first.from.pack.count, N);
+  const again = counted(pack);
+  const r = must(await loadTransferPack(t, again.source, some(first.saved), opts));
+  assert.deepEqual(r.loaded, { tag: 'saved' });
+  assert.deepEqual(again.c, { reads: 1, bytes: 20 });
+}, 120_000);
+
+// #299 items 5 and 6: decoded columns are views into the saved bytes (one copy, not two), the same for a Node Buffer
+// and a Uint8Array (README 'Saved pack index'): a byte the caller changes after the decode shows in the column.
+test('decodeSavedIndex: columns view the saved bytes, a Buffer and a Uint8Array alike; number columns too', async () => {
+  const from = await fresh(src.packs.ref);
+  const bytes = must(encodeSavedIndex(from.pack, some(from.resolved)));
+  for (const input of [Uint8Array.from(bytes), Buffer.from(bytes)]) {
+    let views = 0;
+    const back = must(decodeSavedIndex(input, idOf(from)));
+    assertSame(from, back);
+    assertSameResolved(from.resolved, back.resolved.value);
+    for (const k of [...COLS.filter(c => c !== 'baseIndex'), 'baseIndex']) {
+      const col = back.pack.columns[k];
+      if (col.length === 0) continue;
+      if (col.BYTES_PER_ELEMENT > 1) views++;
+      assert.equal(col.buffer, input.buffer, k);
+      const at = col.byteOffset - input.byteOffset;
+      const was = col[0];
+      input[at] ^= 0xff;
+      assert.notEqual(col[0], was, `${k} sees a write to the saved bytes`);
+      input[at] ^= 0xff;
+      assert.equal(col[0], was, k);
+    }
+    // base is rebuilt from the pack's baseIndex on decode, not read from the bytes; the others are views
+    for (const k of RCOLS.filter(c => c !== 'base')) {
+      const col = back.resolved.value.columns[k];
+      // a number column is a view only where it is aligned in the buffer (README); here the resolved section follows
+      // byte columns of odd length, so a misaligned one must be a copy with the same values
+      if (col.BYTES_PER_ELEMENT > 1 && col.buffer !== input.buffer) { assert.notEqual(col.buffer, input.buffer); continue; }
+      if (col.BYTES_PER_ELEMENT > 1) views++;
+      assert.equal(col.buffer, input.buffer, k);
+      const at = col.byteOffset - input.byteOffset;
+      const was = col[0];
+      input[at] ^= 0xff;
+      assert.notEqual(col[0], was, `resolved ${k} sees a write to the saved bytes`);
+      input[at] ^= 0xff;
+    }
+    // the aligned path is taken: number columns (offset, compressed, size, baseIndex) are views, not copies
+    assert.ok(views >= 4, `${views} number columns are views`);
+  }
 });
