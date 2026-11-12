@@ -5,7 +5,7 @@ import { test, vi, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, writeFileSync, readdirSync, statSync, truncateSync, chmodSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync, readdirSync, statSync, truncateSync, chmodSync } from 'node:fs';
 import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { pushRepo } from '../src/repo-node.js';
 import { withLimits } from '../src/limits.js';
@@ -247,13 +247,18 @@ test('a loose object of exactly maxObjectSize, stored uncompressed by git (file 
   assert.equal(git(remoteDir, ['cat-file', '-s', blob]).trim(), String(MIB));
 });
 
-// The boundary cells of the text bound, on git's own config (read first, and larger than this repository's
-// packed-refs, which the same limit bounds): at exactly its statSync size it is read (the dry run resolves main); with
-// one byte less of limit the refusal carries got = size, max = size - 1.
+// The boundary cells of the text bound, on git's own config (read first, and padded here to be larger than this
+// repository's packed-refs, which the same limit bounds): at exactly its statSync size it is read (the dry run resolves
+// main); with one byte less of limit the refusal carries got = size, max = size - 1. The padding is a comment line sized
+// from packed-refs, because what git init writes varies by platform: on macOS it adds core.ignorecase and
+// core.precomposeunicode (137 bytes, over packed-refs' 103), on Linux it does not (92 bytes, under it).
 test('the config boundary: a file of exactly maxLsRefsBytes is read; one byte less of bound refuses with got = size, max = size - 1', async () => {
   const dir = localRepo();
   const url = remoteRepo();
-  const size = statSync(join(dir, '.git', 'config')).size;
+  const configPath = join(dir, '.git', 'config');
+  const packedRefs = statSync(join(dir, '.git', 'packed-refs')).size;
+  appendFileSync(configPath, `#${'x'.repeat(packedRefs)}\n`);
+  const size = statSync(configPath).size;
   assert.ok(statSync(join(dir, '.git', 'packed-refs')).size <= size, 'packed-refs is within the same bound');
   const under = await pushRepo(dir, url, { refspecs: ['main'], dryRun: true }, { limits: withLimits({ maxLsRefsBytes: size - 1 }) });
   assert.equal(under.ok, false);
