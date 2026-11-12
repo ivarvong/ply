@@ -268,6 +268,29 @@ describe('README quick start', () => {
     const parsed = ply.parseTag(tag.value);
     assert.equal(parsed.ok ? parsed.value.object : parsed.error.message, first.value.newCommit);
   });
+  // README "Your own code failing": a function the caller passes that throws and reaches the end of an operation is
+  // what: 'callback' with the thrown value as cause; before the push request was handed to the transport it is
+  // definite (bad_request), once it was it is ambiguous. The body stands in for such a function (ply.operation is the
+  // public edge every operation runs through). Expected values are the README's, not ply's output; git holds the ref.
+  test('a caller callback that throws at operation()\'s edge: bad_request \'callback\' before the push, ambiguous after', async () => {
+    defaultRepo('callback-edge');
+    const bare = join(root, 'callback-edge.git');
+    const url = `${srv.url}/callback-edge.git`;
+    const first = await ply.pushTree(url, { ref: 'refs/heads/main', files: { 'a.txt': 'a\n' }, author, message: 'first' });
+    assert.equal(first.ok, true, first.ok ? '' : first.error.message);
+    const before = first.value.newCommit;
+    const thrown = new Error('caller boom');
+    const definite = await ply.operation('probe', url, {}, async () => { await null; throw thrown; });
+    assert.equal(definite.ok, false);
+    assert.deepEqual([definite.error.code, definite.error.what, definite.error.cause === thrown, definite.error.message], ['bad_request', 'callback', true, 'caller-supplied callback threw: caller boom']);
+    const thrown2 = new Error('caller boom after');
+    const handed = await ply.operation('probe', url, {}, async ({ t, root: span }) => { await null; t.frames('git-receive-pack', new Uint8Array(0), span, {}); throw thrown2; });
+    assert.equal(handed.ok, false);
+    assert.deepEqual([handed.error.code, handed.error.what, handed.error.cause === thrown2], ['ambiguous', 'callback', true]);
+    // the message leads with the operation's name (its span, git.<name>), then says the outcome is unknown and why
+    assert.match(handed.error.message, /^git\.probe: a caller-supplied callback threw after the push request was handed to the transport, push outcome unknown: caller boom after$/);
+    assert.equal(rev(bare, 'refs/heads/main'), before, 'git: the ref did not move');
+  });
   test('test/types/readme.typetest.ts is the README blocks (UPDATE_README_TYPETEST=1 regenerates it)', () => {
     const want = typetestOf(BLOCKS);
     if (process.env.UPDATE_README_TYPETEST) writeFileSync(TYPETEST_PATH, want);

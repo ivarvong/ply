@@ -147,6 +147,19 @@ export const ambiguousAfterPush = (e: unknown, message = 'push outcome unknown')
   return plyError('ambiguous', `${message}: ${String(getOrElse(field(e, 'message'), e))}`, { cause: e, ...(code.tag === 'some' ? { original: code.value } : {}) });
 };
 
+// What a thrown value says, for a message: its `message` when it has one, else the value as String() renders it.
+// Never throws. Reading a caller's value can itself throw (a `message` getter that throws, a revoked Proxy, an object
+// with no string form such as a null-prototype one): the description then says only that; the value is the `cause`.
+export function describeThrown(e: unknown): string {
+  try { return String(getOrElse(field(e, 'message'), e)); } catch { return 'a value with no string form'; }
+}
+
+// A caller-supplied callback that is part of an operation (a signer, a pushDir filter, a transport) threw or rejected
+// before any push request was handed to a transport: a definite failure. The Err names the callback (`what`) and
+// carries what it threw (`cause`). bad_request (retry 'no'): the failure is in the caller's code; the caller reads `cause`.
+export const callbackFailed = (what: string, e: unknown): ErrorOf<'bad_request'> =>
+  plyError('bad_request', `caller-supplied ${what} threw: ${describeThrown(e)}`, { what, cause: e });
+
 // Rewrite every string an error carries through `scrub`, in place: message, stack, own fields, nested plain objects,
 // prototype-less maps (merge reasons, report options) and arrays (a push report, hook output) and the cause chain.
 // Anything else (a Span on `e.span`, bytes) is left alone. A prototype of null marks a map keyed by names the server
