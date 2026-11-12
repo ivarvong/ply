@@ -64,7 +64,7 @@ export type { ResolvedIndex, ResolvedColumns, ResolveStats, ResolveRangeOpts, Th
 export { rangeFromBytes } from './rangesource.js';
 export { planPackBatches, planHash, PLAN_VERSION } from './packplan.js';
 export type { PackPlan, PlannedBatch, PushBudget, PlanOpts, BatchKind } from './packplan.js';
-export type { RangeSource } from './rangesource.js';
+export type { RangeRead, RangeSource } from './rangesource.js';
 export type { ScannedPack, ScannedEntry, ScannedBase, ScannedType, ScannedObject, ScanColumns, ScanContent, ScanIndexOpts, ScanSource } from './packscanindex.js';
 export { packSubset } from './packsubset.js';
 export type { PackSubset, PackSubsetOpts, OutsideBase } from './packsubset.js';

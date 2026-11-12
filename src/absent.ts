@@ -45,6 +45,10 @@ export function field(value: unknown, key: string): Option<unknown> {
   return fromNullish(Reflect.get(value, key));
 }
 
+// A function's last parameter that a caller may leave out or pass as the platform missing value, so an optional signal
+// is forwarded as it is (`inner.read(offset, length, signal)`). Spread as a rest parameter: `...signal: SignalArg`.
+export type SignalArg = [signal?: AbortSignal | undefined];
+
 // ---- the input edge ----
 // What a caller may leave out of a record: every key optional, and an explicit missing value means the same as
 // leaving the key out. Entry points declare their options as Input<Config> and parse them once with withDefaults;
