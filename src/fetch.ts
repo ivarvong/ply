@@ -545,40 +545,19 @@ export const spAttrs = (st: SpState, prefix = 'git.pack'): Attrs => ({ [`${prefi
 // the next tree:0 fetch of any of them is answered locally. Spans: `git.fetch.filter.fallback`, `git.fetch.wide.*`.
 // The phrases a server uses when it refuses a fetch filter. Cloudflare Artifacts (observed 2026-10-23) is HTTP 400
 // plus the first one; git's upload-pack says "filter '<spec>' not supported" (upload-pack.c). One predicate, shared:
-// ply-web used to keep a copy of it next to the cache. The text is remote, so it is read in linear time: the fixed
-// phrases by one regex with no run, and "filter <anything on the line> not supported|allowed" by hand, since a regex
-// `filter .* not` restarts its run at every "filter " (quadratic, ply#274). Case is folded for ASCII only, as /i
-// without /u does.
+// ply-web used to keep a copy of it next to the cache. The text is remote, so it is read in linear time. A single
+// `filter .* not` restarts its run at every "filter " (quadratic, ply#274); here each "filter " takes the rest of its
+// line once, the global exec resumes after it, and one fixed-phrase test (a bounded number of steps at each start)
+// reads that rest. The first "filter " on a line takes the longest rest, so a later one on the same line could find
+// nothing it did not. Same flags as before (/i, no /u): the same case fold.
 const FILTER_PHRASE = /only blob:none is supported|unsupported (git )?fetch filter/i;
-const FILTER_WORD = 'filter ';
-const FILTER_NOT = [' not supported', ' not allowed'] as const;
-const CHAR_A = 65;
-const CHAR_Z = 90;
-const CASE_BIT = 32;
-const LINE_FEED = 10;
-const CARRIAGE_RETURN = 13;
-const LINE_SEPARATOR = 8232;
-const PARAGRAPH_SEPARATOR = 8233;
-// A line terminator as `.` sees one: the four that end its run (U+2028, U+2029 by number). codePointAt at a high
-// surrogate is above all four and above Z, so the line still gets that code unit as it is.
-const isLineEnd = (c: number): boolean => c === LINE_FEED || c === CARRIAGE_RETURN || c === LINE_SEPARATOR || c === PARAGRAPH_SEPARATOR;
-// One line, ASCII-lowered: "filter " somewhere, and " not supported" or " not allowed" starting after it. The first
-// "filter " is the earliest start any match can have, so the last "not" phrase is compared with it once.
-const lineRefuses = (line: string): boolean => {
-  const from = line.indexOf(FILTER_WORD);
-  return from >= 0 && FILTER_NOT.some(p => line.lastIndexOf(p) >= from + FILTER_WORD.length);
-};
+const FILTER_REST = /filter ([^\n\r\u2028\u2029]*)/gi;
+const FILTER_NOT = / not (supported|allowed)/i;
 const isFilterPhrase = (text: string): boolean => {
   if (FILTER_PHRASE.test(text)) return true;
-  let line = '';
-  for (let i = 0; i < text.length; i++) {
-    const c = Number(text.codePointAt(i)); // i < length: always a number
-    if (isLineEnd(c)) {
-      if (lineRefuses(line)) return true;
-      line = '';
-    } else line += c >= CHAR_A && c <= CHAR_Z ? String.fromCodePoint(c | CASE_BIT) : text.charAt(i);
-  }
-  return lineRefuses(line);
+  FILTER_REST.lastIndex = 0; // shared /g: every call starts at the beginning, whatever an earlier return left
+  for (let m = FILTER_REST.exec(text); m !== null; m = FILTER_REST.exec(text)) if (FILTER_NOT.test(atOr(m, 1, ''))) return true;
+  return false;
 };
 // oxlint-disable-next-line no-magic-numbers -- RFC 9110 Bad Request: Artifacts' refusal, and the only status this predicate accepts
 const FILTER_REFUSAL_STATUS = 400;

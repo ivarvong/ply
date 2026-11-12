@@ -39,7 +39,7 @@ test('the refusal texts servers really send are refusals at 400 and nothing else
 });
 
 test('isFilterRefusal classifies every message of up to 4 tokens exactly as main\'s regex did', () => {
-  const tokens = ['filter ', 'FiLtEr ', ' not supported', ' NOT Allowed', ' not', ' ', 'x', '\n', '\r', ' ', ' ',
+  const tokens = ['filter ', 'FiLtEr ', ' not supported', ' NOT Allowed', ' not', ' ', 'x', '\n', '\r', ' ', ' ', '\0',
     'unsupported git fetch filter', 'only blob:none is supported', 'İ', 'K', 'filte'];
   let checked = 0;
   const walk = (text, left) => {
@@ -48,7 +48,7 @@ test('isFilterRefusal classifies every message of up to 4 tokens exactly as main
     if (left > 0) for (const t of tokens) walk(text + t, left - 1);
   };
   walk('', 4);
-  assert.ok(checked > 69000);
+  assert.ok(checked > 83000);
 });
 
 // readConfig as main had it, the config-line regex the only change.
@@ -66,7 +66,7 @@ const oldReadConfig = text => {
 };
 
 test('readConfig reads every key/value line of up to 6 characters exactly as main\'s regex did', () => {
-  const alphabet = ['a', '=', ' ', '\t', '\r', ' ', ' ', 'x', '-'];
+  const alphabet = ['a', '=', ' ', '\t', '\r', ' ', ' ', ' ', 'x', '-'];
   let checked = 0;
   const walk = (line, left) => {
     if (!line.includes('#') && !line.includes(';')) {
@@ -76,7 +76,7 @@ test('readConfig reads every key/value line of up to 6 characters exactly as mai
     if (left > 0) for (const c of alphabet) walk(line + c, left - 1);
   };
   walk('', 6);
-  assert.ok(checked > 500000);
+  assert.ok(checked > 1000000);
 });
 
 test('readConfig agrees with git config --list on the forms ply reads', () => {
@@ -117,4 +117,34 @@ test('both stay linear on the issue\'s generators (4x the input costs well under
     for (let a = 0; a < 3 && best >= 9; a++) best = Math.min(best, ratio(f, gen, 20000));
     assert.ok(best < 9, `${name}: ${best.toFixed(1)}x`);
   }
+});
+
+// Every BMP code unit put into each slot of a refusal and of a near-miss, against main's regex: a hand case fold or a
+// line-end test that is off for one code unit (a control character that ORs to a space, a line separator) shows here.
+test('isFilterRefusal agrees with main\'s regex on every single-code-unit edit of a refusal', () => {
+  const bases = ['filter x not supported', 'filter a\nfilter x not allowed'];
+  let n = 0;
+  for (let c = 0; c < 0x10000; c++) {
+    const ch = String.fromCharCode(c);
+    for (const base of bases) for (let i = 0; i <= base.length; i++) for (const t of [base.slice(0, i) + ch + base.slice(i), base.slice(0, i) + ch + base.slice(i + 1)]) {
+      if (isFilterRefusal(400, t) !== OLD_FILTER.test(t)) assert.fail(JSON.stringify(t));
+      n += 1;
+    }
+  }
+  assert.ok(n > 6000000);
+});
+
+// The common case is a non-refusal: an HTTP 400 page. Its cost is compared with main's regex on the same body, measured
+// the same way (interleaved, best of rounds), so the bound is a ratio, never a time.
+test('a typical 4 KiB non-refusal 400 body costs about what main\'s regex did (under 10x)', () => {
+  const html = `${'<html><body>Bad Request: the request could not be processed by this server. ' + 'x'.repeat(60)}\n`.repeat(30).slice(0, 4096);
+  const each = (f, k) => { const t0 = performance.now(); for (let i = 0; i < k; i++) f(); return performance.now() - t0; };
+  let ours = Infinity;
+  let main = Infinity;
+  for (let r = 0; r < 15; r++) {
+    ours = Math.min(ours, each(() => isFilterRefusal(400, html), 500));
+    main = Math.min(main, each(() => OLD_FILTER.test(html), 500));
+  }
+  assert.equal(isFilterRefusal(400, html), false);
+  assert.ok(ours / main < 10, `${(ours / main).toFixed(1)}x main`);
 });
