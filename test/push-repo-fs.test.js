@@ -112,26 +112,74 @@ test.skipIf(process.getuid?.() === 0)('a pack the process cannot read is a coded
   } finally { chmodSync(path, 0o644); }
 });
 
-// The boundary cells of the bound, on a real pack (git gc). The oracle is statSync and git: a pack of exactly
-// maxPackBytes is read and the push lands (git rev-parse on the remote equals the local tip); with one byte less of
-// limit the refusal carries got = the file's size and max = size - 1.
-test('the maxPackBytes boundary: a pack of exactly the bound is read and pushes; one byte less of bound refuses with got = size, max = size - 1', async () => {
-  const dir = localRepo();
+// The boundary cells of maxPackBytes, on real packs. The bound holds two sizes: the local pack read from `.git` ('local
+// pack bytes', the file git wrote) and the pack the push builds ('push pack bytes', ply's own deflate and deltas).
+// Neither is always the larger: git and node link different zlibs, and for the same objects their streams differ by a
+// byte either way with the commit's timestamp (git 2.50 / macOS, a.txt + one commit: local 198, push 199 at
+// 1700003637 +0000; local 199, push 198 at 1700014548 +0000), so a pack of exactly the local size need not push.
+// The oracles: statSync for the local size, ply's own refusal at that bound for the push size when it is the larger,
+// and git rev-parse on the remote for a push that lands. Both boundary pairs are checked whichever binds:
+//   local - 1: refused reading the file, got = local, max = local - 1
+//   local:     lands (the local pack binds) or is refused building the push, got = push > local, max = local;
+//              then push - 1 refuses with got = push, max = push - 1, and push lands (the push pack binds)
+const remoteDirOf = url => join(root, url.slice(srv.url.length + 1));
+const packBoundary = async dir => {
   const url = remoteRepo();
-  const [real] = readdirSync(packDir(dir)).filter(f => f.endsWith('.pack'));
-  const size = statSync(join(packDir(dir), real)).size;
+  const packs = readdirSync(packDir(dir)).filter(f => f.endsWith('.pack'));
+  assert.equal(packs.length, 1, 'one local pack');
+  const local = statSync(join(packDir(dir), packs[0])).size;
+  const at = maxPackBytes => pushRepo(dir, url, { refspecs: ['main'] }, { limits: withLimits({ maxPackBytes }) });
+  const refused = (r, what, got, max) => {
+    assert.equal(r.ok, false, `refused at ${max}`);
+    assert.equal(r.error.code, 'limit_exceeded', `${r.error.code}: ${r.error.message}`);
+    assert.equal(r.error.what, what);
+    assert.equal(r.error.got, got);
+    assert.equal(r.error.max, max);
+  };
+  const landed = r => {
+    assert.equal(r.ok, true, r.ok ? '' : `${r.error.code}: ${r.error.message}`);
+    assert.equal(git(remoteDirOf(url), ['rev-parse', 'refs/heads/main']).trim(), git(dir, ['rev-parse', 'main']).trim());
+  };
+  refused(await at(local - 1), 'local pack bytes', local, local - 1);
+  const atLocal = await at(local);
+  if (atLocal.ok) { landed(atLocal); return { binding: 'local', local, push: null }; }
+  assert.equal(atLocal.error.what, 'push pack bytes', `at the local size (${local}) only the push pack can be over: ${atLocal.error.message}`);
+  const push = atLocal.error.got;
+  assert.ok(push > local, `the push pack (${push}) is larger than the local pack (${local})`);
+  refused(atLocal, 'push pack bytes', push, local);
+  refused(await at(push - 1), 'push pack bytes', push, push - 1);
+  landed(await at(push));
+  return { binding: 'push', local, push };
+};
 
-  const under = await pushRepo(dir, url, { refspecs: ['main'] }, { limits: withLimits({ maxPackBytes: size - 1 }) });
-  assert.equal(under.ok, false);
-  assert.equal(under.error.code, 'limit_exceeded');
-  assert.equal(under.error.what, 'local pack bytes');
-  assert.equal(under.error.got, size);
-  assert.equal(under.error.max, size - 1);
+test('the maxPackBytes boundary on git gc\'s pack of one commit: exactly the larger of the local and push packs pushes, one byte less refuses naming it', async () => {
+  const { binding } = await packBoundary(localRepo());
+  assert.ok(binding === 'local' || binding === 'push');
+});
 
-  const exact = await pushRepo(dir, url, { refspecs: ['main'] }, { limits: withLimits({ maxPackBytes: size }) });
-  assert.equal(exact.ok, true, exact.ok ? '' : `${exact.error.code}: ${exact.error.message}`);
-  const remoteDir = join(root, `${url.slice(srv.url.length + 1)}`);
-  assert.equal(git(remoteDir, ['rev-parse', 'refs/heads/main']).trim(), git(dir, ['rev-parse', 'main']).trim());
+// the local pack binds, whatever the zlibs: git stores it (pack.compression=0) and the push deflates 64 KiB of one byte
+test('the maxPackBytes boundary where the local pack is the larger (stored by git): exactly its size pushes, one byte less refuses reading it', async () => {
+  const dir = localRepo();
+  writeFileSync(join(dir, 'z.txt'), 'z'.repeat(64 * 1024));
+  git(dir, ['add', '-A']);
+  git(dir, [...ID, 'commit', '-q', '-m', 'zeros']);
+  git(dir, ['-c', 'pack.compression=0', 'repack', '-adfq']);
+  const { binding, local } = await packBoundary(dir);
+  assert.equal(binding, 'local', `local pack ${local} bytes`);
+});
+
+// the push pack binds, whatever the zlibs: git deltas one 64 KiB random file against its copy at another path, which
+// ply does not (it deltas by path), so ply's pack holds both whole and git's one
+test('the maxPackBytes boundary where the push pack is the larger (git deltas across paths): exactly its size pushes, one byte less refuses building it', async () => {
+  const dir = localRepo();
+  const body = randomBytes(32 * 1024).toString('hex');
+  writeFileSync(join(dir, 'one.txt'), body);
+  writeFileSync(join(dir, 'two.txt'), `${body}x\n`);
+  git(dir, ['add', '-A']);
+  git(dir, [...ID, 'commit', '-q', '-m', 'copies']);
+  git(dir, ['repack', '-adfq']);
+  const { binding, local, push } = await packBoundary(dir);
+  assert.equal(binding, 'push', `local pack ${local} bytes, push pack ${push}`);
 });
 
 // node's fs binding takes a read's length as an int32 and aborts the process on more (node_file.cc, fs.Read:
