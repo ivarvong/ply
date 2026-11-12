@@ -315,8 +315,9 @@ tests that cover them, and the clear-text report lists each survivor. Which surv
 bounds file (`BOUNDS_FILES`: src/bytes, src/format, src/inflatestream, src/packstream) fails the build; others are
 reported. An equivalent mutant is allowed only as `// Stryker disable next-line <Mutator>: <reason>` on its line.
 `node scripts/mutate.mjs --check` judges an existing `reports/mutation/mutation.json` with CI's rules; on a narrow
-run it judges only the mutants that ran. CI runs the gate out of band (`mutate.yml`, 16 shards), so a pull request's
-`ci` can be green while `mutate` is still red; merge after both.
+run it judges only the mutants that ran. CI runs the gate out of band (`mutate.yml`, 20 shards; `node scripts/mutate.mjs
+--budget` in job `lint + fuzz` fails when the heaviest planned shard passes 60% of the job limit), so a pull
+request's `ci` can be green while `mutate` is still red; merge after both.
 
 **CI's environment, not a laptop's.** CI runs Node 22 on ubuntu-latest, whose git is 2.56; a laptop often has
 another git (2.50 here) and Node 24. What differed:

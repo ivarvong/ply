@@ -29,7 +29,7 @@ import type { Input } from './absent.js';
 import { at, mapGet, withDefaults } from './absent.js';
 import { ZERO_OID } from './oid.js';
 import type { TransferOpts, TransferPack, TransferPlan, TransferStepPlan, GeneratedObject, PlanExpect } from './transferplan.js';
-import { checkTransferPlan, planFitsPack, planTransfer, rootCommit, tempFor, transferKey, TRANSFER_REF_PREFIX } from './transferplan.js';
+import { checkTransferPlan, planFitsPack, planTransfer, rootCommit, sweepPrefix, tempFor, isTempKey, transferKey, TRANSFER_REF_PREFIX } from './transferplan.js';
 import { packSubset } from './packsubset.js';
 import { pushPackOutcome, pushWithOptions } from './receivecaps.js';
 import { lsRefs } from './lsrefs.js';
@@ -327,14 +327,19 @@ export async function copyTree(dst: Transport, from: TransferPack, opts: Transfe
 }
 
 // Delete temp refs under `prefix` (default refs/ply/transfer/) but those in `keep`: what an abandoned transfer left.
+// Only names of a temp ref's shape (`<prefix><40 hex key>`) are deleted; a prefix outside refs/ply/transfer/ is
+// bad_request (what: 'prefix') before any request.
 export async function sweepTransfers(dst: Transport, opts: SweepOpts = {}): Promise<Result<readonly string[], PlyError>> {
-  const { prefix, keep: kept } = withDefaults<{ readonly prefix: string; readonly keep: readonly string[] }>(opts, { prefix: TRANSFER_REF_PREFIX, keep: [] });
+  const { prefix: asked, keep: kept } = withDefaults<{ readonly prefix: string; readonly keep: readonly string[] }>(opts, { prefix: TRANSFER_REF_PREFIX, keep: [] });
+  const checked = sweepPrefix(asked, TRANSFER_REF_PREFIX);
+  if (!checked.ok) return checked;
+  const prefix = checked.value;
   const swept = await spanned(dst, 'git.transfer.sweep', internal(dst, { 'git.transfer.sweep.prefix': prefix, 'git.transfer.sweep.kept': kept.length }), async (span: Span): Promise<Result<readonly string[], PlyError>> => {
     const t = withParent(dst, span);
     const keep = new Set(kept);
     const listed = await lsRefs(t, [prefix]);
     if (!listed.ok) return listed;
-    const gone = [...listed.value.refs.values()].filter(r => r.name.startsWith(prefix) && !keep.has(r.name));
+    const gone = [...listed.value.refs.values()].filter(r => r.name.startsWith(prefix) && isTempKey(r.name.slice(prefix.length)) && !keep.has(r.name));
     const deletes = gone.map(r => ({ ref: r.name, oldOid: r.oid, newOid: ZERO_OID }));
     span.set({ 'git.transfer.sweep.deleted': deletes.length });
     const head = at(deletes, 0);

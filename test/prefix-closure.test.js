@@ -200,19 +200,28 @@ function assertHeaderObject(parse, bytes) {
   }
 }
 
-const author = unwrap(ident(unwrap(validateIdent({ name: 'Ada', email: 'ada@x', time: 1700000000 }))));
-const commitBytes = unwrap(encodeCommit({
-  tree: oid(9), parents: [oid(8)], author, message: 'subject\n\nbody\n', extra: ['gpgsig -----BEGIN', ' signature'],
-}));
-const tagBytes = unwrap(encodeTag({ object: oid(9), type: 'commit', tag: 'v1', tagger: author, message: 'release\n' }));
+// Built on first use inside a test, never while the file loads (#307): Stryker counts a src line reached during
+// module load as a static mutant and runs each mutant on it against the whole mutation suite instead of the tests
+// that cover it.
+let fixtureMemo = null;
+const fixture = () => (fixtureMemo ??= (() => {
+  const author = unwrap(ident(unwrap(validateIdent({ name: 'Ada', email: 'ada@x', time: 1700000000 }))));
+  const commitBytes = unwrap(encodeCommit({
+    tree: oid(9), parents: [oid(8)], author, message: 'subject\n\nbody\n', extra: ['gpgsig -----BEGIN', ' signature'],
+  }));
+  const tagBytes = unwrap(encodeTag({ object: oid(9), type: 'commit', tag: 'v1', tagger: author, message: 'release\n' }));
+  return { author, commitBytes, tagBytes };
+})());
 
 property('commit', 'commit prefix-closure: header lines are entries, the message is an opaque tail', () => {
+  const { author, commitBytes } = fixture();
   assertHeaderObject(b => unwrap(parseCommit(b)), commitBytes);
   assertHeaderObject(b => unwrap(parseCommit(b)), unwrap(encodeCommit({ tree: oid(1), author, message: null })));
   assertHeaderObject(b => unwrap(parseCommit(b)), unwrap(encodeCommit({ tree: oid(9), author, encoding: 'UTF-8', message: 'm\n', extra: ['gpgsig -----BEGIN', ' signature'] })));
 });
 
 property('tag', 'tag prefix-closure matches the commit header framing', () => {
+  const { tagBytes } = fixture();
   assertHeaderObject(b => unwrap(parseTag(b)), tagBytes);
 });
 
@@ -233,6 +242,7 @@ property('ident', 'ident prefixes are field prefixes and never throw', () => {
 });
 
 test('assertFetched and parseCommit apply fsck to a complete object; a header prefix is refused', () => {
+  const { author, tagBytes } = fixture();
   const tree = unwrap(encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }]));
   unwrap(assertFetched('tree', tree));
   assert.throws(() => unwrap(assertFetched('tree', tree.subarray(0, tree.length - 1))), e => e.code === 'pack_corrupt');

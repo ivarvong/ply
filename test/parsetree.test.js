@@ -13,8 +13,16 @@ import { unwrap } from './unwrap.js';
 
 // A fetched tree is parsed once (#208): assertFetched's answer is the tree's entries (none for any other type), and
 // treeEntries hands that very array to the reader when its entry cap is the one the check ran under, else parses.
-const tree = unwrap(encodeTree([{ mode: '100644', name: 'a', oid: '1'.repeat(40) }, { mode: '40000', name: 'd', oid: '2'.repeat(40) }]));
+// Built on first use inside a test, never while the file loads (#307): Stryker counts a src line reached during
+// module load as a static mutant and runs each mutant on it against the whole mutation suite instead of the tests
+// that cover it.
+let fixtureMemo = null;
+const fixture = () => (fixtureMemo ??= (() => {
+  const tree = unwrap(encodeTree([{ mode: '100644', name: 'a', oid: '1'.repeat(40) }, { mode: '40000', name: 'd', oid: '2'.repeat(40) }]));
+  return { tree };
+})());
 test('assertFetched answers a tree with its entries, any other type with none', () => {
+  const { tree } = fixture();
   const r = unwrap(assertFetched('tree', tree));
   assert.equal(r.tag, 'some');
   assert.deepEqual(r.value.map(e => [e.mode, e.name, e.oid]), unwrap(parseTree(tree)).map(e => [e.mode, e.name, e.oid]));
@@ -24,6 +32,7 @@ test('assertFetched answers a tree with its entries, any other type with none', 
   assert.equal(assertFetched('tree', tree.subarray(0, tree.length - 1)).ok, false);
 });
 test('treeEntries: the check parse when the entry cap matches, the reader\'s own parse when it does not', () => {
+  const { tree } = fixture();
   const checked = unwrap(assertFetched('tree', tree)).value;
   const fetched = (t, max) => ({ type: 2, data: tree, oid: '4'.repeat(40), size: tree.length, bust: false, tree: t === null ? { tag: 'none' } : { tag: 'some', value: { entries: t, maxTreeEntries: max } } });
   const limits = unwrap(parseLimits(DEFAULT_LIMITS));
