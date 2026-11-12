@@ -20,7 +20,6 @@ import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
 import { PACK_HEADER_BYTES, OBJ_CONTINUE } from '../src/format.js';
 import { unwrap } from './unwrap.js';
 import { loadTransferPack } from '../src/transferload.js';
-import { rangeFromBytes } from '../src/rangesource.js';
 import { createTransport } from '../src/http.js';
 import { some, none } from '../src/result.js';
 
