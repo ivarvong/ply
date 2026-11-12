@@ -624,10 +624,10 @@ const r299 = {
     const body = r299.cat([Uint8Array.of(0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, (c >>> 24) & 255, (c >>> 16) & 255, (c >>> 8) & 255, c & 255), ...parts]);
     return r299.cat([body, fromHex(new Sha1().update(body).hex())]);
   },
-  async resolve(pack) {
+  async resolve(pack, opts) {
     const idx = await scanPackIndex(new ReadableStream({ start(c) { c.enqueue(pack); c.close(); } }));
     assert.ok(idx.ok);
-    return resolvePackRange(idx.value, rangeFromBytes(pack));
+    return resolvePackRange(idx.value, rangeFromBytes(pack), opts);
   },
 };
 
@@ -670,4 +670,24 @@ test('#299: a REF run already applied is not applied again from a later holder o
   const r = await r299.resolve(r299.build(es));
   assert.ok(r.ok, r.ok ? '' : r.error.message);
   assert.equal(r.value.stats.work, 11 * (2 * k + m) + 6);
+});
+
+test('#299: a second holder of an id whose REF run is applied is not made again (reads and work pinned by hand)', async () => {
+  // blob B, the same blob B again, then one REF identity delta on B's id. The run rests on the first B; the second B has
+  // nothing left to give, so it is never read back. By hand: reads = the first B and the delta (2), no cache hit, work =
+  // B inflated (6) + the delta inflated (4), applied (6) and visited (1) = 17.
+  const B = te.encode('hello\n');
+  const r = await r299.resolve(r299.build([{ blob: B }, { blob: B }, { ref: fromHex(hashObject('blob', B)) }]));
+  assert.ok(r.ok, r.ok ? '' : r.error.message);
+  assert.deepEqual([r.value.stats.reads, r.value.stats.readBytes > 0, r.value.stats.cacheHits, r.value.stats.work], [2, true, 0, 17]);
+  assert.deepEqual([r.value.columns.base[2], r.value.columns.depth[2]], [0, 1]);
+});
+
+test('#299: the visit charge refuses at the visit, before the delta is read (got pinned by hand)', async () => {
+  // ceiling 6 = the blob: blob inflated (6), then its one child visited (1) = 7 > 6. Were the visit's refusal dropped, the
+  // delta's inflate would refuse instead, at 6 + 1 + 4 = 11.
+  const B = te.encode('hello\n');
+  const r = await r299.resolve(r299.build([{ blob: B }, { ref: fromHex(hashObject('blob', B)) }]), { limits: withLimits({ maxInflatedTotal: 6, maxResolveWork: 6 }) });
+  assert.equal(r.ok, false);
+  assert.deepEqual([r.error.code, r.error.what, r.error.got], ['limit_exceeded', 'resolve work bytes', 7]);
 });
