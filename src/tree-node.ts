@@ -13,6 +13,7 @@
 import { readdir, readFile, readlink, lstat } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a file's path in the tree throughout this file
 import { join } from 'node:path';
+import { platform } from 'node:process';
 import { callbackFailed, describeThrown, fail } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf, parseLimits } from './limits.js';
@@ -28,6 +29,29 @@ import type { PushTreeOptions, PushTreeResult, TreeSpec } from './tree.js';
 /* oxlint-disable no-await-in-loop -- the walk reads one entry at a time, in sorted order, under the byte bound */
 
 const OWNER_EXEC = 0o100;
+// The name a tree records for a directory entry. On macOS it is the name `git add` records under the configuration
+// `git init` writes there (core.precomposeunicode = true): the file system keeps a name as it was created, often
+// decomposed, and compat/precompose_utf8.c passes each entry through iconv UTF-8-MAC → UTF-8. That is not Unicode NFC.
+// As git 2.50 does on macOS (test/push-tree.test.js, darwin only, against git add): a code point joins the one recorded
+// just before it when the two are exactly a precomposed character's canonical pair; marks are not reordered; a
+// character standing alone is never rewritten (KELVIN SIGN, U+0958, U+F900 stay); a name holding a code point beyond
+// the BMP is kept as read; the Balinese pairs (U+1B00 block, Unicode 5.0, later than iconv's table) are not joined.
+// Elsewhere it is the name as read.
+const NON_ASCII = /[\u0080-\u{10FFFF}]/u;
+const BEYOND_BMP = /[\u{10000}-\u{10FFFF}]/u;
+function precomposed(name: string): string {
+  if (!NON_ASCII.test(name) || BEYOND_BMP.test(name)) return name;
+  let out = '';
+  for (const ch of name) {
+    const last = out.slice(-1);
+    const pair = (last + ch).normalize('NFC');
+    const joins = last !== '' && pair.length === 1 && last.normalize('NFC') === last
+      && pair.normalize('NFD') === last.normalize('NFD') + ch && (pair < 'ᬀ' || pair > '᭿');
+    out = joins ? out.slice(0, -1) + pair : out + ch;
+  }
+  return out;
+}
+const recorded: (name: string) => string = platform === 'darwin' ? precomposed : name => name;
 
 // A file of the directory, as pushTree takes it.
 export type DirFile = { readonly path: string; readonly mode: string; readonly data: Uint8Array };
@@ -57,19 +81,21 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
     return ok(null);
   };
   // One entry: the directory to walk into, the file or link to keep, or the refusal.
-  const walk = async (rel: string): Promise<Result<null, DirError>> => {
-    const names = (await readdir(rel ? join(dir, rel) : dir)).toSorted();
+  // `disk` is the directory as the file system names it (what is opened), `rel` the same directory as recorded.
+  const walk = async (disk: string, rel: string): Promise<Result<null, DirError>> => {
+    const names = (await readdir(disk ? join(dir, disk) : dir)).toSorted();
     for (const name of names) {
       if (name === '.git') continue;
-      const path = rel ? `${rel}/${name}` : name;
-      const full = join(dir, path);
+      const path = rel ? `${rel}/${recorded(name)}` : recorded(name);
+      const onDisk = disk ? `${disk}/${name}` : name;
+      const full = join(dir, onDisk);
       const st = await lstat(full);
       // the caller's filter: what it throws is an Err naming 'filter' (definite: the walk precedes any request)
       let wanted = true;
       if (filter !== null) { try { wanted = filter(path, { directory: st.isDirectory(), symlink: st.isSymbolicLink() }); } catch (e) { return err(callbackFailed('filter', e)); } }
       if (!wanted) continue;
       let kept: Result<null, DirError>;
-      if (st.isDirectory()) kept = await walk(path);
+      if (st.isDirectory()) kept = await walk(onDisk, path);
       else if (st.isSymbolicLink()) kept = keep(await readlink(full, { encoding: 'buffer' }), path, MODE_LINK);
       else if (st.isFile()) {
         if (st.size > maxObject) return err(limitExceeded('object size', st.size, maxObject));
@@ -80,7 +106,7 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
     return ok(null);
   };
   let walked: Result<null, DirError>;
-  try { walked = await walk(''); } catch (e) {
+  try { walked = await walk('', ''); } catch (e) {
     // `dir` is the caller's value: one that is not a string (node:fs refused it) may have no string form to print
     return fail('bad_request', `${typeof dir === 'string' ? dir : 'dir'}: the directory could not be read: ${describeThrown(e)}`, { what: 'dir', cause: e });
   }

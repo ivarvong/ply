@@ -306,3 +306,71 @@ test('filesFromDir/pushDir (Node): exec bit, symlinks as 120000, nested dirs, .g
   await assert.rejects(unwrapAsync(filesFromDir(src)), e => e.code === 'bad_request' && e.path === 'pipe');
   await assert.rejects(unwrapAsync(filesFromDir(src, { limits: withLimits({ maxObjectSize: 8 }), filter: p => p !== 'pipe' })), e => e.code === 'limit_exceeded' && e.what === 'object size');
 });
+
+// macOS only (skipped by name elsewhere: Linux keeps a name's bytes, and git there does too). A name created decomposed
+// (NFD) stays decomposed on APFS; `git add` under the configuration `git init` writes there (core.precomposeunicode =
+// true, compat/precompose_utf8.c) records it precomposed. The oracle is git on a copy of the same directory with no
+// global or system configuration: its ls-files names and its write-tree. Nothing expected comes from ply.
+test.skipIf(process.platform !== 'darwin')('filesFromDir/pushDir on macOS [darwin only]: a decomposed (NFD) name is recorded as git add records it (precomposed)', async () => {
+  const src = join(root, `nfd${n++}`);
+  // Latin e + combining acute, a decomposed directory holding a decomposed file, Hangul jamo, kana + combining dakuten
+  const names = ['é.txt', 'Å/ö.txt', '한.txt', 'が.txt', 'plain.txt'];
+  for (const name of names) { mkdirSync(join(src, name, '..'), { recursive: true }); writeFileSync(join(src, name), `${name}\n`); }
+  assert.ok(readdirSync(src).includes('é.txt'), 'the file system kept the decomposed name');
+  const wt = join(root, `nfdgit${n++}`);
+  execFileSync('cp', ['-R', src, wt]);
+  const plain = { env: { PATH: process.env.PATH, HOME: wt, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } };
+  git(wt, ['init', '-q'], plain);
+  assert.equal(git(wt, ['config', 'core.precomposeunicode'], plain).trim(), 'true', 'git init\'s own default on this file system');
+  git(wt, ['add', '-A'], plain);
+  const gitNames = git(wt, ['ls-files', '-z'], plain).split('\0').filter(Boolean).sort();
+  assert.ok(gitNames.includes('é.txt'), 'git recorded e-acute precomposed');
+  const files = await unwrapAsync(filesFromDir(src));
+  assert.deepEqual(files.map(f => f.path).sort(), gitNames);
+  const r = emptyRepo();
+  const res = await unwrapAsync(pushDir(r.url, { dir: src, author: A, message: 'nfd' }, { tracer: new Tracer() }));
+  assert.equal(res.newTree, git(wt, ['write-tree'], plain).trim(), 'same tree as git add -A');
+  fsck(r.bare);
+});
+
+// macOS only (skipped by name elsewhere). git's precompose is not Unicode NFC: compat/precompose_utf8.c passes each
+// directory entry through iconv UTF-8-MAC → UTF-8, which joins decomposed pairs and nothing else. NFC also rewrites
+// characters standing alone (KELVIN SIGN → K, OHM SIGN → Ω, U+F900 → U+8C48, U+0958 → U+0915 U+093C) and reorders marks;
+// git does neither, keeps a name holding a code point beyond the BMP as read, and does not join the Balinese pairs.
+// The oracle is git on a copy of the same directory with no global or system configuration (git add -A, ls-files -z):
+// the re-review's 13 names, then a sweep of every code point NFC rewrites, the decomposed form of every precomposed
+// character (Hangul sampled), marks in and out of canonical order, and names with an emoji. Nothing expected is ply's.
+test.skipIf(process.platform !== 'darwin')('filesFromDir on macOS [darwin only]: a name NFC would rewrite is recorded as git add records it, which is not NFC', async () => {
+  const src = join(root, `precompose${n++}`); mkdirSync(src);
+  const named = ['K-kelvin.txt', 'Ω-ohm.txt', 'Å-angstrom.txt', '豈-cjkcompat.txt', 'क़-qa.txt', 'क़-qa-decomposed.txt',
+    'ײַ-yiddish.txt', 'יִ-hiriq.txt', 'ẛ̣.txt', 'é.txt', '̈́-diaeresis-tonos.txt', '⫝̸-forking.txt', 'plain.txt',
+    '\u{1F600}é.txt', 'é\u{1F600}.txt', 'ệ-out-of-order.txt', 'ệ-in-order.txt', 'à.txt', 'ᬆ-balinese.txt'];
+  const bmp = []; const astral = [];
+  for (let cp = 0x80; cp <= 0x10FFFF; cp++) {
+    if ((cp >= 0xD800 && cp <= 0xDFFF) || (cp >= 0xAC00 && cp <= 0xD7A3 && cp % 97 !== 0)) continue;
+    const c = String.fromCodePoint(cp); const nfd = c.normalize('NFD'); const into = cp > 0xFFFF ? astral : bmp;
+    if (c.normalize('NFC') !== c) into.push(c); // NFC rewrites it standing alone
+    if (nfd !== c) into.push(nfd); // a precomposed character, decomposed
+  }
+  const marks = ['̀', '́', '̂', '̈', '̊', '̣', '̧', '̛', '̓', 'ͅ', '̀', '̈́'];
+  for (const b of ['a', 'o', 'α', 'Å']) for (const m1 of marks) for (const m2 of marks) bmp.push(b + m1 + m2);
+  // 12 samples to a name, `_` between them (nothing joins `_`); a name is at most 255 bytes
+  const packed = (tag, list) => Array.from({ length: Math.ceil(list.length / 12) }, (_, i) => `${tag}${i}_${list.slice(i * 12, i * 12 + 12).join('_')}`);
+  const names = [...named, ...packed('b', bmp), ...packed('s', astral)];
+  for (const name of names) writeFileSync(join(src, name), '');
+  mkdirSync(join(src, 'é\u{1F600}')); writeFileSync(join(src, 'é\u{1F600}', 'é.txt'), ''); // each path component by itself
+  assert.equal(readdirSync(src).length, names.length + 1, 'the file system kept every name');
+  const wt = join(root, `precomposegit${n++}`);
+  execFileSync('cp', ['-R', src, wt]);
+  const plain = { env: { PATH: process.env.PATH, HOME: wt, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } };
+  git(wt, ['init', '-q'], plain);
+  assert.equal(git(wt, ['config', 'core.precomposeunicode'], plain).trim(), 'true', 'git init\'s own default on this file system');
+  git(wt, ['add', '-A'], plain);
+  const gitNames = git(wt, ['ls-files', '-z'], plain).split('\0').filter(Boolean).sort();
+  assert.equal(gitNames.length, names.length + 1);
+  // the sample is one where git and NFC part: git kept these as created, and joined the plain pair
+  for (const kept of ['K-kelvin.txt', 'क़-qa.txt', '豈-cjkcompat.txt', '\u{1F600}é.txt', 'é\u{1F600}/é.txt']) assert.ok(gitNames.includes(kept), `git recorded ${kept}`);
+  assert.ok(gitNames.includes('é.txt') && !gitNames.includes('K-kelvin.txt'), 'git joins a pair and leaves a singleton');
+  const files = await unwrapAsync(filesFromDir(src));
+  assert.deepEqual(files.map(f => f.path).sort(), gitNames);
+});

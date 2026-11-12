@@ -93,6 +93,7 @@
   "test/push-once.test.js": 5,
   "test/push-pack-preabort.test.js": 5,
   "test/push-pack.test.js": 5,
+  "test/push-repo-fs.test.js": 2,
   "test/push-repo.test.js": 7,
   "test/push-report-bound.test.js": 1,
   "test/push-stream.test.js": 11,
