@@ -87,7 +87,7 @@ export async function loadTransferPack(dst: Transport, source: RangeSource, save
     const id = await packIdentity(source, cfg.signal);
     if (!id.ok) return id;
     span.set({ 'git.pack.trailer': id.value.trailer });
-    const out = saved.tag === 'none' ? await scanned(source, cfg, none) : await fromSaved(source, cfg, span, saved.value, decodeSavedIndex(saved.value, id.value, resolve.value.limits.maxDeltaChain));
+    const out = saved.tag === 'none' ? await scanned(source, cfg, none) : await fromSaved(source, cfg, span, saved.value, decodeSavedIndex(saved.value, id.value, resolve.value.limits.maxDeltaChain, resolve.value.limits.maxSavedIndexBytes));
     if (out.ok) span.set({ 'git.transfer.load.from': out.value.loaded.tag, 'git.transfer.load.saved_bytes': out.value.saved.length, 'git.transfer.load.entries': out.value.from.pack.count });
     return out;
   });

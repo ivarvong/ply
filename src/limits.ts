@@ -88,6 +88,14 @@ export const LIMIT_INFLATED_TOTAL: number = LIMIT_OBJECT * LIMIT_INFLATED_OBJECT
  */
 export const LIMIT_PACK_OBJECTS = 100_000;
 /**
+ * Bytes of one saved pack index (decodeSavedIndex, packsaved.ts, #299). Its columns are held whole, about 108 B per
+ * entry for a REF-only pack with resolved columns, so the index grows with the pack's object count, not the step.
+ * 2 GiB is about 19.8 M entries, above a full linux history (on the order of 10^7 objects). WORKER_LIMITS sets 32 MiB:
+ * about 310 000 entries, three times a linux HEAD pack (103,031 objects, #267; 11.1 MB saved) in a quarter of the
+ * isolate. Refused from the header's entry count, before any column is built (limit_exceeded, `saved index bytes`).
+ */
+export const LIMIT_SAVED_INDEX_BYTES: number = 2 * 1024 * 1024 * 1024;
+/**
  * ls-refs lines, and the rebase chain walked from them. rebaseBranch walks the branch as deep as this chain bound
  * needs (maxRebaseCommits + 2, or LIMIT_MERGE_DEPTH where that is deeper) and `onto` to LIMIT_MERGE_DEPTH (rebaseBaseOf, src/rebase.ts): each walk has its limit.
  */
@@ -219,6 +227,7 @@ export type Limits = {
   readonly maxInflatedTotal: number;
   readonly maxResolveWork: number;
   readonly maxPackObjects: number;
+  readonly maxSavedIndexBytes: number;
   readonly maxRefs: number;
   readonly maxRebaseCommits: number;
   readonly maxSectionLines: number;
@@ -269,6 +278,7 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
   maxInflatedTotal: LIMIT_INFLATED_TOTAL,
   maxResolveWork: LIMIT_RESOLVE_WORK,
   maxPackObjects: LIMIT_PACK_OBJECTS,
+  maxSavedIndexBytes: LIMIT_SAVED_INDEX_BYTES,
   maxRefs: LIMIT_REFS,
   maxRebaseCommits: LIMIT_REBASE_COMMITS,
   maxSectionLines: LIMIT_SECTION_LINES,
@@ -306,6 +316,7 @@ export const WORKER_LIMITS: CheckedLimits = grant({
   maxPackBytes: 32 * MIB,
   maxPushBytes: 32 * MIB,
   maxLsRefsBytes: 32 * MIB,
+  maxSavedIndexBytes: 32 * MIB,
   maxInflatedTotal: 64 * MIB,
   maxResolveWork: 64 * MIB * LIMIT_RESOLVE_TOTALS,
   maxDeltaResult: 16 * MIB,

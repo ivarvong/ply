@@ -558,3 +558,38 @@ test('packIdentity aborted before the call, at the trailer read, and in the trai
     stall: { code: 'aborted', reads: 1, cancelled: 1, aborted: 1 },
   });
 });
+
+// #299 item 5: a saved index larger than limits.maxSavedIndexBytes is refused from its header, before any column is
+// built; one at the bound decodes. Sizes by hand: 64 B header + 20 B check + 51 B per entry with oids (31 + 20).
+test('maxSavedIndexBytes: refused from the header with got/max, at the bound decodes, a 1M-entry header refused before its body is read', async () => {
+  const from = await fresh(src.packs.ref);
+  const bytes = must(encodeSavedIndex(from.pack, some(from.resolved)));
+  const L = sizeOf(from.pack.count, { refs: true });
+  assert.equal(bytes.length, L);
+  const r = decodeSavedIndex(bytes, idOf(from), 64, L - 1);
+  assert.deepEqual(r, { ok: false, error: { tag: 'limit_exceeded', what: 'saved index bytes', got: L, max: L - 1 } });
+  assert.match(describeRefusal(r.error), new RegExp(`${L} bytes.*${L - 1}`, 'u'));
+  assertSame(from, must(decodeSavedIndex(bytes, idOf(from), 64, L)));
+  // a header claiming 1,000,000 entries (flags 1: oids) and nothing after it: 64 + 1e6 * 51 + 20 bytes by the header
+  const head = Uint8Array.from(bytes.subarray(0, 84));
+  const v = new DataView(head.buffer);
+  v.setUint16(6, 1, true);
+  v.setUint32(16, 1_000_000, true);
+  assert.deepEqual(decodeSavedIndex(head, idOf(from), 64, 32 * 1024 * 1024), { ok: false, error: { tag: 'limit_exceeded', what: 'saved index bytes', got: 51_000_084, max: 32 * 1024 * 1024 } });
+  // the default bound is 2 GiB: the same header is only truncated
+  assert.equal(decodeSavedIndex(head, idOf(from)).error.tag, 'truncated');
+});
+
+// #299 items 5 and 6: decoded columns are views into the saved bytes (one copy, not two), the same for a Node Buffer
+// and a Uint8Array; the bytes are the caller's to keep unchanged while the index is used (documented in packsaved.ts).
+test('decodeSavedIndex: columns view the saved bytes, a Buffer and a Uint8Array alike', async () => {
+  const from = await fresh(src.packs.ref);
+  const bytes = must(encodeSavedIndex(from.pack, some(from.resolved)));
+  for (const input of [Uint8Array.from(bytes), Buffer.from(bytes)]) {
+    const back = must(decodeSavedIndex(input, idOf(from)));
+    assertSame(from, back);
+    assertSameResolved(from.resolved, back.resolved.value);
+    for (const k of ['oids', 'refs', 'storedType', 'type', 'headerBytes']) assert.equal(back.pack.columns[k].buffer, input.buffer, k);
+    for (const k of ['oid', 'type']) assert.equal(back.resolved.value.columns[k].buffer, input.buffer, k);
+  }
+});
