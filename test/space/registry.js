@@ -328,6 +328,7 @@ export const DECISIONS = [
   { match: 'src/packcache.ts#pull:*', space: 'packcache', axisTag: 'case' },
   { match: 'src/packcache.ts#cancel:*', space: 'packcache', axisTag: 'case' },
   { match: 'src/packcache.ts#stop:*', space: 'packcache', axisTag: 'case' },
+  { match: 'src/packcache.ts#heldFor:*', space: 'packcache', axisTag: 'case' },
   { match: 'src/push.ts#decide:decode:*', excluded: 'display-only: band 2 progress and the band 3 message' },
   { match: 'src/push.ts#outcomeAttrs:decode:*', excluded: 'display-only: the report lines recorded on the span' },
   { match: 'src/receivecaps.ts#parseReceiveAdvert:decode:*', excluded: 'protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored' },
