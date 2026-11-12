@@ -209,6 +209,8 @@ This session (2026-10-19 → 20):
 | Redirects never followed (`redirect: 'manual'`, 3xx → `http`); the credential scrub rides on the transport into every span and error | workerd 2026-10-23 forwards Authorization on a cross-origin redirect (measured); a server can echo the token in ERR/band 2/band 3/`ng` text. SAFETY I6b, I6c (issue #15) |
 | URL userinfo is sent as git sends it (`<token>@` → Basic `<token>:`, `:pass` → `:pass`, percent-decoded to bytes), not refused | measured on git 2.50 behind a Basic-auth gate: no prompt before the first credentialed request, the header byte-equal in every form; a library cannot prompt, so a refused one is `auth`. SAFETY I6d (issue #32) |
 | An explicit `auth` that sends nothing is `bad_request`; `{ user }` alone is refused, not `user:` | git's own credential API (a helper giving a username alone) asks for the password and sends nothing; a library cannot ask. `{ user, token: '' }` is the explicit `user:`. Explicit fields go out as UTF-8 bytes, as git sends a helper's. SAFETY I6e (issue #40) |
+| `planPackBatches`' `crossBatchRef` stays opt-in, and its cost when on is accepted (2026-11-11) | a delta whose base is in an earlier batch is written as REF_DELTA, a thin pack whether a host takes is the host's to say. With it off, planning is within 3% of main 8e3939d. With it on, each cut base's id is asked of `resolved` and checked: measured at 02374d4 against 8e3939d over 15 interleaved process rounds, 1.03 to 1.06 times on packs cut nowhere and 1.16 times (minimums 1.24) on an OFS pack in which nearly every push cuts a chain. README.md, planPackBatches |
+| A rebase walks its branch past `maxMergeDepth` in windows, and its refusal's request count is stated and asserted (2026-11-11) | the branch walk goes on from the cut frontier in windows of `maxMergeDepth` commits, one window held at a time as parent lists, so it holds no more than the merge-base search. A refusal costs 17 requests under `WORKER_LIMITS` (the merge-base search alone) and 26 under `DEFAULT_LIMITS`, both asserted in `test/rebase.test.js` on an `onto` history deeper than `maxMergeDepth`. README.md, rebaseBaseOf |
 
 ## 6. Verification — how to rerun everything
 
@@ -266,6 +268,89 @@ git clone --depth 1 https://github.com/git/git.git && cd git
 make -j NO_CURL=1 NO_OPENSSL=1 NO_EXPAT=1 NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 git
 ```
 
+### Checks that only CI runs, and how to run them locally
+
+On 2026-11-11 every red head of review train 2 was red for a check that `npm run check` and a branch's own test
+files do not run: gate c claims (three rounds), surviving mutants (three rounds), git 2.56 against a laptop's git,
+the fail-site recorder, Linux `git init` defaults, and zlib output sizes. Each can be reproduced before a push.
+
+**Gate c claims for one space.** The registry (`test/space/registry.js`) gives each fail site in src/ to a space;
+gate c fails when a space's runners ran and none of them reached a site given to it. To judge one space, record over
+every runner file that space lists in the registry, then judge the records:
+
+```sh
+rm -rf .failsites
+PLY_FAILSITES=.failsites NODE_OPTIONS=--import=./test/space/failsite-hook.mjs npx vitest run test/space/describe-pack.test.js
+PLY_FAILSITES=.failsites PLY_FAILSITES_GATE=1 npx vitest run test/space/failsites.test.js
+```
+
+`npm test` records and judges the whole suite the same way. A space's runners are its `runners` list
+(`node -e "import('./test/space/registry.js').then(m => console.log(m.SPACES.find(s => s.name === 'describe-pack').runners))"`);
+record all of them, because a claim is judged as soon as any one of them is in the records. On a partial record like
+this one, only the `claims` test counts: `gate c: every fail site the registry gives a merged space is reached by
+that space` must pass. The `failsites` test fails, since most of src/ was not run, and that failure means nothing
+here; the Linux test is skipped off Linux (macOS hides cells, and CI decides). Reached means a recorded stack passed
+through the site's frame (`file:line:col`, `frameOf` in `test/space/holes.js`) while one of the space's runners ran.
+It does not mean a test read the error: `observed` reports reached sites whose `code` no test read, and is not
+judged. To tell whether a claim hole is new, record and judge a checkout of main the same way, with the same runner
+files, and compare the two `claims` lists.
+
+**The mutation gate.** Only the test files in `MUTATION_FILES` (`vitest.stryker.config.ts`) run under Stryker, so
+only they kill mutants. A test elsewhere that pins a line does not count: a mutant it would kill survives in CI. A
+test written to kill a mutant goes in one of those files, or its file is added to the list. A narrow run on a line
+range uses the repository's config (`stryker.conf.json`, which names `vitest.stryker.config.ts`):
+
+```sh
+npx stryker run --mutate 'src/format.ts:1-30' --concurrency 4
+```
+
+The dry run first runs every file in `MUTATION_FILES` (about 30 s here); the mutants of the range then run against the
+tests that cover them, and the clear-text report lists each survivor. Which survivors are fatal is decided in
+`scripts/mutate.mjs` only: a surviving or uncovered mutant in a parser function (the `PARSER` pattern there) or in a
+bounds file (`BOUNDS_FILES`: src/bytes, src/format, src/inflatestream, src/packstream) fails the build; others are
+reported. An equivalent mutant is allowed only as `// Stryker disable next-line <Mutator>: <reason>` on its line.
+`node scripts/mutate.mjs --check` judges an existing `reports/mutation/mutation.json` with CI's rules; on a narrow
+run it judges only the mutants that ran. CI runs the gate out of band (`mutate.yml`, 16 shards), so a pull request's
+`ci` can be green while `mutate` is still red; merge after both.
+
+**CI's environment, not a laptop's.** CI runs Node 22 on ubuntu-latest, whose git is 2.56; a laptop often has
+another git (2.50 here) and Node 24. What differed:
+
+- Tests that read the git version (`test/gitversion.js`) take another branch on 2.56. Run them under a 2.56 build
+  (the build above): put its directory first on PATH, or `GIT_BIN=` for the oracles that take it.
+- git 2.56 started background maintenance after a push, and a repack renamed packs under a test's fsck. Every git
+  the suite starts is `test/git-shim/git` (first on PATH from `vitest.config.ts`), which turns auto-maintenance off;
+  a test that starts git some other way must go through it, or through `makeBareRepo` / `initRepo`, which set the
+  keys. `test/harness-maintenance.test.js` observes this.
+- Every CI test shard runs under the fail-site recorder (`PLY_FAILSITES` and the `NODE_OPTIONS` hook). It changes
+  stacks and the `code` accessor of ply's errors; a test that counts bytes, frames or properties of an error can pass
+  bare and fail there. Run a changed test once under the recorder (the first command above).
+- Linux `git init` writes no `core.ignorecase` or `core.precomposeunicode`; macOS writes both. A test that compares a
+  repository's config, or depends on name folding, must set them or not read them.
+- git's zlib and node's zlib can differ by a byte for the same objects, and which is smaller depends on the commit
+  timestamp. A test must not assume one pack is smaller than another; it measures both and sets its bound from the
+  larger (the `maxPackBytes` boundary in `test/push-repo-fs.test.js`).
+- `test/workflows.test.js` pins the workflow files' text. After editing a workflow, run it and the linters CI runs:
+
+```sh
+npx vitest run test/workflows.test.js
+actionlint
+uvx zizmor@1.31.1 --offline --persona regular .github/workflows   # CI's version; config in .github/zizmor.yml
+```
+
+A pass is the test file green, actionlint silent with exit 0, and zizmor's "No findings to report".
+
+**Reviewing a change.** Run every test file that imports a changed src module, not only the test files the change
+touched. A closure check that ran only a branch's own tests passed while about 25 tests elsewhere failed (a change
+to how `spanOn` treats a tracer). To list them: `git diff --name-only main... -- src` for the modules, then
+`git grep -l` for each module's import path under test/. When a train head is red, bisect along its merges.
+
+**Benchmarking a perf bar.** On a loaded machine, a number from one process run is noise. Interleave processes of
+main, the candidate (head) and a second copy of main (A/A), one sample per process, many rounds. The verdict is
+(head/main) / (aa/main): a candidate is faster only by more than the A/A arm moved. Sample memory peaks every 2 ms;
+a coarser interval misses them. Use realistic input sizes: a win measured on 1 to 8 byte inputs was an artifact
+that did not hold at real sizes.
+
 ## 7. Numbers (2026-10-20)
 
 - Bundles (esbuild, minified): edit 42.6 KB (16.5 KB gz); merge 63.9 KB; full 116 KB.
@@ -289,7 +374,12 @@ In order of value:
 6. Rebase niceties: patch-id skipping of already-upstream commits; merges in the chain (`not_linear` today).
 7. Protocol/transport limits: SHA-256 repositories; servers without protocol v2; no SSH transport (removed 2026-10-31;
    history on branch archive/ssh).
-8. Features not built: annotated tags, multi-file edits on top of the parent tree (pushTree replaces the whole tree),
+8. Contract changes from 2026-11-11 still under review (open pull requests against main, not on main or on
+   train/review-2 when this was written): `limits.heldTimeoutMs` bounds a consumer that holds a chunk, with SAFETY I1
+   restated for it (#281); `verifyBeforeStore` stores only what `verifyFetchAnswer` accepted, as it meant before
+   (#282); `maxResolveWork` below `maxInflatedTotal`, and null, refused (#280); a push whose body was never pulled is
+   not a push (#283); a linear-time filter-refusal matcher (#284). Move each to §5 when it merges.
+9. Features not built: annotated tags, multi-file edits on top of the parent tree (pushTree replaces the whole tree),
    LFS beyond the guard, merges of files over 8 MiB, a `ply push <dir>` CLI and `.gitignore` reading for `pushDir`;
    for checkoutTree: submodule recursion, `.gitattributes` (eol/filters) and LFS smudging, sparse fetching of only `path`'s
    trees, and checkout into a non-empty directory.
