@@ -101,7 +101,7 @@ export type ResolveStats = {
   // bases made again (read back or rebuilt over their chain) because the cache did not hold them
   readonly rebuilt: number;
   readonly thinBases: number;
-  // the work charged against the budget, and the budget
+  // the work charged against the budget (bytes inflated + bytes of delta results + one per child visited), and the budget
   readonly work: number;
   readonly workMax: number;
 };

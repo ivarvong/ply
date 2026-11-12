@@ -476,3 +476,16 @@ test('an aborted resolve settles aborted: before the call (no read), at the rang
     stall: { code: 'aborted', reads: 1, cancelled: 1, aborted: 1 },
   });
 });
+
+test('the visit of each child is charged: one blob and one REF delta on it is refused at the visit when the ceiling is the blob (#299)', async () => {
+  // by hand, from the charge model at the top of src/packrangeresolve.ts: the blob inflated (6), then its one child visited
+  // (1) = 7 > 6, before the delta is inflated (4) or applied (6). Without the visit charge the refusal is at the delta's
+  // inflate, 6 + 4 + 1 = 11 with the visit counted after or 6 + 4 = 10 with none.
+  const data = te.encode('hello\n');
+  const pack = await packOf([{ type: TYPE.BLOB, data }, { data: Uint8Array.of(6, 6, 0x90, 6), baseOid: hashObject('blob', data) }]);
+  const r = await resolved(pack, { limits: withLimits({ maxInflatedTotal: 6, maxResolveWork: 6 }), budget: RETAIN_BUDGET });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'limit_exceeded');
+  assert.equal(r.error.what, 'resolve work bytes');
+  assert.equal(r.error.got, 7);
+});
