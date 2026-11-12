@@ -3,8 +3,9 @@
 // request was handed to the transport. The expected values are the README contract, hand-derived:
 //   1. a non-ply throw before the hand-over        -> Err bad_request, what 'callback', cause === the thrown value
 //   2. a PlyError throw before the hand-over        -> Err that very PlyError (same object, same code)
-//   3. any throw after the hand-over                -> Err ambiguous, what 'callback', cause === the thrown value
-//                                                      (a thrown PlyError's code goes to `original`)
+//   3. a throw after the hand-over                  -> Err ambiguous, what 'callback', cause === the thrown value
+//                                                      (a thrown PlyError's code goes to `original`), except that a
+//                                                      thrown `ambiguous` PlyError is returned as itself (no what, no cause)
 //   4. a returned value (Ok, or the caller's own discriminated union inside it) passes through unchanged
 // No server: fetchImpl refuses every request, so nothing can reach a network; the hand-over is the frames() call.
 import { test } from 'vitest';
@@ -52,6 +53,16 @@ test('3. any throw after the push request was handed to the transport is ambiguo
     if (thrown instanceof Error && 'code' in thrown) assert.equal(r.error.original, 'cas_conflict');
     else assert.equal('original' in r.error, false);
   }
+});
+
+test('3b. an ambiguous PlyError thrown after the hand-over is returned as itself, not re-wrapped', async () => {
+  const thrown = plyError('ambiguous', 'mine: I already know the push outcome is unknown');
+  const r = await operation('probe', url, opts, async ({ t, root }) => { await null; t.frames('git-receive-pack', empty, root, {}); throw thrown; });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, thrown);
+  assert.equal(r.error.code, 'ambiguous');
+  assert.equal(r.error.what, undefined);
+  assert.equal(r.error.cause, undefined);
 });
 
 test('4. a returned value passes through: expected outcomes as a discriminated union, before or after the hand-over', async () => {
