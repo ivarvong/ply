@@ -78,24 +78,43 @@ test('the work charged for m shared-base REF deltas is 11 m + 6, worked out by h
   }
 });
 
+// Wall time under CPU contention (CI shards run files side by side): the two sizes are timed interleaved, best of 7 each,
+// and the ratio is taken up to 3 times, judged on the best attempt, as test/linear-matchers-274.test.js does. A quadratic
+// resolve measures about 13 x here however many retries it gets; the linear one about 3.3 to 4.6 x.
 test('resolving m REF deltas on one base is linear-ish: 4 x the deltas take at most 6 x the time', { timeout: 120_000 }, async () => {
-  const time = async m => {
+  const prep = async m => {
     const pack = sharedPack(m);
     const idx = await scanPackIndex(streamOf(pack));
     assert.ok(idx.ok);
-    let best = Infinity;
-    for (let k = 0; k < 3; k++) {
-      const t0 = performance.now();
-      // oxlint-disable-next-line no-await-in-loop -- timed runs, in turn
-      const r = await resolvePackRange(idx.value, rangeFromBytes(pack));
-      best = Math.min(best, performance.now() - t0);
-      assert.ok(r.ok);
-    }
-    return best;
+    return { idx: idx.value, pack };
   };
-  await time(500);
-  const small = await time(2000);
-  const big = await time(8000);
-  console.log(JSON.stringify({ small, big, ratio: big / small }));
-  assert.ok(big / small <= 6, `m=2,000 ${small.toFixed(0)} ms, m=8,000 ${big.toFixed(0)} ms: ratio ${(big / small).toFixed(2)}`);
+  const once = async ({ idx, pack }) => {
+    const t0 = performance.now();
+    const r = await resolvePackRange(idx, rangeFromBytes(pack));
+    const ms = performance.now() - t0;
+    assert.ok(r.ok);
+    return ms;
+  };
+  const warm = await prep(500);
+  const smallIn = await prep(2000);
+  const bigIn = await prep(8000);
+  await once(warm);
+  const attempt = async () => {
+    let small = Infinity;
+    let big = Infinity;
+    for (let k = 0; k < 7; k++) {
+      // oxlint-disable-next-line no-await-in-loop -- timed runs, in turn
+      small = Math.min(small, await once(smallIn));
+      // oxlint-disable-next-line no-await-in-loop -- timed runs, in turn
+      big = Math.min(big, await once(bigIn));
+    }
+    return { small, big, ratio: big / small };
+  };
+  let best = { small: 0, big: 0, ratio: Infinity };
+  for (let a = 0; a < 3 && best.ratio > 6; a++) {
+    // oxlint-disable-next-line no-await-in-loop -- attempts, in turn
+    const r = await attempt();
+    if (r.ratio < best.ratio) best = r;
+  }
+  assert.ok(best.ratio <= 6, `m=2,000 ${best.small.toFixed(0)} ms, m=8,000 ${best.big.toFixed(0)} ms: ratio ${best.ratio.toFixed(2)}`);
 });
