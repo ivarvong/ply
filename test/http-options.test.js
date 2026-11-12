@@ -576,7 +576,7 @@ test('the POST span: status, content type, a time to first byte from the request
 
 test('a timeout a timer cannot hold (above 2^31-1 ms) is refused where the options enter; 0 (off) and 2^31-1 pass', () => {
   // setTimeout's delay is a signed 32-bit count of ms: 2147483647 is the largest it holds (HTML timers; Node warns)
-  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'requestTimeoutMs']) {
+  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'heldTimeoutMs', 'requestTimeoutMs']) {
     for (const bad of [2 ** 31, 2 ** 32, Number.MAX_SAFE_INTEGER]) {
       const r = createTransport('https://h/r', { limits: { [key]: bad } });
       assert.deepEqual([r.ok, r.error?.code, r.error?.what, r.error?.got], [false, 'bad_request', key, bad], `${key}=${bad}`);
@@ -589,7 +589,7 @@ test('a timeout a timer cannot hold (above 2^31-1 ms) is refused where the optio
 // way to turn the timer off. Hand-written here, not read from src. The bound is the timers' alone: a limit that is not
 // a timer passes above it.
 test('a timeout above 2^31-1 ms is refused with a message naming the key and the bound; a limit that is no timer passes above it', () => {
-  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'requestTimeoutMs']) {
+  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'heldTimeoutMs', 'requestTimeoutMs']) {
     const message = `limits.${key} must be at most 2147483647 ms (0 turns the timer off)`;
     for (const r of [createTransport('https://h/r', { limits: { [key]: 2147483648 } }), parseHttpOptions('https://h/r', { limits: { [key]: 2147483648 } }), parseLimits({ [key]: 2147483648 })]) {
       assert.deepEqual([r.ok, r.error?.code, r.error?.message, r.error?.what, r.error?.got], [false, 'bad_request', message, key, 2147483648], key);
@@ -644,6 +644,49 @@ test('an allowUrl that maps an http(s) base to another scheme is refused as allo
     assert.equal(settings.ok, true, url);
     assert.equal(settings.value.url.href, 'https://real.example/team/r.git', url);
   }
+});
+// #273: heldTimeoutMs is parsed as its sibling timers are: a negative, NaN or infinite value is bad_request naming it.
+test('limits.heldTimeoutMs: not a finite non-negative number is bad_request naming the key', () => {
+  for (const bad of [-1, Number.NaN, Infinity, '1000']) {
+    const r = parseLimits({ heldTimeoutMs: bad });
+    assert.deepEqual([r.ok, r.error?.code, r.error?.what], [false, 'bad_request', 'heldTimeoutMs'], String(bad));
+  }
+  assert.deepEqual([parseLimits({ heldTimeoutMs: 0 }).value?.heldTimeoutMs, parseLimits({}).value?.heldTimeoutMs], [0, 240_000]);
+});
+
+// #273 review round 4 (owner's rule, DECISION 2): the hold starts at the first clock read after the take, so a cut is
+// never before take + heldTimeoutMs and at most min(idleTimeoutMs, heldTimeoutMs) late (heldTimeoutMs late with idle
+// off). Network progress during the hold (a push whose server answered before the upload ended: upload pieces keep
+// being taken while the consumer holds a chunk) must not move the hold's start. Expected bounds are that rule worked by
+// hand: take at 20, held 4000, so the cut is in [4020, 4020 + min(idle, held)]. Timers are manual: nothing sleeps.
+import { exchangeClock } from '../src/deadline.js';
+for (const idleMs of [1000, 0]) test(`exchangeClock: idle ${idleMs}, upload progress while the consumer holds does not move the hold's start`, () => {
+  const realSet = globalThis.setTimeout, realClear = globalThis.clearTimeout;
+  let T = 0;
+  const q = new Map();
+  globalThis.setTimeout = (fn, ms) => { const id = { unref() {} }; q.set(id, { at: T + (ms ?? 0), fn }); return id; };
+  globalThis.clearTimeout = id => { q.delete(id); };
+  const advance = to => {
+    for (;;) {
+      let best = null;
+      for (const e of q) if (e[1].at <= to && (best === null || e[1].at < best[1].at)) best = e;
+      if (best === null) break;
+      q.delete(best[0]); T = Math.max(T, best[1].at); best[1].fn();
+    }
+    T = to;
+  };
+  try {
+    const heldMs = 4000;
+    let fired = 'none', at = -1;
+    const c = exchangeClock({ firstByteMs: 1000, idleMs, heldMs, totalMs: 0 }, null, k => { fired = k; at = T; }, () => T);
+    advance(10); c.feed('headers'); advance(20); c.feed('consumer_took');
+    for (let x = 100; x <= 60_000 && fired === 'none'; x += 100) { advance(x); c.feed('upload_bytes'); }
+    advance(70_000);
+    c.cancel();
+    const take = 20, late = idleMs > 0 ? Math.min(idleMs, heldMs) : heldMs;
+    assert.equal(fired, 'heldTimeoutMs');
+    assert.ok(at >= take + heldMs && at <= take + heldMs + late, `cut at ${at}, want [${take + heldMs}, ${take + heldMs + late}]`);
+  } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; }
 });
 
 // README "Your own code failing": a fetchImpl you passed that throws or rejects is `network` with what 'fetchImpl'; a

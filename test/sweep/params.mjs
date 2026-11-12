@@ -33,6 +33,7 @@ export const PARAMS = [
   { key: 'requestTimeoutMs', limit: DEFAULT_LIMITS.requestTimeoutMs, probe: 'lsRefs and readFile through a delaying or stalling shim, with the opt-in total set', later: false },
   { key: 'firstByteTimeoutMs', limit: DEFAULT_LIMITS.firstByteTimeoutMs, probe: 'lsRefs through a delaying shim (a slow server)', later: false },
   { key: 'idleTimeoutMs', limit: DEFAULT_LIMITS.idleTimeoutMs, probe: 'lsRefs and readFile through a stalling shim (a stalled body)', later: false },
+  { key: 'heldTimeoutMs', limit: DEFAULT_LIMITS.heldTimeoutMs, probe: 'readFile whose consumer holds the first chunk (holdMs) through the shim', later: false },
 ];
 
 export const PARAM_BY_KEY = new Map(PARAMS.map(p => [p.key, p]));

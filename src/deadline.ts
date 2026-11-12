@@ -3,6 +3,7 @@
 //   firstByteTimeoutMs  from the request (or from the end of a streamed upload) to the response headers
 //   idleTimeoutMs       the longest wait on the network with no progress: no upload piece taken by the platform, no
 //                       response body chunk in
+//   heldTimeoutMs       the longest the consumer may hold a chunk (from taking it to asking for the next) (#273)
 //   requestTimeoutMs    the whole exchange, opt-in (0, the default, is no total cap)
 //
 // 0 turns a timer off. git has no total timeout either (http.lowSpeedLimit is off by default); a caller who needs a
@@ -11,21 +12,24 @@
 // The clock is a pure state machine (`transition`, `deadlineOf`); `exchangeClock` only feeds it events and arms what it
 // says. Two rules it cannot break: a state never moves backwards (headers seen means the first byte is satisfied for
 // good, whatever the upload does after), and time is charged only while ply waits on the network: while the consumer
-// holds a chunk, or has not asked for the next one (`held`), neither the first-byte nor the idle limit runs.
+// holds a chunk, or has not asked for the next one (`held`), neither the first-byte nor the idle limit runs: the held
+// limit does, from the first clock read after the take (the take reads no clock: never early, late by at most one
+// pending timer's interval), so network idle and a stalled
+// consumer are distinct limits with distinct names.
 //
 // One timer. An event moves the mark; the timer is set again only when none is pending or the new deadline is earlier
 // than the pending one, and when it fires it re-arms for what is left: a body chunk costs no setTimeout and no
-// clearTimeout (test/deadline.test.js counts them). While the consumer holds a chunk and there is no total cap, a timer
-// that fires is not set again until the consumer asks for more: nothing is charged to the consumer, and a consumer
-// that never asks is bounded by the caller's signal or requestTimeoutMs. The timer is the strong owner of the
+// clearTimeout (test/deadline.test.js counts them). While the consumer holds a chunk, a timer that fires re-arms for
+// the hold's start + heldTimeoutMs (or the total cap, if earlier); with both 0 it is not set again until the consumer asks. The timer is the strong owner of the
 // AbortController: AbortSignal.any holds its sources weakly and an AbortSignal.timeout is held only by its own weak
 // timer, so after a GC it never fires and a stalled body hangs forever (Node 20/22; found by the calibration harness).
 // A controller owned by a live timer cannot be collected. Date.now in a Worker advances only across I/O; every mark is
 // taken after the I/O that made it.
 import { field } from './absent.js';
 import { MAX_TIMER_MS } from './limits.js';
+import { assertNever } from './result.js';
 
-export type TimeoutKey = 'firstByteTimeoutMs' | 'idleTimeoutMs' | 'requestTimeoutMs';
+export type TimeoutKey = 'firstByteTimeoutMs' | 'idleTimeoutMs' | 'heldTimeoutMs' | 'requestTimeoutMs';
 // connecting: the request is out (a byte body), no headers yet. uploading: a streamed body is going out.
 // awaiting_first_byte: the upload ended, no headers yet. streaming: headers seen, ply is waiting on the network.
 // held: headers seen, the consumer holds a chunk or has not asked for the next. done: ended, nothing fires.
@@ -36,7 +40,7 @@ export type ClockState = 'connecting' | 'uploading' | 'awaiting_first_byte' | 's
 export type ClockEvent = 'request_sent' | 'upload_started' | 'upload_bytes' | 'upload_ended' | 'headers' | 'body_chunk' | 'consumer_took' | 'consumer_asked' | 'ended';
 // The next state, and whether the event is network progress that restarts the wait (moves the mark).
 type ClockStep = { readonly state: ClockState; readonly restart: boolean };
-export type ExchangeTimeouts = { readonly firstByteMs: number; readonly idleMs: number; readonly totalMs: number };
+export type ExchangeTimeouts = { readonly firstByteMs: number; readonly idleMs: number; readonly heldMs: number; readonly totalMs: number };
 export type ExchangeClock = {
   readonly signal: AbortSignal;
   readonly feed: (event: ClockEvent) => void;
@@ -55,25 +59,29 @@ const stay = (state: ClockState): ClockStep => STAY[state];
 const go = (state: ClockState): ClockStep => GO[state];
 // The whole machine. An event a state has no use for leaves it as it is: nothing moves a state backwards.
 export function transition(state: ClockState, event: ClockEvent): ClockStep {
-  if (state === 'done' || event === 'ended') return stay('done');
-  if (state === 'connecting') {
-    if (event === 'request_sent') return go('connecting');
-    if (event === 'upload_started') return go('uploading');
-    return event === 'headers' ? go('streaming') : stay(state);
+  if (event === 'ended') return stay('done');
+  switch (state) {
+    case 'done': return stay('done');
+    case 'connecting':
+      if (event === 'request_sent') return go('connecting');
+      if (event === 'upload_started') return go('uploading');
+      return event === 'headers' ? go('streaming') : stay(state);
+    case 'uploading':
+      if (event === 'upload_bytes') return go('uploading');
+      if (event === 'upload_ended') return go('awaiting_first_byte');
+      return event === 'headers' ? go('streaming') : stay(state);
+    case 'awaiting_first_byte': return event === 'headers' ? go('streaming') : stay(state);
+    case 'streaming':
+      // bytes moved either way; an upload that ends here ends nothing the clock waits for
+      if (event === 'upload_bytes' || event === 'body_chunk') return go('streaming');
+      // the take does not read the clock (#273 review: no clock read per chunk added): the hold runs from the first
+      // clock read after the take (exchangeClock's anchor), never from an earlier network mark
+      return event === 'consumer_took' ? stay('held') : stay(state);
+    case 'held':
+      // only the consumer's ask puts ply back on the network, and the wait starts then
+      return event === 'consumer_asked' ? go('streaming') : stay(state);
   }
-  if (state === 'uploading') {
-    if (event === 'upload_bytes') return go('uploading');
-    if (event === 'upload_ended') return go('awaiting_first_byte');
-    return event === 'headers' ? go('streaming') : stay(state);
-  }
-  if (state === 'awaiting_first_byte') return event === 'headers' ? go('streaming') : stay(state);
-  if (state === 'streaming') {
-    // bytes moved either way; an upload that ends here ends nothing the clock waits for
-    if (event === 'upload_bytes' || event === 'body_chunk') return go('streaming');
-    return event === 'consumer_took' ? stay('held') : stay(state);
-  }
-  // held: only the consumer's ask puts ply back on the network, and the wait starts then
-  return event === 'consumer_asked' ? go('streaming') : stay(state);
+  return assertNever(state);
 }
 
 // Node's timer has unref (the DOM lib types it as a number); a Worker's has none.
@@ -85,6 +93,7 @@ const unref = (timer: unknown): void => {
 const MESSAGES: Readonly<Record<TimeoutKey, (ms: number) => string>> = {
   firstByteTimeoutMs: ms => `no response within ${ms} ms (limits.firstByteTimeoutMs)`,
   idleTimeoutMs: ms => `no bytes moved for ${ms} ms (limits.idleTimeoutMs)`,
+  heldTimeoutMs: ms => `the consumer held a chunk for ${ms} ms without asking for the next (limits.heldTimeoutMs)`,
   requestTimeoutMs: ms => `request exceeded ${ms} ms`,
 };
 // The abort reason: a TimeoutError, as the platform's own, naming the limit that fired (wrapNet reads `limit`).
@@ -94,7 +103,7 @@ export function timeoutReason(key: TimeoutKey, ms: number): DOMException {
 // The limit a timeout reason names, or none.
 export function timeoutLimit(reason: unknown): TimeoutKey | null {
   const f = field(reason, 'limit');
-  return f.tag === 'some' && (f.value === 'firstByteTimeoutMs' || f.value === 'idleTimeoutMs' || f.value === 'requestTimeoutMs') ? f.value : null;
+  return f.tag === 'some' && (f.value === 'firstByteTimeoutMs' || f.value === 'idleTimeoutMs' || f.value === 'heldTimeoutMs' || f.value === 'requestTimeoutMs') ? f.value : null;
 }
 
 type Due = { readonly at: number; readonly key: TimeoutKey; readonly ms: number };
@@ -103,11 +112,12 @@ const earlier = (a: Due | null, b: Due | null): Due | null => {
   if (b === null) return a;
   return a.at <= b.at ? a : b;
 };
-// The deadline to arm in `state`, whose wait began at `mark`, in an exchange that began at `start`; null is none.
+// The deadline to arm in `state`, whose wait began at `mark`, in an exchange that began at `start`; null is none. In
+// `held`, `mark` is when the clock first saw the hold (the first clock read after the take), never the network mark.
 export function deadlineOf(state: ClockState, mark: number, start: number, t: ExchangeTimeouts): Due | null {
   if (state === 'done') return null;
   const total: Due | null = t.totalMs > 0 ? { at: start + t.totalMs, key: 'requestTimeoutMs', ms: t.totalMs } : null;
-  if (state === 'held') return total;
+  if (state === 'held') return earlier(total, t.heldMs > 0 ? { at: mark + t.heldMs, key: 'heldTimeoutMs', ms: t.heldMs } : null);
   const waiting = state === 'connecting' || state === 'awaiting_first_byte';
   const ms = waiting ? t.firstByteMs : t.idleMs;
   const step: Due | null = ms > 0 ? { at: mark + ms, key: waiting ? 'firstByteTimeoutMs' : 'idleTimeoutMs', ms } : null;
@@ -115,6 +125,11 @@ export function deadlineOf(state: ClockState, mark: number, start: number, t: Ex
 }
 
 const pastHeaders = (state: ClockState): boolean => state === 'streaming' || state === 'held';
+// Past the headers, whether `state`'s own step deadline (from `mark`) is earlier than a timer pending for `armedFor`.
+const steppedEarlier = (state: ClockState, t: ExchangeTimeouts, mark: number, armedFor: number): boolean => {
+  const ms = state === 'held' ? t.heldMs : t.idleMs;
+  return ms > 0 && armedFor > mark + ms;
+};
 
 // `onFire` runs once, before the abort, with the limit that fired (the span records it). `now` is the clock (tests).
 export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, onFire: (key: TimeoutKey, ms: number) => void, now: () => number = Date.now): ExchangeClock {
@@ -122,15 +137,23 @@ export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, on
   const start = now();
   let state: ClockState = 'connecting';
   let mark = start;
+  // The hold is timed from the first clock read that sees it (a timer firing, or an arm), never from a read of its own:
+  // the take reads no clock. `heldFrom` is that read; `anchored` says the current hold has one.
+  let heldFrom = start;
+  let anchored = true;
   let timer: ReturnType<typeof setTimeout> | null = null;
   // when the pending timer fires
   let armedFor = 0;
-  const due = (): Due | null => deadlineOf(state, mark, start, t);
+  const due = (): Due | null => deadlineOf(state, state === 'held' ? heldFrom : mark, start, t);
+  // A clock read seeing a hold for the first time starts it there: so a hold is cut no earlier than take + heldMs.
+  const anchor = (at: number): void => { if (state === 'held' && !anchored) { heldFrom = at; anchored = true; } };
   const clear = (): void => { if (timer !== null) clearTimeout(timer); timer = null; };
   // A pending timer that fires no later than the deadline is left alone: fire() re-arms for what is left. So is one
   // pending when there is nothing to wait for (held, no total cap): it finds that out when it fires and is not set again.
   const arm = (): void => {
     if (state === 'done') { clear(); return; }
+    // the take is synchronous with this arm when an unanchored hold reaches it from feed: this read is the take's time
+    if (state === 'held' && !anchored) anchor(now());
     const d = due();
     if (d === null) return;
     if (timer !== null && armedFor <= d.at) return;
@@ -144,9 +167,11 @@ export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, on
   };
   function fire(): void {
     timer = null;
+    const at = now();
+    anchor(at);
     const d = due();
     if (d === null) return;
-    if (now() < d.at) { arm(); return; }
+    if (at < d.at) { arm(); return; }
     state = 'done';
     onFire(d.key, d.ms);
     ac.abort(timeoutReason(d.key, d.ms));
@@ -156,12 +181,14 @@ export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, on
     const next = transition(from, event);
     state = next.state;
     if (next.restart) mark = now();
+    if (state === 'held' && from !== 'held') anchored = false;
     // The per-chunk path makes no timer call: a pending timer that fires no later than the new deadline is left alone
     // and re-arms for what is left when it fires. That covers a restart inside a state (marks only advance) and
-    // streaming to held (held waits for less). Held to streaming is the one move past the headers that can bring the
-    // deadline earlier than the pending timer: a timer that fired while the consumer held the chunk was set again for
-    // the total cap, which is later than the idle deadline that starts at the ask. Then, and only then, it is set again.
-    if (timer !== null && (state === from || (pastHeaders(from) && pastHeaders(state) && !(from === 'held' && t.idleMs > 0 && armedFor > mark + t.idleMs)))) return;
+    // a move between streaming and held whose new step deadline (mark + idle, or mark + held) is no earlier than the
+    // pending timer. A move between them that brings the deadline earlier (a timer set for take + held, or the total
+    // cap, and then the ask; or a held limit shorter than the pending idle one) is the one that sets it again.
+    // An unanchored hold keeps a pending timer due by mark + heldMs (mark is before the take): its fire starts the hold.
+    if (timer !== null && (state === from || (pastHeaders(from) && pastHeaders(state) && !steppedEarlier(state, t, mark, armedFor)))) return;
     arm();
   };
   arm();

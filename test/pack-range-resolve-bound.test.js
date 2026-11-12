@@ -135,6 +135,8 @@ test('withLimits(null) is the frozen defaults: null from an untyped caller is no
     maxRefs: 10_000, maxRebaseCommits: 10_000, maxSectionLines: 1000, maxTreeEntries: 200_000, maxPathDepth: 128, maxPathComponent: 4096,
     maxMergeDepth: 1024, maxReportLines: 10_000, maxCommitParents: 10_000, maxLsRefsBytes: 134_217_728, requestTimeoutMs: 0,
     firstByteTimeoutMs: 60_000, idleTimeoutMs: 60_000,
+    // README Limits: heldTimeoutMs 240 s, 4 x the 60 s idle default (#273)
+    heldTimeoutMs: 240_000,
     // README Limits: maxMergeWork 2^32 diff steps, maxReportReasonBytes 4096, maxReportProgressBytes 8 MiB
     maxMergeWork: 4_294_967_296, maxReportReasonBytes: 4096, maxReportProgressBytes: 8_388_608,
   };
