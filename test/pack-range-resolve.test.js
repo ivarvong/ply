@@ -17,7 +17,7 @@ import { parsePack, resolvePack, encodeObjHeader, zlibDeflate } from '../src/pac
 import { hashObject, TYPE } from '../src/objects.js';
 import { Sha1, fromHex } from '../src/sha1.js';
 import { concat, te } from '../src/bytes.js';
-import { withLimits } from '../src/limits.js';
+import { withLimits, LIMIT_RESOLVE_WORK, LIMIT_INFLATED_TOTAL } from '../src/limits.js';
 import { ok } from '../src/result.js';
 import { RETAIN_BUDGET } from '../src/packstream.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, UINT32_BYTES, OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK, OBJ_SIZE_NEXT_BASE } from '../src/format.js';
@@ -32,7 +32,8 @@ async function resolved(pack, opts = {}, oids = true) {
 }
 
 const gitIn = (cwd, args, input) => execFileSync('git', args, { cwd, input, maxBuffer: 1 << 30 });
-// git verify-pack -v, by offset: oid, type, and the chain depth (0 for a whole object).
+// git verify-pack -v, by offset: oid, type, the stored size (a delta's own size for a delta) and the chain depth (0 for a
+// whole object).
 function verifyPack(pack) {
   const dir = mkdtempSync(join(tmpdir(), 'ply-range-resolve-'));
   try {
@@ -42,8 +43,8 @@ function verifyPack(pack) {
     const out = gitIn(dir, ['verify-pack', '-v', join(dir, 'p.idx')]).toString();
     const byOffset = new Map();
     for (const line of out.split('\n')) {
-      const m = /^([0-9a-f]{40}) (commit|tree|blob|tag)\s+\d+ \d+ (\d+)(?: (\d+) ([0-9a-f]{40}))?/.exec(line);
-      if (m) byOffset.set(Number(m[3]), { oid: m[1], type: TYPE[m[2].toUpperCase()], depth: m[4] === undefined ? 0 : Number(m[4]), base: m[5] ?? null });
+      const m = /^([0-9a-f]{40}) (commit|tree|blob|tag)\s+(\d+) \d+ (\d+)(?: (\d+) ([0-9a-f]{40}))?/.exec(line);
+      if (m) byOffset.set(Number(m[4]), { oid: m[1], type: TYPE[m[2].toUpperCase()], stored: Number(m[3]), depth: m[5] === undefined ? 0 : Number(m[5]), base: m[6] ?? null });
     }
     return byOffset;
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -65,9 +66,15 @@ function assertMatchesGit(pack, idx, res) {
   }
 }
 // This repository's history up to a fixed commit, not HEAD: the work a pack costs to resolve grows with the history
-// packed while the default work limit (256 MiB) does not, so a pack of HEAD turns these tests red at some length of
-// history. Measured with git 2.50: at this commit (318 commits, 3846 objects) the 64 KiB cache below does 239.8 MB of
-// work and the default cache 69.2 MB; 17 commits later (3969 objects) they do 272.5 MB, past the limit, and 71.5 MB.
+// packed, so a pack of HEAD would turn these tests red at some length of history. The bound (src/packrangeresolve.ts
+// workMaxOf) is min(ceiling, max(maxInflatedTotal, LIMIT_RESOLVE_FACTOR x floor)), the floor being every member's
+// stored size plus every delta's result. On DEFAULT_LIMITS: ceiling = LIMIT_RESOLVE_WORK = LIMIT_INFLATED_TOTAL x
+// LIMIT_RESOLVE_TOTALS = 256 MiB x 8 = 2 GiB (2147.5 MB); maxInflatedTotal = LIMIT_OBJECT x LIMIT_INFLATED_OBJECTS =
+// 64 MiB x 4 = 256 MiB (268.4 MB); the factor is 4. For this pack the floor is about 70.6 MB, so 4 x floor is about
+// 282.4 MB, over 268.4 MB and under 2147.5 MB: the middle term sets the bound (the test below derives it from git).
+// Measured with git 2.50 at this commit (2026-11-11): the default cache does 69.2 MB of work and the 64 KiB cache
+// below 96.8 to 98.4 MB (pack-objects output varies a little run to run), about 35% of the bound. The work and the
+// floor both grow with the history, so the pin is what keeps this test's cost fixed.
 // Every full clone has the commit. A clone without it (a shallow one) packs its tip commit alone, which is all a
 // depth-1 clone holds and does not grow with the history either.
 const PACKED_COMMIT = 'ec337c5258839576e354ca9ea12d4f2404a3a75f';
@@ -99,6 +106,23 @@ test("this repository's pack with OFS deltas matches git verify-pack; scanned wi
   const idx = must(await scan(pack, false));
   const res = must(await resolvePackRange(idx, rangeFromBytes(pack)));
   assertMatchesGit(pack, idx, res);
+});
+
+// The work bound for this pack, from git: the floor is every member's stored size (verify-pack's size column, a delta's
+// own size for a delta) plus every delta's result (cat-file's size of each deltified object), each counted once.
+test("this repository's pack: the work bound is min(ceiling, max(maxInflatedTotal, 4 x floor)), the floor taken from git", async () => {
+  const pack = repoPack([]);
+  const git = [...verifyPack(pack).values()];
+  const deltas = git.filter(g => g.base !== null).map(g => g.oid);
+  const resultSizes = gitIn(process.cwd(), ['cat-file', '--batch-check=%(objectsize)'], deltas.join('\n') + '\n').toString().trim().split('\n').map(Number);
+  const floor = git.reduce((a, g) => a + g.stored, 0) + resultSizes.reduce((a, b) => a + b, 0);
+  const bound = Math.min(LIMIT_RESOLVE_WORK, Math.max(LIMIT_INFLATED_TOTAL, 4 * floor));
+  const idx = must(await scan(pack));
+  for (const cacheBytes of [undefined, 64 << 10]) {
+    const res = must(await resolvePackRange(idx, rangeFromBytes(pack), cacheBytes === undefined ? {} : { cacheBytes }));
+    assert.equal(res.stats.workMax, bound, `cache ${cacheBytes}`);
+    console.log(JSON.stringify({ cacheBytes: cacheBytes ?? 'default', floor, workMax: res.stats.workMax, work: res.stats.work }));
+  }
 });
 
 test('the same result at every cache size, down to none (every base rebuilt over its chain)', async () => {

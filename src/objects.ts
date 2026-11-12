@@ -529,8 +529,9 @@ function oidLine(s: string, p: number, kind: string, msgId: string, what: string
 // no overflow past git's timestamp range, one space, a sign, IDENT_TZ_DIGITS digits, and the newline.
 // The digits of the greatest timestamp fsck accepts (2^63 - 1: 19).
 const IDENT_TIMESTAMP_DIGITS = String(IDENT_TIMESTAMP_MAX).length;
+// `digit` classifies one character; the parsers pass DIGIT, and a test counts through its own (test/ident-timestamp).
 // oxlint-disable-next-line eslint/complexity -- fsck_ident line for line, inline: a helper costs bytes on every entry
-function fsckIdent(s: string, p: number, kind: string, role: string): Result<readonly [ident: string, next: number], Corrupt> {
+export function fsckIdent(s: string, p: number, kind: string, role: string, digit: RegExp = DIGIT): Result<readonly [ident: string, next: number], Corrupt> {
   const eol = s.indexOf('\n', p);
   const end = eol < 0 ? s.length : eol;
   const bad = (msgId: string, why: string): Err<Corrupt> => corrupt(kind, msgId, `invalid ${role} line - ${why}`);
@@ -548,18 +549,18 @@ function fsckIdent(s: string, p: number, kind: string, role: string): Result<rea
   q++;
   while (s[q] === ' ' || s[q] === '\t') q++;
   // charAt past the end is '', which is no digit
-  if (!DIGIT.test(s.charAt(q))) return bad('badDate', 'bad date');
+  if (!digit.test(s.charAt(q))) return bad('badDate', 'bad date');
   if (s[q] === '0' && s[q + 1] !== ' ') return bad('zeroPaddedDate', 'zero-padded date');
   const start = q;
   // By length first: the run has no leading zero (above), so more digits than the limit has is past the limit, and
   // fsck reports the overflow before it reads what follows the digits. The run is the remote's and as long as the
   // object, so it is read one digit past the limit's and no further, and BigInt (superlinear) only ever sees a short one.
-  while (q - start <= IDENT_TIMESTAMP_DIGITS && DIGIT.test(s.charAt(q))) q++;
+  while (q - start <= IDENT_TIMESTAMP_DIGITS && digit.test(s.charAt(q))) q++;
   if (q - start > IDENT_TIMESTAMP_DIGITS || BigInt(s.slice(start, q)) > IDENT_TIMESTAMP_MAX) return bad('badDateOverflow', 'date causes integer overflow');
   if (s[q] !== ' ') return bad('badDate', 'bad date');
   q++;
   if (s[q] !== '+' && s[q] !== '-') return bad('badTimezone', 'bad time zone');
-  for (let i = 1; i <= IDENT_TZ_DIGITS; i++) if (!DIGIT.test(s.charAt(q + i))) return bad('badTimezone', 'bad time zone');
+  for (let i = 1; i <= IDENT_TZ_DIGITS; i++) if (!digit.test(s.charAt(q + i))) return bad('badTimezone', 'bad time zone');
   if (s[q + IDENT_TZ_DIGITS + 1] !== '\n') return bad('badTimezone', 'bad time zone');
   return ok([s.slice(p, end), end + 1]);
 }

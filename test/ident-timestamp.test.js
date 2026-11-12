@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseCommit, parseTag } from '../src/objects.js';
+import { parseCommit, parseTag, fsckIdent } from '../src/objects.js';
 
 const TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'; // git's empty tree
 const latin1 = s => new Uint8Array(Buffer.from(s, 'latin1'));
@@ -55,43 +55,49 @@ test('a huge timestamp costs no more conversion work than a benign object of the
   }
 });
 
-// The second work counter: every character the parse classifies with a regex (RegExp.prototype.test). The digit run
-// was still walked to its end one regex test a digit after BigInt stopped seeing it: linear, but about 200 times the
-// CPU of a same-size benign object (the reviewer's exp6-cputime.mjs on 91f0e71: 64 ms against 0.3 ms at 4M digits).
+// The second work counter: every character the ident parser classifies as a digit. The digit run was still walked to
+// its end one classification a digit after BigInt stopped seeing it: linear, but about 200 times the CPU of a same-size
+// benign object (the reviewer's exp6-cputime.mjs on 91f0e71: 64 ms against 0.3 ms at 4M digits).
 // The expected bound is git's rule, not ply's code: with no leading zero a 20th digit is already past 2^63 - 1, and
 // fsck_ident reports the overflow before it reads what follows the digits, so 20 digits of one timestamp decide it.
-// What it counts: the calls of RegExp.prototype.test whose subject is one character of the object (or the empty
-// string charAt gives past its end), which is how the ident parser classifies: one call a character. A call with a
-// longer subject is not a character of the object being classified and is not counted: under CI's PLY_FAILSITES the
-// gate c recorder (test/space/failsite-hook.mjs) reads a stack at every plyError, and vitest's source-mapped stack
-// tests each frame's path and each CallSite method name with a regex inside the parse call. That was 200 calls on the
-// refused object only (21 by the parser + 200 = the 221 of ci run 43074758530), none on the accepted one.
-function charsClassified(fn) {
-  const real = RegExp.prototype.test;
-  let tests = 0;
-  // oxlint-disable-next-line no-extend-native -- a counter for the length of this call, restored in finally
-  RegExp.prototype.test = function test(s) { if (typeof s === 'string' && s.length <= 1) tests++; return real.call(this, s); };
-  try { return { value: fn(), tests }; } finally { RegExp.prototype.test = real; }
+// The count goes through the classifier fsckIdent takes as a parameter (a RegExp; parseCommit and parseTag pass the
+// module's own), so nothing global is patched (#276) and the gate c recorder's own regex calls are never counted.
+class CountingDigit extends RegExp {
+  constructor() { super('^[0-9]$', 'u'); this.tests = 0; }
+  test(s) { this.tests++; return super.test(s); }
 }
+function charsClassified(text, at, kind, role) {
+  const digit = new CountingDigit();
+  return { value: fsckIdent(text, at, kind, role, digit), tests: digit.tests };
+}
+const AT = { commit: `tree ${TREE}\nauthor `.length, tag: `object ${TREE}\ntype tree\ntag v1\ntagger `.length };
 
 test('a huge timestamp is not walked to its end: the characters classified do not grow with the digit run', () => {
-  for (const [parse, text] of [[parseCommit, commitText], [parseTag, tagText]]) {
+  for (const [kind, role, text] of [['commit', 'author', commitText], ['tag', 'tagger', tagText]]) {
     const counts = [];
     for (const n of [100_000, 200_000, 400_000]) {
-      const benign = charsClassified(() => parse(latin1(text('1700000000', `${'9'.repeat(n - 10)}m\n`))));
-      assert.equal(benign.value.ok, true, 'benign object parses');
-      // the counter is live: the 10 digits of a benign time are each classified
-      assert.ok(benign.tests >= 10, `${parse.name} benign n=${n}: ${benign.tests} characters classified`);
-      const hostile = charsClassified(() => parse(latin1(text('9'.repeat(n)))));
+      const benign = charsClassified(text('1700000000', `${'9'.repeat(n - 10)}m\n`), AT[kind], kind, role);
+      assert.equal(benign.value.ok, true, 'benign ident parses');
+      // the counter is live, by hand: 1 for the first digit, 11 for the 10-digit run (its 10 digits and the space that
+      // ends it), 4 for the time zone digits
+      assert.equal(benign.tests, 1 + 11 + 4, `${kind} benign n=${n}: characters classified`);
+      const hostile = charsClassified(text('9'.repeat(n)), AT[kind], kind, role);
       assert.equal(hostile.value.ok, false);
       assert.equal(hostile.value.error.msgId, 'badDateOverflow');
-      // the hostile object is refused at its first ident: it can never need more than the benign one, which reads
-      // every ident to the end, plus the 10 further digits (20 against 10) that decide the overflow
-      assert.ok(hostile.tests <= benign.tests + 10,
-        `${parse.name} n=${n}: ${hostile.tests} characters classified for the hostile object, ${benign.tests} for the same-size benign one`);
+      // by hand from git's rule: 1 for the first digit, then the run is read to its 20th digit and no further
+      assert.equal(hostile.tests, 1 + 20, `${kind} n=${n}: characters classified for the hostile ident`);
       counts.push(hostile.tests);
     }
-    assert.deepEqual(counts, [counts[0], counts[0], counts[0]], `${parse.name}: the same work at 100k, 200k and 400k digits`);
+    assert.deepEqual(counts, [counts[0], counts[0], counts[0]], `${kind}: the same work at 100k, 200k and 400k digits`);
+  }
+});
+
+// parseCommit and parseTag still refuse the hostile object (the whole-object verdict, independent of the counter)
+test('parseCommit and parseTag refuse a huge timestamp as badDateOverflow', () => {
+  for (const [parse, text] of [[parseCommit, commitText], [parseTag, tagText]]) {
+    const r = parse(latin1(text('9'.repeat(100_000))));
+    assert.equal(r.ok, false);
+    assert.equal(r.error.msgId, 'badDateOverflow');
   }
 });
 
