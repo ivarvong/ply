@@ -40,7 +40,7 @@ test('the refusal texts servers really send are refusals at 400 and nothing else
 
 test('isFilterRefusal classifies every message of up to 4 tokens exactly as main\'s regex did', () => {
   const tokens = ['filter ', 'FiLtEr ', ' not supported', ' NOT Allowed', ' not', ' ', 'x', '\n', '\r', ' ', ' ', '\0',
-    'unsupported git fetch filter', 'only blob:none is supported', 'İ', 'K', 'filte'];
+    'unsupported git fetch filter', 'Unsupported Git fetch filter', 'only blob:none is supported', 'ONLY blob:None is supported', 'İ', 'K', 'filte'];
   let checked = 0;
   const walk = (text, left) => {
     assert.equal(isFilterRefusal(400, text), OLD_FILTER.test(text), JSON.stringify(text));
@@ -48,7 +48,7 @@ test('isFilterRefusal classifies every message of up to 4 tokens exactly as main
     if (left > 0) for (const t of tokens) walk(text + t, left - 1);
   };
   walk('', 4);
-  assert.ok(checked > 83000);
+  assert.ok(checked > 137000); // 1 + 19 + 19^2 + 19^3 + 19^4 = 137,561
 });
 
 // readConfig as main had it, the config-line regex the only change.
