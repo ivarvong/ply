@@ -1,24 +1,52 @@
-// Absence ratchet. Outside src/absent.ts, counts of the platform missing value, optional members and
-// parameters (`?:`), optional chaining (`?.`), and nullish coalescing (`??`) must match
-// scripts/absence-baseline.json exactly. A rise fails. A drop fails until this change lowers the baseline,
-// so the count only moves down on purpose.
+// Absence ratchet. Outside src/absent.ts, counts of the platform missing value (the `undefined` identifier or type
+// keyword, `void <literal>`), optional members and parameters (`a?: T`, `m?(): T`, a mapped `?:`, an optional tuple
+// member), optional chaining (`?.`), and nullish coalescing (`??`, `??=`) must match scripts/absence-baseline.json
+// exactly. A rise fails. A drop fails until this change lowers the baseline, so the count only moves down on purpose.
+//
+// It counts syntax, not text: each file is parsed (@babel/parser with its typescript plugin, the parser scripts/decision-points.mjs uses) and the nodes are counted, so `(?:` in a
+// regex literal, `??` in a string or template text, and `undefined` in a comment are nothing, and `a? : T` or `void 0`
+// are what they are however they are spaced. (The textual count once failed a regex's non-capturing group and the
+// "fix" loosened a wire parser; a gate must not change parser behaviour for no reason.)
 //
 //   node scripts/absence-ratchet.mjs           compare, exit 1 on any difference
 //   node scripts/absence-ratchet.mjs --write   rewrite the baseline when the count fell (a rise is refused)
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
 
 export const BOUNDARY = 'src/absent.ts';
 const BASELINE_PATH = 'scripts/absence-baseline.json';
 const KEYS = ['undefined', 'optional', 'chain', 'coalesce'];
 
-const tally = text => ({
-  undefined: (text.match(/\bundefined\b/g) ?? []).length,
-  optional: (text.match(/\?:/g) ?? []).length,
-  chain: (text.match(/\?\./g) ?? []).length,
-  coalesce: (text.match(/\?\?/g) ?? []).length,
-});
+const { parse } = createRequire(import.meta.url)('@babel/parser');
+const LITERALS = new Set(['NumericLiteral', 'BigIntLiteral', 'StringLiteral', 'NullLiteral', 'BooleanLiteral']);
+const CHAIN = new Set(['OptionalMemberExpression', 'OptionalCallExpression', 'MemberExpression', 'CallExpression']);
+const NOT_SYNTAX = new Set(['loc', 'leadingComments', 'trailingComments', 'innerComments', 'comments', 'tokens', 'errors', 'extra']);
+// One count per syntax node. Exported for the test: (file name, source text) -> counts. A file that does not parse
+// throws: it is never counted as empty.
+export function tally(file, text) {
+  const counts = { undefined: 0, optional: 0, chain: 0, coalesce: 0 };
+  const visit = node => {
+    const t = node.type;
+    // the missing value: the identifier (an expression, a shorthand member, a binding), the type keyword, `void 0`
+    if (t === 'TSUndefinedKeyword' || (t === 'Identifier' && node.name === 'undefined')) counts.undefined += 1;
+    else if (t === 'UnaryExpression' && node.operator === 'void' && LITERALS.has(node.argument.type)) counts.undefined += 1;
+    // `?.`: the link that carries the token (the rest of the chain has optional: false)
+    if (CHAIN.has(t)) { if (node.optional === true) counts.chain += 1; }
+    // an optional member, method, parameter, mapped member (`?:` or `+?:`; `-?:` removes optionality) or tuple member
+    else if (t === 'TSOptionalType' || node.optional === true || node.optional === '+') counts.optional += 1;
+    if ((t === 'LogicalExpression' && node.operator === '??') || (t === 'AssignmentExpression' && node.operator === '??=')) counts.coalesce += 1;
+    for (const key of Object.keys(node)) {
+      if (NOT_SYNTAX.has(key)) continue;
+      const child = node[key];
+      if (Array.isArray(child)) { for (const c of child) if (c !== null && typeof c === 'object' && typeof c.type === 'string') visit(c); }
+      else if (child !== null && typeof child === 'object' && typeof child.type === 'string') visit(child);
+    }
+  };
+  visit(parse(text, { sourceType: 'module', errorRecovery: false, plugins: file.endsWith('.ts') ? ['typescript'] : [] }).program);
+  return counts;
+}
 
 const walk = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
   const path = join(dir, entry.name).split('\\').join('/');
@@ -31,7 +59,7 @@ export function countTree() {
   const files = [];
   for (const file of walk('src')) {
     if (file === BOUNDARY) continue;
-    const counts = tally(readFileSync(file, 'utf8'));
+    const counts = tally(file, readFileSync(file, 'utf8'));
     const n = KEYS.reduce((sum, key) => sum + counts[key], 0);
     if (n) files.push({ file, ...counts, n });
     for (const key of KEYS) totals[key] += counts[key];

@@ -14,6 +14,8 @@ const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.start
 const N = parseInt(args.n ?? '60', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10);
 const { root, cleanup } = tmpRoot();
 const cov = new Map(), fails = [];
+let ran = 0, thinJudged = 0, fullJudged = 0, basesJudged = 0;
+console.log(`packs: seed ${SEED}, n ${N}`);
 try {
   for (let i = 0; i < N; i++) {
     const seed = (SEED * 7919 + i * 104729) >>> 0, rng = new Rng(seed);
@@ -37,8 +39,12 @@ try {
     let parsed, r;
     try {
       parsed = unwrap(parsePack(pack));
-      const external = oid => (truth.has(oid) ? { type: { blob: 3, tree: 2, commit: 1, tag: 4 }[truth.get(oid).type], data: new Uint8Array(gitBuf(work, ['cat-file', truth.get(oid).type, oid])) } : undefined);
+      const asked = new Map(); // every oid ply looked up outside the pack, with how often
+      const external = oid => (asked.set(oid, (asked.get(oid) ?? 0) + 1), truth.has(oid) ? { type: { blob: 3, tree: 2, commit: 1, tag: 4 }[truth.get(oid).type], data: new Uint8Array(gitBuf(work, ['cat-file', truth.get(oid).type, oid])) } : undefined);
       r = unwrap(resolvePack(parsed, external));
+      // the pack's own entry count (pack-format: a big-endian uint32 at bytes 8..11), read here, not by ply
+      const header = Buffer.from(pack.buffer, pack.byteOffset, 12).readUInt32BE(8);
+      if (r.objects.size !== header) problems.push(`resolved ${r.objects.size} objects, the pack header says ${header}`);
       for (const [oid, o] of r.objects) {
         const t = truth.get(oid);
         if (!t) { problems.push(`unknown object ${oid}`); break; }
@@ -51,27 +57,38 @@ try {
       if (!opts.ofs && parsed.stats.ofsDelta) problems.push('ofs delta without --delta-base-offset');
       if (!opts.thin && r.stats.externalBases) problems.push('external base in non-thin pack');
       if (opts.depth && r.stats.maxChain > opts.depth) problems.push(`chain ${r.stats.maxChain} > depth ${opts.depth}`);
-      // verify-pack: offsets and chain depths
-      const pdir = join(root, `vp${i}`); mkdirSync(pdir); writeFileSync(join(pdir, 'p.pack'), pack);
-      if (!opts.thin) {
-        git(work, ['index-pack', join(pdir, 'p.pack')]);
-        for (const l of git(work, ['verify-pack', '-v', join(pdir, 'p.pack')]).split('\n').filter(l => /^[0-9a-f]{40} (commit|tree|blob|tag)/.test(l))) {
-          const [oid, , , , offset, chain] = l.trim().split(/\s+/);
-          const o = r.objects.get(oid);
-          if (!o || o.offset !== +offset || o.chain !== (chain ? +chain : 0)) { problems.push(`verify-pack offset/chain ${oid.slice(0, 8)}`); break; }
-        }
-      } else {
-        // thin: index-pack --fix-thin must accept it and produce the same object set
-        const out = gitBuf(work, ['index-pack', '--fix-thin', '--stdin', join(pdir, 'fixed.pack')], pack).toString();
-        void out;
+      // git's own listing of this pack, not ply's: offsets, chain depths and the exact object set. A thin pack is first
+      // completed by `index-pack --fix-thin`, which appends each base the pack lacks after the pack's own entries and
+      // moves none of them, so an entry at or past the original trailer (pack.length - 20) is an appended base and
+      // every entry before it is an object of the pack as sent. A non-thin pack has nothing appended.
+      const pdir = join(root, `vp${i}`); mkdirSync(pdir);
+      const listed = join(pdir, opts.thin ? 'fixed.pack' : 'p.pack');
+      if (opts.thin) gitBuf(work, ['index-pack', '--fix-thin', '--stdin', listed], pack);
+      else { writeFileSync(listed, pack); git(work, ['index-pack', listed]); }
+      const own = new Map(), appended = new Set();
+      for (const l of git(work, ['verify-pack', '-v', listed]).split('\n').filter(l => /^[0-9a-f]{40} (commit|tree|blob|tag)/.test(l))) {
+        const [oid, , , , offset, chain] = l.trim().split(/\s+/);
+        if (+offset < pack.length - 20) own.set(oid, { offset: +offset, chain: chain ? +chain : 0 }); else appended.add(oid);
       }
+      for (const [oid, g] of own) {
+        const o = r.objects.get(oid);
+        if (!o || o.offset !== g.offset || o.chain !== g.chain) { problems.push(`verify-pack offset/chain ${oid.slice(0, 8)}: git ${g.offset}/${g.chain}, ply ${o ? `${o.offset}/${o.chain}` : 'no such object'}`); break; }
+      }
+      for (const oid of r.objects.keys()) if (!own.has(oid)) { problems.push(`object ${oid} is not an entry of the pack in git's listing${appended.has(oid) ? ' (it is a base git appended)' : ''}`); break; }
+      // the bases: ply must have asked for exactly the ones git had to append
+      for (const oid of appended) if (!asked.has(oid)) { problems.push(`git appended base ${oid}, ply never asked for it`); break; }
+      for (const oid of asked.keys()) if (!appended.has(oid)) { problems.push(`ply asked for base ${oid}, git did not need it`); break; }
+      if (!opts.thin && appended.size) problems.push('git appended a base to a non-thin pack');
+      if (opts.thin) thinJudged++; else fullJudged++;
+      basesJudged += appended.size;
     } catch (e) { problems.push(`ERROR ${e.code ?? ''} ${e.message.slice(0, 120)}`); }
     const buckets = [`window.${opts.window}`, `depth.${opts.depth}`, `comp.${opts.compression}`, `ofs.${opts.ofs}`, `thin.${opts.thin}`, `sparse.${opts.sparse}`, `reuseDelta.${opts.reuseDelta}`, `reuseObject.${opts.reuseObject}`, `bigFile.${opts.bigFile}`, `objects.${parsed ? 2 ** Math.floor(Math.log2(parsed.stats.count)) : 'err'}`, `chain.${r ? Math.min(r.stats.maxChain, 9) : 'err'}`, `stored.${parsed?.stats.inflate.stored > 0}`, `ref_delta.${parsed?.stats.refDelta > 0}`, `ofs_delta.${parsed?.stats.ofsDelta > 0}`];
     for (const b of buckets) cov.set(b, (cov.get(b) ?? 0) + 1);
     process.stdout.write(`${problems.length ? 'FAIL' : 'ok  '} #${String(i).padStart(2)} seed=${seed} objs=${parsed?.stats.count ?? '-'} chain=${r?.stats.maxChain ?? '-'} ${JSON.stringify(opts)}\n`);
+    ran++;
     if (problems.length) { fails.push(seed); console.log('     ' + problems.join('\n     ')); }
     rmSync(work, { recursive: true, force: true });
   }
 } finally { cleanup(); }
-console.log(`\n${N} packs, ${fails.length} failures. Coverage:\n` + [...cov.entries()].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0])).map(([k, v]) => `${String(v).padStart(4)} ${k}`).join('\n'));
+console.log(`\n${ran} packs (seed ${SEED}), ${fails.length} failures${fails.length ? ` (case seeds ${fails.join(', ')})` : ''}; object set, offsets and chains equal to git verify-pack: ${fullJudged} whole, ${thinJudged} thin after index-pack --fix-thin (${basesJudged} appended bases). Coverage:\n` + [...cov.entries()].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0])).map(([k, v]) => `${String(v).padStart(4)} ${k}`).join('\n'));
 process.exit(fails.length ? 1 : 0);

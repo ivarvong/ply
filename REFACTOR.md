@@ -122,7 +122,10 @@ tagged unions.
 - `fail` from the package is `Err(plyError(…))`; `plyError` builds the error value. `thrown`/`orThrow` are gone.
 - A value a caller-supplied transport raises that carries a ply code but is not an `Error` comes back as the Err,
   unchanged (it used to be rethrown); it is never mistaken for ply's own `cas_conflict` (no retry) or an unborn HEAD.
-- A value the caller's own callback throws (a signer, a `fetchImpl`) still propagates as thrown.
+- A value the caller's own callback throws inside an operation comes back as an Err, never as a throw: a signer or a
+  `pushDir` filter is `bad_request` naming it in `what` with the thrown value as `cause`; a `fetchImpl` failure is the
+  transport's coded Err; any other foreign throw is `bad_request` (`what: 'callback'`), or `ambiguous` once a push
+  request was handed to the transport. Telemetry callbacks (exporter, `onEnd`) never change an outcome.
 - The user agent and the otel scope version are `ply/0.2.0` / `0.2.0`.
 
 ## Not carried forward

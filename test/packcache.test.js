@@ -1012,6 +1012,29 @@ test('cachingFetch verifyBeforeStore (#270): an answer whose pack has a valid tr
   assert.deepEqual([right.stats.verifyOk, right.stats.putOk, right.stats.verifyFailed, cache.entries.size], [1, 1, 0, 1], right.stats.verifyError);
 });
 
+test('cachingFetch verifyBeforeStore: a put that throws after verification is putFailed 1, and the caller\'s fetch is unaffected', async () => {
+  const content = te.encode('hi\n');
+  const answer = packAnswer(handPack(content));
+  const held = createHash('sha1').update(concat([te.encode('blob 3\0'), content])).digest('hex');
+  const body = fetchBody({ wants: [held] });
+  // the oracle that this answer passes verification: verifyFetchAnswer itself, before any cachingFetch
+  assert.equal(verifyFetchAnswer(unwrap(parseUploadPackRequest(body)), answer).ok, true);
+  for (const [how, put] of [['throws', () => { throw thrown; }], ['rejects', async () => { await null; throw thrown; }]]) {
+    const pending = []; let calls = 0;
+    const cache = { ...memoryCache(), put: (...a) => { calls++; return put(...a); } };
+    const f = cachingFetch(async () => new Response(answer.slice(), { status: 200, headers: RESULT }), cache, { verifyBeforeStore: true, waitUntil: p => { pending.push(p); } });
+    // the fetch resolves, and the caller reads every byte, before the put is ever called
+    const got = await rawCall(f, body);
+    assert.deepEqual(got, answer, how);
+    await Promise.all(pending.splice(0));
+    assert.equal(calls, 1, `${how}: the put was called once, after verification`);
+    assert.deepEqual([f.stats.miss, f.stats.verifyOk, f.stats.verifyFailed, f.stats.putOk, f.stats.putFailed], [1, 1, 0, 0, 1], how);
+    // README cachingFetch: a put that throws is the 'cache.put' Err's message (naming the thrown value); one that rejects, its own
+    assert.equal(f.stats.putError, how === 'throws' ? `caller-supplied cache.put threw: ${thrown.message}` : thrown.message, how);
+  }
+});
+const thrown = new Error('boom after verification');
+
 test('cachingFetch: a NAK-only answer to a request without done is refused by the store gate, as verifyFetchAnswer refuses it (#270)', async () => {
   // git's own bytes for a round that ends on its acknowledgments (asserted against git upload-pack above)
   const nak = te.encode('0014acknowledgments\n0008NAK\n0000');

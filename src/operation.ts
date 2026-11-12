@@ -11,14 +11,14 @@
 import type { ErrorOf, Extra, PlyError } from './errors.js';
 import type { CheckedLimits, LimitsInput } from './limits.js';
 import type { Span } from './otel.js';
-import { Tracer } from './otel.js';
-import type { Attrs, Quirks, Transport, TransportInput } from './transport.js';
+import { Tracer, guardTelemetry } from './otel.js';
+import type { Attrs, Frame, Hints, Quirks, RequestBody, Transport, TransportInput } from './transport.js';
 import type { FetchLike, HttpAuth } from './http.js';
 import { createTransport, redactUrl } from './http.js';
-import { transportFrom, withParent } from './transport.js';
+import { plyMade, transportFrom, withParent } from './transport.js';
 import { lsRefs } from './lsrefs.js';
 import type { LsRefsResult } from './lsrefs.js';
-import { fail, isPlyError } from './errors.js';
+import { callbackFailed, describeThrown, fail, isPlyError, plyError } from './errors.js';
 import { DEFAULT_LIMITS, parseLimits } from './limits.js';
 import type { Input } from './absent.js';
 import { field, mapGet, withDefaults } from './absent.js';
@@ -46,6 +46,17 @@ export type OperationOpts = Input<OperationConfig & { readonly tracer: Tracer }>
 const operationDefaults = (): { -readonly [K in keyof OperationConfig]: OperationConfig[K] } => ({
   auth: null, parent: null, fetchImpl: null, limits: DEFAULT_LIMITS, signal: null, quirks: null, transport: null, attrs: {}, link: null, onFinish: null,
 });
+// The code an `ambiguous` replaced, when the thrown value had one (no key at all when it had none).
+const originalCode = (e: unknown): Pick<Extra, 'original'> => { const c = thrownCode(e); return c.tag === 'some' ? { original: c.value } : {}; };
+// What operation()'s catch needs of a thrown value, read without throwing: is it a PlyError, and the code it carries.
+// A value that cannot be read (a revoked Proxy, a `code` getter that throws) is not a PlyError and has no code.
+const readThrown = (e: unknown): { readonly known: PlyError | null; readonly original: Pick<Extra, 'original'> } => {
+  try { return { known: isPlyError(e) ? e : null, original: originalCode(e) }; } catch { return { known: null, original: {} }; }
+};
+// The service whose request only reads. The protocol has one other, the push service, and it is named only in the push
+// modules (a read-only bundle carries no push string: test/bundle.test.js). Once a request for any service but this
+// one is handed to a transport, a failure is no longer definite.
+const UPLOAD_PACK = 'git-upload-pack';
 // outcome(kind, result) or outcome(kind, result, attrs): the attributes stamped on the root beside the outcome; ok(result).
 export type Outcome = <R>(kind: string, result: R, ...extra: [] | [Attrs]) => Ok<R>;
 export type OperationBody<R> = (ctx: { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: CheckedLimits }) => Promise<Result<R, PlyError>>;
@@ -62,7 +73,10 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
   const name = `git.${op}`;
   const root = tracer.start(name, { parent, attrs: { [`${name}.url`]: transport === null ? redactUrl(url) : transport.url, ...attrs } });
   if (link !== null) root.link(link.span, { 'ply.link': link.kind });
-  const finish = (extra: Attrs): Span => { if (onFinish !== null) root.set(onFinish()); root.set(extra); return root; };
+  // onFinish only adds attributes: what it throws is telemetry's failure (reported to the tracer's onTelemetryError when
+  // it has one), never the operation's. The guard is ply's function, not a method of `tracer`: the check above
+  // guarantees start() and nothing else (a start/span wrapper, a Tracer from another copy of ply).
+  const finish = (extra: Attrs): Span => { if (onFinish !== null) guardTelemetry(tracer, 'onFinish', name, () => { root.set(onFinish()); }); root.set(extra); return root; };
   const outcome: Outcome = (kind, result, ...extra) => { const [given = {}] = extra; finish({ ...given, [`${name}.outcome`]: kind }).end(); return ok(result); };
   // An Err leaves through here: the outcome and error.type are its code (read before root.error scrubs it), the error is
   // recorded on the root, and it carries the root span for a caller's retry link.
@@ -72,6 +86,7 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
     return err(e);
   };
   let r: Result<R, PlyError>;
+  let pushHandedOver = false;
   try {
     // Inside the try: a transport that cannot be built (a bad URL, an unusable credential) ends the root with the
     // error recorded, like any other failure, instead of leaving it open and missing from the trace.
@@ -80,26 +95,32 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
     if (!checked.ok) return failed(checked.error);
     const made: Result<Transport, PlyError> = transport === null ? createTransport(url, { auth, tracer, parent: root, fetchImpl: fetchImpl === null ? globalThis.fetch : fetchImpl, limits: checked.value, signal, ...(quirks === null ? {} : { quirks }) }) : map(transportFrom(transport), given => withParent(given, root));
     if (!made.ok) return failed(made.error);
-    const t = made.value;
+    // The one fact the catch below needs: was a push request handed to a transport? From that call on the request may
+    // be on the wire (a caller's transport may send before it yields a frame), so a throw is no longer a definite failure.
+    const given = made.value;
+    // frames() is called with the receiver it was called on, not `given`: ply hands each exchange a further view
+    // (withParent(t, span); merge lowers `limits` the same way), and a caller's frames() reads `this.parent` from it.
+    // plyMade: this frames() is ply's own over an already guarded `given`, so an operation handed `t` guards nothing again.
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.create returns any; a view of `given` (like withParent) whose frames() records the hand-over
+    const t = plyMade(Object.create(given, { frames: { enumerable: true, value: function frames(this: Transport, service: string, sent: RequestBody, span: Span, hints: Hints): AsyncIterable<Frame> {
+      if (service !== UPLOAD_PACK) pushHandedOver = true;
+      return given.frames.call(this, service, sent, span, hints);
+    } } }) as Transport);
     // The root and every span under it redact the credential; root.error(e) below scrubs the error the caller gets.
     if (t.scrub !== null) root.scrub = t.scrub;
     r = await body({ t, root, outcome, limits: checked.value });
   } catch (e) {
     // Every ply failure is the body's Err. What still arrives as a throw is not ply's: the caller's own callback (a
-    // signer, a fetchImpl, a transport) raised it. A PlyError raised that way is still that body's Err; anything else
-    // is recorded on the root and rethrown unchanged, so the caller gets back exactly what its own code threw.
-    if (isPlyError(e)) return failed(e);
-    const code = thrownCode(e);
-    const type: [] | [unknown] = code.tag === 'some' ? [code.value] : [];
-    finish({ [`${name}.outcome`]: getOrElse<unknown>(code, 'error') }).error(e, ...type).end();
-    if (typeof e === 'object' && e !== null) Object.assign(e, { span: root });
-    throw e;
+    // transport, a pack cache, any function it passed) raised it. operation() returns a Result all the same (README:
+    // never a throw), with one honest outcome. Once a push request was handed to a transport the ref may have moved:
+    // `ambiguous` (retry: read the ref back), carrying the thrown value as `cause`. Before that nothing was pushed: a
+    // thrown PlyError is that Err, and anything else is bad_request naming 'callback' with the thrown value as `cause`.
+    const { known, original } = readThrown(e);
+    if (pushHandedOver && !(known !== null && known.code === 'ambiguous')) return failed(plyError('ambiguous', `${name}: a caller-supplied callback threw after the push request was handed to the transport, push outcome unknown: ${describeThrown(e)}`, { what: 'callback', cause: e, ...original }));
+    return failed(known === null ? callbackFailed('callback', e) : known);
   }
   return r.ok ? r : failed(r.error);
 }
-
-// The code an `ambiguous` replaced, when the thrown value had one (no key at all when it had none).
-const originalCode = (e: unknown): Pick<Extra, 'original'> => { const c = thrownCode(e); return c.tag === 'some' ? { original: c.value } : {}; };
 
 // After an acknowledged push: read `ref` back and require `expected`. A transport error here, or any other value, is
 // 'ambiguous' — the push may have landed. Records `<prefix>.verify.ref` on `root` (empty when the ref is absent).
