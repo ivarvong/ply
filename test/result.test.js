@@ -124,7 +124,7 @@ test('limits: checkLimit/parseLimits accept exactly the finite non-negative numb
     assert.throws(() => unwrap(checkLimit(v, 'k')), x => x instanceof Error && x.code === 'bad_request' && x.what === 'k' && Object.is(x.got, v));
   }
   // parseLimits (#156): a key given is checked as checkLimit checks it; a key left out (or the missing value) is the
-  // default; null is a value, refused (but maxResolveWork: null is left out: derived); keys it does not read are
+  // default; null is a value, refused, on every key (#271); keys it does not read are
   // ignored; the record is total, frozen and checked.
   assert.equal(unwrap(parseLimits(DEFAULT_LIMITS)), DEFAULT_LIMITS, 'a checked record is returned as it is');
   assert.deepEqual({ ...unwrap(parseLimits({})) }, { ...DEFAULT_LIMITS });
@@ -135,15 +135,24 @@ test('limits: checkLimit/parseLimits accept exactly the finite non-negative numb
   assert.deepEqual(shape(parseLimits({ maxRefs: null })), bad('maxRefs', null));
   for (const key of Object.keys(DEFAULT_LIMITS)) {
     for (const v of [-1, Number.NaN, Infinity, '5', null]) {
-      // the one key where null is not refused: maxResolveWork: null is derived, asserted below
-      if (key === 'maxResolveWork' && v === null) continue;
       assert.deepEqual(shape(parseLimits({ [key]: v })), bad(key, v), key);
     }
-    assert.equal(unwrap(parseLimits({ [key]: 0 }))[key], 0, key);
+    // 0 on every key at once: a record with maxInflatedTotal 0 may set any key to 0 (maxResolveWork >= maxInflatedTotal)
+    assert.equal(unwrap(parseLimits({ maxInflatedTotal: 0, [key]: 0 }))[key], 0, key);
   }
-  // by hand: 8 x maxInflatedTotal (256 MiB by default, 1 MiB given) = 2,147,483,648 and 8,388,608
-  assert.equal(unwrap(parseLimits({ maxResolveWork: null })).maxResolveWork, 2_147_483_648);
-  assert.equal(unwrap(parseLimits({ maxInflatedTotal: 1_048_576, maxResolveWork: null })).maxResolveWork, 8_388_608);
+  // left out, maxResolveWork is derived: by hand, 8 x maxInflatedTotal (256 MiB by default, 1 MiB given) = 2,147,483,648 and 8,388,608
+  assert.equal(unwrap(parseLimits({})).maxResolveWork, 2_147_483_648);
+  assert.equal(unwrap(parseLimits({ maxInflatedTotal: 1_048_576 })).maxResolveWork, 8_388_608);
+  // the refusal names maxResolveWork and quotes the bound it fell under (the README Limits contract)
+  const below = (got, total) => ({ ok: false, error: { code: 'bad_request', message: `limits.maxResolveWork must be at least limits.maxInflatedTotal (${total})`, what: 'maxResolveWork', got } });
+  // #271: maxResolveWork below the record's own maxInflatedTotal bounds nothing the resolver would keep; refused, not raised
+  for (const x of [1_048_576, 268_435_456]) {
+    assert.deepEqual(shape(parseLimits({ maxInflatedTotal: x, maxResolveWork: x - 1 })), below(x - 1, x));
+    assert.equal(unwrap(parseLimits({ maxInflatedTotal: x, maxResolveWork: x })).maxResolveWork, x);
+  }
+  // against the default maxInflatedTotal (256 MiB) when the record leaves it out, and against a spread preset's
+  assert.deepEqual(shape(parseLimits({ maxResolveWork: 1 })), below(1, 268_435_456));
+  assert.deepEqual(shape(parseLimits({ ...WORKER_LIMITS, maxInflatedTotal: 1_073_741_824 })), below(536_870_912, 1_073_741_824));
   // the first bad key in DEFAULT_LIMITS order is the refusal, whatever order the caller wrote
   const keys = Object.keys(DEFAULT_LIMITS);
   assert.equal(parseLimits({ [keys.at(-1)]: -1, [keys[0]]: -1 }).error.what, keys[0]);
