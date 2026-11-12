@@ -572,7 +572,7 @@ const isFilterPhrase = (text: string): boolean => {
   if (FILTER_PHRASE.test(text)) return true;
   let line = '';
   for (let i = 0; i < text.length; i++) {
-    const c = text.codePointAt(i) ?? 0;
+    const c = Number(text.codePointAt(i)); // i < length: always a number
     if (isLineEnd(c)) {
       if (lineRefuses(line)) return true;
       line = '';
