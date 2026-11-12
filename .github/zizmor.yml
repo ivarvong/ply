@@ -1,0 +1,9 @@
+# zizmor configuration (https://docs.zizmor.sh/configuration/).
+rules:
+  dangerous-triggers:
+    ignore:
+      # notify-ply-web.yml's workflow_run trigger, reviewed: nothing from the triggering run is checked out or
+      # executed (no checkout step, no artifact download), permissions are empty, the job runs only for a successful
+      # push run in this repository to main, and the one value used from the event, head_sha, is checked as 40-hex
+      # before use. Kept here rather than inline because test/workflows.test.js pins the trigger block's text.
+      - notify-ply-web.yml:7

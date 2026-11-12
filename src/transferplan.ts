@@ -95,11 +95,16 @@ export type GeneratedType = typeof TYPE.TREE | typeof TYPE.COMMIT;
 export type GeneratedObject = { readonly type: GeneratedType; readonly data: Uint8Array; readonly oid: Oid };
 
 const outOfRange = (i: number): Result<never, PlyError> => fail('bad_request', `transfer: entry ${i} is not in the resolved index`, { what: 'entry' });
-// The resolved id and type of entry `i`, read through the index's checked accessors.
+// The resolved id and type of entry `i`, read through the index's checked accessors. The index is the caller's object:
+// what its accessor throws is the cause of a refusal, never an exception out of a plan, a step or a run.
 function entryAt(r: ResolvedIndex, i: number): Result<{ readonly oid: Oid; readonly type: ScannedType }, PlyError> {
-  const oid = r.oid(i);
-  const type = r.type(i);
-  return oid.tag === 'some' && type.tag === 'some' ? ok({ oid: oid.value, type: type.value }) : outOfRange(i);
+  try {
+    const oid = r.oid(i);
+    const type = r.type(i);
+    return oid.tag === 'some' && type.tag === 'some' ? ok({ oid: oid.value, type: type.value }) : outOfRange(i);
+  } catch (cause) {
+    return fail('bad_request', `transfer: the resolved index threw reading entry ${i}`, { what: 'entry', cause });
+  }
 }
 
 // The temp tree for a batch: its objects by id, fanned out by the id's first two hex digits. The root tree is last.

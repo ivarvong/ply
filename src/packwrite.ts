@@ -156,7 +156,8 @@ export function streamPack(m: MeasuredPack, prefix: Uint8Array): StreamedPack {
 // The last chunk is released only once the source has ended and its length has passed, and a chunk that would go over
 // `length` or `maxPack` is never released, so a refused pack never reaches the server whole, whatever the runtime does
 // with an errored request body (undici aborts the request; workerd ends it as if complete, measured: streamPack above).
-// `failure` is null until the pack is refused or the source fails; `release` cancels a source the request did not finish.
+// `failure` is null until the pack is refused or the source fails; `release` cancels a source the request did not finish
+// (asked once, not waited for).
 // `pulled` is whether the transport ever asked the body for a byte. Until it has, nothing of this push left the
 // process (the first pull hands over the command list), and `giveBack` then returns the source as it came: unlocked,
 // unread and not cancelled (after a pull it does nothing). A body given back errors if it is pulled after all, so it
@@ -174,10 +175,14 @@ export function streamSource(source: ReadableStream<Uint8Array>, prefix: Uint8Ar
   let held: Uint8Array | null = null;
   let read = 0;
   let sent = 0;
+  // The source is the caller's: it is asked to cancel and never waited for, so a cancel() that never settles cannot hold
+  // the push past its outcome (its report, its abort, its timeout). A source that fails to cancel changes nothing.
+  // oxlint-disable-next-line eslint/require-await -- async for the callers that await it; nothing here waits
   const release = async (why: unknown = null): Promise<void> => {
     if (!open) return;
     open = false;
-    await reader.cancel(why).catch(() => null); // the pack is already abandoned: a source that fails to cancel changes nothing
+    // a cancel() that throws where it stands, or answers with something that is not a promise, changes nothing either
+    try { Promise.resolve(reader.cancel(why)).catch(() => null); } catch { /* the source's own failure to cancel: nothing waits on it */ }
   };
   const giveBack = (): void => {
     if (!open || started) return;
