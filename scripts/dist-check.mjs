@@ -1,5 +1,12 @@
-// The dist check: what a consumer of the built package gets. `npm run check:dist` (CI: "dist is what consumers
-// import"); test/dist-types.test.js runs the same compiles in the suite.
+// The dist check: what a consumer of the built package gets. `npm run check:dist` and the last step of `npm run check`
+// (CI: "dist is what consumers import"); test/dist-types.test.js runs the same compiles in the suite.
+//
+// dist is built into a scratch directory and never into this tree's dist/: a contributor's dist/ may be linked into
+// another project or hold a build under comparison, and a check must not rewrite it. `npm run build` is still what
+// writes dist/.
+//
+// Load: the build is installed as <scratch>/load/node_modules/ply and `import('ply')` runs there, through
+// package.json's exports map; it must export Tracer and RETRY.
 //
 // Types: dist is built once (never into the checkout's dist/), copied into one scratch consumer project per variant,
 // and a file importing every subpath export plus a file using the signer and pack-cache types with the consumer's own
@@ -68,6 +75,18 @@ export function buildConsumer() {
   return { dir, ply, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
+const LOAD = "const m = await import('ply'); if (!m.Tracer || !m.RETRY) { console.error('dist-check: the built ply does not export Tracer and RETRY'); process.exit(1); }";
+
+// Import the build the way a consumer does. Returns the exit status (0 when both exports are there).
+export function loadConsumer(consumer) {
+  const dir = join(consumer.dir, 'load');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(join(dir, 'node_modules'), { recursive: true });
+  cpSync(consumer.ply, join(dir, 'node_modules', 'ply'), { recursive: true });
+  // NODE_OPTIONS may carry a hook path relative to this tree; the load runs in the scratch directory.
+  return spawnSync(process.execPath, ['--input-type=module', '-e', LOAD], { cwd: dir, stdio: 'inherit', env: { ...process.env, NODE_OPTIONS: '' } }).status ?? 1;
+}
+
 // Compile one variant in its own consumer project: node_modules/ply plus the variant's type package and nothing else.
 // Returns { errors, provided }: errors are tsc's `error TS` lines (empty when it compiles), or the one line naming a
 // type package that is not installed; provided maps each type package to the version the compile ran against.
@@ -108,6 +127,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const consumer = buildConsumer();
   let failed = false;
   try {
+    const loaded = loadConsumer(consumer);
+    console.log(`dist-check load: ${loaded === 0 ? 'ok' : `failed (exit ${loaded})`}`);
+    if (loaded !== 0) failed = true;
     for (const variant of VARIANTS) {
       const { errors, provided } = compileVariant(consumer, variant);
       const against = Object.entries(provided).map(([name, version]) => ` (${name} ${version})`).join('');

@@ -30,6 +30,7 @@ jobs:
     outputs:
       seed: ${{ steps.seed.outputs.seed }}
       date: ${{ steps.seed.outputs.date }}
+      sha: ${{ steps.seed.outputs.sha }}
     steps:
       - id: seed
         env:
@@ -41,7 +42,14 @@ jobs:
           [[ "$seed" =~ ^[0-9]{1,9}$ ]] || { echo "::error::seed must be 1-9 digits, got '$seed'"; exit 1; }
           echo "seed=$seed" >> "$GITHUB_OUTPUT"
           echo "date=$date" >> "$GITHUB_OUTPUT"
-          echo "nightly seed $seed ($date)"
+          # One commit for the whole run. Every job checks out this sha, never `main`: the shard plan is a pure
+          # function of one commit's file list and test/durations.json, so shards that each resolved main on
+          # their own could run a file twice or not at all when main moved between their checkouts, and gate c
+          # would judge records from mixed commits. A re-run of failed jobs keeps this output, so it stays pinned.
+          sha=$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/main | cut -f1)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::could not resolve main to one commit, got '$sha'"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "nightly seed $seed ($date) at $sha"
 
   fuzz:
     name: fuzz ${{ matrix.fuzzer }} ${{ matrix.args }}
@@ -78,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: main
+          ref: ${{ needs.seed.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -102,6 +110,7 @@ jobs:
   # pinned fuzz lines, which is the rest of `npm test`.
   test-shard:
     name: npm test shard (${{ matrix.shard }})
+    needs: seed
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -118,7 +127,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: main
+          ref: ${{ needs.seed.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -146,7 +155,7 @@ jobs:
 
   test:
     name: npm test
-    needs: test-shard
+    needs: [seed, test-shard]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -169,7 +178,7 @@ jobs:
           fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: main
+          ref: ${{ needs.seed.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -203,6 +212,7 @@ jobs:
     # every ply path already runs every cut on each PR; this adds git index-pack --strict on every cut (~9,600 runs,
     # ~90 s), where the PR run judges field boundaries and every 8th offset (~1,400 runs)
     name: pack-cut (git oracle on every cut)
+    needs: seed
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -210,7 +220,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: main
+          ref: ${{ needs.seed.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -226,6 +236,7 @@ jobs:
 
   sweep:
     name: limit sweep (full)
+    needs: seed
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
@@ -238,7 +249,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: main
+          ref: ${{ needs.seed.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -268,13 +279,14 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SEED: ${{ needs.seed.outputs.seed }}
           DATE: ${{ needs.seed.outputs.date }}
+          SHA: ${{ needs.seed.outputs.sha }}
         run: |
           set -euo pipefail
           date="${DATE:-$(date -u +%Y-%m-%d)}"
           title="nightly fuzz failure $date"
           body=$(mktemp)
           {
-            echo "Nightly run $RUN_URL failed or timed out on main (seed \`${SEED:-unknown}\`)."
+            echo "Nightly run $RUN_URL failed or timed out on main at ${SHA:-unknown} (seed \`${SEED:-unknown}\`)."
             echo
             gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | "\(.id)\t\(.name)"' |
               while IFS=$'\t' read -r id name; do

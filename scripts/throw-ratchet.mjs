@@ -5,6 +5,8 @@
 //
 //   node scripts/throw-ratchet.mjs           compare, exit 1 on any difference
 //   node scripts/throw-ratchet.mjs --write   rewrite the baseline when the count fell (a rise is refused)
+// The baseline is written only under --write. A missing baseline is a failure, not a reason to write one: deleting
+// the file would otherwise accept any number of new throws with exit 0.
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -36,6 +38,10 @@ function main() {
   const { total, files } = countTree();
   const write = process.argv.includes('--write');
   const baseline = existsSync(BASELINE_PATH) ? JSON.parse(readFileSync(BASELINE_PATH, 'utf8')) : null;
+  if (baseline === null && !write) {
+    console.error(`throw-ratchet: no ${BASELINE_PATH} (src has ${total} throw statements); run with --write to create it`);
+    process.exit(1);
+  }
   if (baseline === null || write) {
     if (baseline !== null && total > baseline.throw) {
       console.error(`throw-ratchet: throw rose ${baseline.throw} -> ${total}; a throw may only be removed`);

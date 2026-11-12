@@ -93,6 +93,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepare": "tsc -p tsconfig.json",
+    "check": "npm run typecheck && npm run lint && vitest run test/space/registry.test.js && node scripts/dist-check.mjs",
     "check:dist": "node scripts/dist-check.mjs",
     "check:pack": "node scripts/pack-check.mjs",
     "typecheck": "tsc -p tsconfig.check.json && tsc -p tsconfig.isolated.json && node scripts/ts-ratchet.mjs && node scripts/absence-ratchet.mjs && node scripts/throw-ratchet.mjs",

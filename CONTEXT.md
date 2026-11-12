@@ -215,6 +215,24 @@ This session (2026-10-19 → 20):
 Requirements: Node ≥ 22, git ≥ 2.43 on PATH, OpenSSH `ssh-keygen` for the signing suites, `workerd` (npm,
 pinned) for the Workers suite (skipped if absent).
 
+Before every push, run the fast gate. It is what CI's `lint + fuzz` job and the registry test reject first:
+types and the ratchets, lint, the space registry (gate a, SPACES.md freshness), and the built `dist` importing
+the way consumers import it (`scripts/dist-check.mjs` builds into a temporary directory and imports `ply` from
+there; your `dist/` is not rewritten, `npm run build` is what writes it). It needs no network. There are no git hooks: running it is the contributor's step,
+and `notify-ply-web` tells ply-web about a commit only after `ci` passed for that commit on main.
+
+```sh
+npm run check             # typecheck + lint + registry test + dist check; run before every push
+```
+
+A ratchet baseline (`scripts/throw-baseline.json`, `scripts/absence-baseline.json`, `test/space/ratchet.json`,
+`test/durations.json`) moves the unsafe way only in a commit whose message has the line
+`Ratchet-Change: <file>: <reason>`. CI's `node scripts/ratchet-guard.mjs` compares each baseline with the base
+commit's and fails without that line; a squash merge must keep the line in its message, or main's own ci run fails.
+`npm run spaces -- --ratchet` only lowers `test/space/ratchet.json`. Adding a hole to it takes
+`npm run spaces -- --ratchet --init --reason "<why>"`, which prints that line; with no reason it exits 1, lists the
+holes it would add and writes nothing.
+
 ```sh
 npm ci
 npm test                  # 113 deterministic tests + 16 fuzz stages (≈29 min)
