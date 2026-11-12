@@ -13,7 +13,8 @@ import { TYPE } from '../src/objects.js';
 import { scanPackIndex } from '../src/packscanindex.js';
 import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
-import { DEFAULT_LIMITS, WORKER_LIMITS, withLimits, parseLimits } from '../src/limits.js';
+import { DEFAULT_LIMITS, WORKER_LIMITS, withLimits, withDerivedWork, parseLimits } from '../src/limits.js';
+import { unwrap } from './unwrap.js';
 import { RETAIN_BUDGET } from '../src/packstream.js';
 
 const MIB = 1 << 20;
@@ -91,22 +92,39 @@ test('the work ceiling follows the limits a caller gives: left out, it is 8 x th
   assert.equal(roomy.ok, true);
   assert.equal(roomy.value.stats.workMax, 64 * MIB);
   assertRefusedAt(await resolveBomb(pack, { ...partial, maxResolveWork: 6 * MIB }), 6 * MIB, MIB);
-  // given below the record's maxInflatedTotal (4 MiB), the bound is maxInflatedTotal: by hand, max(2 MiB, 4 MiB) = 4,194,304
-  assertRefusedAt(await resolveBomb(pack, { ...partial, maxResolveWork: 2 * MIB }), 4_194_304, MIB);
+  // #271: the ceiling is the parsed maxResolveWork, never raised. At the record's own maxInflatedTotal (4 MiB, the least
+  // it may be) the bomb is refused at 4,194,304; given below it (2 MiB) the record is bad_request before any read
+  for (const work of [4 * MIB, 6 * MIB, 64 * MIB]) {
+    const record = { ...partial, maxResolveWork: work };
+    const r = await resolveBomb(pack, record);
+    assert.equal(r.ok ? r.value.stats.workMax : r.error.max, unwrap(parseLimits(record)).maxResolveWork, `${work}`);
+  }
+  assertRefusedAt(await resolveBomb(pack, { ...partial, maxResolveWork: 4 * MIB }), 4_194_304, MIB);
+  const idx = await scanPackIndex(streamOf(pack), { limits: partial });
+  const under = await resolvePackRange(idx.value, rangeFromBytes(pack), { limits: { ...partial, maxResolveWork: 2 * MIB } });
+  assert.equal(under.ok, false);
+  assert.equal(under.error.code, 'bad_request');
+  assert.equal(under.error.what, 'maxResolveWork');
   assert.equal(DEFAULT_LIMITS.maxResolveWork, 2_147_483_648);
   assert.equal(WORKER_LIMITS.maxResolveWork, 536_870_912);
 });
 
-test('maxResolveWork: null is the derived value, the same as leaving it out', async () => {
+test('maxResolveWork: null is bad_request like every key (#271); derived is the key left out, or withDerivedWork on a spread preset', async () => {
   // by hand: 8 x 4 MiB = 33,554,432, whatever the record is spread from
   const partial = { maxInflatedTotal: 4 * MIB, maxDeltaResult: MIB, maxObjectSize: MIB };
   for (const record of [{ ...partial, maxResolveWork: null }, { ...WORKER_LIMITS, ...partial, maxResolveWork: null }, { ...DEFAULT_LIMITS, ...partial, maxResolveWork: null }]) {
     const parsed = parseLimits(record);
-    assert.equal(parsed.ok, true, parsed.ok ? '' : parsed.error.message);
-    assert.equal(parsed.value.maxResolveWork, 33_554_432);
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.error.code, 'bad_request');
+    assert.equal(parsed.error.what, 'maxResolveWork');
+    assert.equal(parsed.error.got, null);
   }
-  assert.equal(withLimits({ ...partial, maxResolveWork: null }).maxResolveWork, 33_554_432);
-  assertRefusedAt(await resolveBomb(bomb(40, 64 * 1024, MIB), { ...partial, maxResolveWork: null }), 33_554_432, MIB);
+  for (const record of [partial, withDerivedWork({ ...WORKER_LIMITS, ...partial }), withDerivedWork({ ...DEFAULT_LIMITS, ...partial })]) {
+    assert.equal(Object.hasOwn(record, 'maxResolveWork'), false);
+    assert.equal(unwrap(parseLimits(record)).maxResolveWork, 33_554_432);
+    assert.equal(withLimits(record).maxResolveWork, 33_554_432);
+  }
+  assertRefusedAt(await resolveBomb(bomb(40, 64 * 1024, MIB), withDerivedWork({ ...WORKER_LIMITS, ...partial })), 33_554_432, MIB);
 });
 
 test('withLimits(null) is the frozen defaults: null from an untyped caller is no overrides, it does not throw', () => {
@@ -200,8 +218,9 @@ test('a spread of WORKER_LIMITS with maxInflatedTotal raised to 1 GiB resolves a
     const sum = want.reduce((a, l) => a + Number(l.split(' ')[2]), 0);
     // the case needs objects summing past the preset's maxResolveWork (512 MiB) and under the raised maxInflatedTotal (1 GiB)
     assert.ok(sum > 536_870_912 && sum < 1_073_741_824, `history ${sum} bytes in a pack of ${pack.length}`);
-    // a consumer that never heard of maxResolveWork: the preset, with one key raised
-    const limits = { ...WORKER_LIMITS, maxInflatedTotal: 1024 * MIB };
+    // the preset with maxInflatedTotal raised past its maxResolveWork (512 MiB) is bad_request (#271): raise both
+    assert.equal(parseLimits({ ...WORKER_LIMITS, maxInflatedTotal: 1024 * MIB }).error.what, 'maxResolveWork');
+    const limits = { ...WORKER_LIMITS, maxInflatedTotal: 1024 * MIB, maxResolveWork: 1024 * MIB };
     const idx = await scanPackIndex(streamOf(pack), { limits });
     assert.equal(idx.ok, true, idx.ok ? '' : idx.error.message);
     const r = await resolvePackRange(idx.value, rangeFromBytes(pack), { limits });
@@ -209,7 +228,7 @@ test('a spread of WORKER_LIMITS with maxInflatedTotal raised to 1 GiB resolves a
     const nameOf = { [TYPE.COMMIT]: 'commit', [TYPE.TREE]: 'tree', [TYPE.BLOB]: 'blob', [TYPE.TAG]: 'tag' };
     const got = Array.from({ length: r.value.count }, (_, i) => `${r.value.oid(i).value} ${nameOf[r.value.type(i).value]} ${r.value.columns.size[i]}`);
     assert.deepEqual(got.toSorted(), want.toSorted());
-    // by hand: max(maxResolveWork 512 MiB, maxInflatedTotal 1 GiB) = 1,073,741,824, the bound main ec337c5 gave this record
+    // by hand: the maxResolveWork given, 1024 x 1,048,576 = 1,073,741,824
     assert.equal(r.value.stats.workMax, 1_073_741_824);
     assert.ok(r.value.stats.work > 536_870_912, `work ${r.value.stats.work} did not pass the preset's 512 MiB`);
     console.log(`spread history: pack ${pack.length} B, ${r.value.count} objects, sum of sizes ${sum}, work ${r.value.stats.work}`);

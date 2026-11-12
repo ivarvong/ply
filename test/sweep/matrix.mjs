@@ -342,11 +342,10 @@ function build() {
   // is made, before any request, whichever operation would read it: lsRefs reads only maxRefs and maxLsRefsBytes, and
   // every key's cell is still refused there (the lazy read refused only the key the operation reached). A key left out
   // is the default: every other cell passes only the keys it sets (cell.mjs passes the record as written).
-  // One null parses: maxResolveWork: null means derived (8 x the record's maxInflatedTotal), the same as leaving it out.
+  // null is refused on every key (#271): derived maxResolveWork is the key left out.
   for (const key of Object.keys(DEFAULT_LIMITS)) {
     for (const [name, value] of [['negative', -1], ['null', null]]) {
-      const expect = key === 'maxResolveWork' && value === null ? ok : refused('bad_request', { what: key });
-      add({ id: `parse.${key}.${name}`, param: key, op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: { [key]: value }, expect });
+      add({ id: `parse.${key}.${name}`, param: key, op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: { [key]: value }, expect: refused('bad_request', { what: key }) });
     }
   }
   add({ id: 'parse.none', param: 'maxRefs', op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: {}, expect: ok });

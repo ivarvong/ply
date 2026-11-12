@@ -4,7 +4,7 @@
 import { fail, ambiguousAfterPush, remoteText, REMOTE_TEXT_MAX } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { ok, err, assertNever, flatMapOption, getOrElse, mapOption } from './result.js';
-import type { Result } from './result.js';
+import type { Err, Result } from './result.js';
 import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
 import { td, concat, decodeBytes, decodeChunk } from './bytes.js';
 import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR } from './format.js';
@@ -74,7 +74,7 @@ export function parseCommands(raw: readonly RawCommand[]): Result<ParsedCommands
 }
 // A pkt-line frame as pktStep and the transports' frames() yield it.
 export type { Frame } from './transport.js';
-import type { Frame, RequestBody, Scrub, Transport } from './transport.js';
+import type { Frame, RequestBody, Scrub, SpanOpts, Transport } from './transport.js';
 import type { PktState } from './pktline.js';
 import type { PackInput, BuiltEntry } from './pack.js';
 import { WHOLE, inputBase, typeNameOf } from './pack.js';
@@ -931,13 +931,14 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
 }
 
 // The request under its span (push and pushPackChecked, below, are the entries).
-// oxlint-disable-next-line eslint/require-await -- async, as push was
-async function receivePack(t: PushTransport, plan: PushPlan, run: (span: Span) => Promise<Result<PushResult, PlyError>>): Promise<Result<PushResult, PlyError>> {
-  const { commands, caps } = plan;
+const receiveSpan = (t: PushTransport, { commands, caps }: PushPlan): SpanOpts => {
   const [first] = commands;
+  return clientSpan(t, { 'git.command': 'receive-pack', 'git.protocol.version': 0, 'git.push.commands': commands.map(c => `${c.oldOid.slice(0, SHORT_OID)} ${c.newOid.slice(0, SHORT_OID)} ${c.ref}`), 'git.push.caps': caps, 'git.push.ref': first.ref, 'git.push.old': first.oldOid, 'git.push.new': first.newOid });
+};
+// oxlint-disable-next-line eslint/require-await -- async, as push was
+async function receivePack<T>(t: PushTransport, plan: PushPlan, run: (span: Span) => Promise<Result<T, PlyError>>): Promise<Result<T, PlyError>> {
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
-  return coded('protocol', () => spanned(t, 'git.receive-pack', clientSpan(t, { 'git.command': 'receive-pack', 'git.protocol.version': 0, 'git.push.commands': commands.map(c => `${c.oldOid.slice(0, SHORT_OID)} ${c.newOid.slice(0, SHORT_OID)} ${c.ref}`), 'git.push.caps': caps, 'git.push.ref': first.ref, 'git.push.old': first.oldOid, 'git.push.new': first.newOid }), run));
-
+  return coded('protocol', () => spanned(t, 'git.receive-pack', receiveSpan(t, plan), run));
 }
 
 // The effect. A refusal before the request (planPush) is an Err with no span; everything after is under the span, whose
@@ -974,14 +975,23 @@ export function planPackPush(o: PackPushOptions, limits: LimitsInput | null): Re
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the guard above checked the stream; its chunks are checked as they are read (packwrite.ts streamSource)
   return ok({ plan: planned.value, pack: pack as ReadableStream<Uint8Array>, length });
 }
-async function sendSource(t: PushTransport, p: PackPushPlan, span: Span): Promise<Result<PushResult, PlyError>> {
+// Whether the push request left this process, beside what it came to (#272): the one fact a PushResult cannot carry.
+// `sent: 'no'` is a refusal before the request, or a request that failed before the transport pulled the body's first
+// chunk (a signal already fired, a connect or DNS failure, an HTTP answer with the body unpulled): receive-pack never
+// got the command list, so no ref can have moved. `sent: 'yes'` is the request and whatever it came to, 'ambiguous'
+// from the first pull. transfer.ts reads this, never the error's code.
+export type PackPushOutcome =
+  | { readonly sent: 'no'; readonly result: Err<PlyError> }
+  | { readonly sent: 'yes'; readonly result: Result<PushResult, PlyError> };
+const unsent = (result: Err<PlyError>): PackPushOutcome => ({ sent: 'no', result });
+async function sendSource(t: PushTransport, p: PackPushPlan, span: Span): Promise<PackPushOutcome> {
   const { plan } = p;
   const prefix = requestBody(plan, null);
-  if (!prefix.ok) return prefix;
+  if (!prefix.ok) return unsent(prefix);
   // The caller's signal had fired before the send: no request is made and the pack is not locked, read or cancelled,
   // so this is the definite 'aborted' (or 'timeout', by the signal's reason), not 'ambiguous'.
   const signal = getOrElse<unknown>(field(t, 'signal'), null);
-  if (signal instanceof AbortSignal && signal.aborted) return err(wrapNet(signal.reason, signal));
+  if (signal instanceof AbortSignal && signal.aborted) return unsent(err(wrapNet(signal.reason, signal)));
   const body = streamSource(p.pack, prefix.value, p.length, plan.maxPack);
   const r = await readResponse(t, plan, body, span, plan.sideband);
   // The exchange failed with no answer and the transport never pulled the body: the command list did not leave this
@@ -990,7 +1000,7 @@ async function sendSource(t: PushTransport, p: PackPushPlan, span: Span): Promis
   // the pack goes back to the caller unread, unlocked and uncancelled. 'ambiguous' starts at the first pull.
   if ('cause' in r && !r.answered && !body.pulled()) {
     body.giveBack();
-    return err(wrapNet(r.cause, signal instanceof AbortSignal ? signal : null));
+    return unsent(err(wrapNet(r.cause, signal instanceof AbortSignal ? signal : null)));
   }
   // read before release: abandoning the rest of a pack the server already answered is not a failure of the pack
   const cut = body.failure();
@@ -998,14 +1008,20 @@ async function sendSource(t: PushTransport, p: PackPushPlan, span: Span): Promis
   const packBytes = body.sent();
   const requestBytes = prefix.value.length + packBytes;
   span.set({ 'git.push.pack.bytes': packBytes, 'git.request.bytes': requestBytes, 'http.request.body.size': requestBytes });
-  return decide({ t, span, plan, packBytes, entries: [], hookOutput: '' }, r, cut);
+  return { sent: 'yes', result: await decide({ t, span, plan, packBytes, entries: [], hookOutput: '' }, r, cut) };
 }
-// The effect, for `checked` caps (pushPack in receivecaps.ts reads them from the advertisement).
-// oxlint-disable-next-line typescript/promise-function-async -- receivePack's promise, returned as is
-export function pushPackChecked(t: PushTransport, opts: PackPushOptions): Promise<Result<PushResult, PlyError>> {
+// The effect, for `checked` caps (pushPack in receivecaps.ts reads them from the advertisement), with whether the
+// request was sent. The span is push's: its error is the Err the outcome carries; a raise (a transport the caller handed
+// in) is 'protocol' and counts as sent, since nothing says the body was not pulled.
+export async function pushPackChecked(t: PushTransport, opts: PackPushOptions): Promise<PackPushOutcome> {
   const p = planPackPush(opts, t.limits);
-  if (!p.ok) return Promise.resolve(p);
-  // oxlint-disable-next-line typescript/promise-function-async -- sendSource's promise, returned as is
-  return receivePack(t, p.value.plan, span => sendSource(t, p.value, span));
+  if (!p.ok) return unsent(p);
+  // the outcome's Err is the span's error; receivePack's Err (a raise) is recorded by the tracer
+  const r = await receivePack(t, p.value.plan, async (span: Span): Promise<Result<PackPushOutcome, PlyError>> => {
+    const o = await sendSource(t, p.value, span);
+    if (!o.result.ok) span.error(o.result.error);
+    return ok(o);
+  });
+  return r.ok ? r.value : { sent: 'yes', result: r };
 }
 
