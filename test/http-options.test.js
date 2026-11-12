@@ -653,3 +653,38 @@ test('limits.heldTimeoutMs: not a finite non-negative number is bad_request nami
   }
   assert.deepEqual([parseLimits({ heldTimeoutMs: 0 }).value?.heldTimeoutMs, parseLimits({}).value?.heldTimeoutMs], [0, 240_000]);
 });
+
+// #273 review round 4 (owner's rule, DECISION 2): the hold starts at the first clock read after the take, so a cut is
+// never before take + heldTimeoutMs and at most min(idleTimeoutMs, heldTimeoutMs) late (heldTimeoutMs late with idle
+// off). Network progress during the hold (a push whose server answered before the upload ended: upload pieces keep
+// being taken while the consumer holds a chunk) must not move the hold's start. Expected bounds are that rule worked by
+// hand: take at 20, held 4000, so the cut is in [4020, 4020 + min(idle, held)]. Timers are manual: nothing sleeps.
+import { exchangeClock } from '../src/deadline.js';
+for (const idleMs of [1000, 0]) test(`exchangeClock: idle ${idleMs}, upload progress while the consumer holds does not move the hold's start`, () => {
+  const realSet = globalThis.setTimeout, realClear = globalThis.clearTimeout;
+  let T = 0;
+  const q = new Map();
+  globalThis.setTimeout = (fn, ms) => { const id = { unref() {} }; q.set(id, { at: T + (ms ?? 0), fn }); return id; };
+  globalThis.clearTimeout = id => { q.delete(id); };
+  const advance = to => {
+    for (;;) {
+      let best = null;
+      for (const e of q) if (e[1].at <= to && (best === null || e[1].at < best[1].at)) best = e;
+      if (best === null) break;
+      q.delete(best[0]); T = Math.max(T, best[1].at); best[1].fn();
+    }
+    T = to;
+  };
+  try {
+    const heldMs = 4000;
+    let fired = 'none', at = -1;
+    const c = exchangeClock({ firstByteMs: 1000, idleMs, heldMs, totalMs: 0 }, null, k => { fired = k; at = T; }, () => T);
+    advance(10); c.feed('headers'); advance(20); c.feed('consumer_took');
+    for (let x = 100; x <= 60_000 && fired === 'none'; x += 100) { advance(x); c.feed('upload_bytes'); }
+    advance(70_000);
+    c.cancel();
+    const take = 20, late = idleMs > 0 ? Math.min(idleMs, heldMs) : heldMs;
+    assert.equal(fired, 'heldTimeoutMs');
+    assert.ok(at >= take + heldMs && at <= take + heldMs + late, `cut at ${at}, want [${take + heldMs}, ${take + heldMs + late}]`);
+  } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; }
+});

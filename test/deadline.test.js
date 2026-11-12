@@ -472,8 +472,8 @@ test('exchangeClock: heldTimeoutMs runs from the first clock read after the take
   });
 });
 // #273 review (owner decision): the hold adds no clock read per chunk. A chunk's cycle in frames() is consumer_took then
-// consumer_asked; on main (8e3939db) that is one Date.now (the ask's restart), and it must stay one: the hold runs from
-// the mark the clock already took (the ask, or the headers for the first chunk), not from a new read at the take.
+// consumer_asked; on main (8e3939db) that is one Date.now (the ask's restart), and it must stay one: the take reads no
+// clock, and the hold runs from the first clock read after it (a timer firing, or an arm), not from a new read at the take.
 test('exchangeClock: a chunk (consumer_took + consumer_asked) reads the clock once, as on main', () => {
   let reads = 0;
   const c = exchangeClock({ firstByteMs: 60_000, idleMs: 60_000, heldMs: 240_000, totalMs: 0 }, null, () => {}, () => { reads++; return 0; });

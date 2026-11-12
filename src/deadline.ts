@@ -74,8 +74,8 @@ export function transition(state: ClockState, event: ClockEvent): ClockStep {
     case 'streaming':
       // bytes moved either way; an upload that ends here ends nothing the clock waits for
       if (event === 'upload_bytes' || event === 'body_chunk') return go('streaming');
-      // the take does not read the clock (#273 review: no clock read per chunk added): the hold runs from the mark
-      // already taken, the last network progress before the chunk was handed over
+      // the take does not read the clock (#273 review: no clock read per chunk added): the hold runs from the first
+      // clock read after the take (exchangeClock's anchor), never from an earlier network mark
       return event === 'consumer_took' ? stay('held') : stay(state);
     case 'held':
       // only the consumer's ask puts ply back on the network, and the wait starts then
