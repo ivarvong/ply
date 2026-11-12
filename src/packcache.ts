@@ -301,22 +301,18 @@ function answerGate(isFetch: boolean, done: boolean, limits: CheckedLimits): Gat
   };
   return { step, end };
 }
-// What the put is handed. 'stream': the gated cache branch as it arrives (the default rule). 'verified' (verifyBeforeStore
-// on a fetch): the branch read whole, capped, and handed over only once verifyFetchAnswer accepted it. 'never'
-// (verifyBeforeStore on a request that is no fetch): there is no whole-answer check for it, so nothing is stored.
+// What the put is handed under verifyBeforeStore (without it, main's rule: the gated cache branch as it arrives).
+// 'verified' (a fetch): the branch read whole, capped, and handed over only once verifyFetchAnswer accepted it. 'never'
+// (a request that is no fetch): there is no whole-answer check for it, so nothing is stored.
 const fetchRequestOf = (request: ReturnType<typeof parseUploadPackRequest>): Option<FetchRequest> => (request.ok && request.value.command === 'fetch' ? { tag: 'some', value: request.value } : none);
-type StoreRule = { readonly kind: 'stream' } | { readonly kind: 'verified'; readonly request: FetchRequest; readonly limits: CheckedLimits } | { readonly kind: 'never' };
-const storeRule = (verify: boolean, request: Option<FetchRequest>, limits: CheckedLimits): StoreRule => {
-  if (!verify) return { kind: 'stream' };
-  return request.tag === 'some' ? { kind: 'verified', request: request.value, limits } : { kind: 'never' };
-};
-type Held = { readonly kind: 'body'; readonly body: ReadableStream<Uint8Array> | Uint8Array<ArrayBuffer> } | { readonly kind: 'refused'; readonly error: PlyError };
+type StoreRule = { readonly kind: 'verified'; readonly request: FetchRequest; readonly limits: CheckedLimits } | { readonly kind: 'never' };
+const storeRule = (request: Option<FetchRequest>, limits: CheckedLimits): StoreRule => (request.tag === 'some' ? { kind: 'verified', request: request.value, limits } : { kind: 'never' });
+type Held = { readonly kind: 'body'; readonly body: Uint8Array<ArrayBuffer> } | { readonly kind: 'refused'; readonly error: PlyError };
 // pack and progress are each held to maxPackBytes by v2Step; a pkt-line header per 65516-byte frame and the sections
 // fit in one more maxPackBytes (the cap this check had before #269)
 const ANSWER_CAP_PACKS = 3;
 async function heldFor(rule: StoreRule, split: Split): Promise<Held> {
   switch (rule.kind) {
-    case 'stream': return { kind: 'body', body: split.cache };
     case 'never': {
       await split.cache.cancel().catch(() => null);
       return { kind: 'refused', error: fail('protocol', 'answer: verifyBeforeStore stores only a fetch answer verifyFetchAnswer accepted, and this request is no fetch').error };
@@ -416,6 +412,45 @@ const calling = <T>(what: string, call: () => T): Promise<{ readonly got: T }> =
   try { return Promise.resolve({ got: call() }); } catch (e) { return Promise.reject(callbackFailed(what, e)); }
 };
 
+// The store under verifyBeforeStore, run after the fetch answered: the cache branch is read whole and verified
+// (heldFor), and only an accepted answer is handed to cache.put. A put that throws or rejects is counted, never thrown.
+type VerifiedStore = { readonly rule: StoreRule; readonly split: Split; readonly cache: PackCache; readonly key: string; readonly stored: Headers; readonly stats: CacheStats };
+async function storeVerified({ rule, split, cache, key, stored, stats }: VerifiedStore): Promise<void> {
+  const behind = (bytes: number): void => { stats.putFailed++; stats.putError = `the store fell ${bytes} bytes behind the client (window ${CACHE_LAG_BYTES})`; };
+  const held = await heldFor(rule, split);
+  // a store that settled without reading the answer to its end decided for itself
+  split.unread();
+  if (held.kind === 'refused') {
+    // nothing was handed to the store; the gate's own refusal, when there was one, is the reason
+    const fate = await split.fate;
+    if (fate.kind === 'behind') behind(fate.bytes);
+    else refused(stats, fate.kind === 'refused' ? fate.error : held.error);
+    return;
+  }
+  // oxlint-disable-next-line typescript/promise-function-async -- the cache's own promise, awaited: a throw when called is the named 'cache.put' Err
+  const failure = await calling('cache.put', () => cache.put(key, new Response(held.body, { status: 200, headers: stored })))
+    .then(async ({ got }) => { await got; return null; })
+    .then((): Option<string> => none, (e: unknown): Option<string> => ({ tag: 'some', value: thrownText(e).slice(0, 200) }));
+  const fate = await split.fate;
+  if (fate.kind === 'ok') stats.verifyOk++;
+  if (fate.kind === 'ok' || fate.kind === 'unread') {
+    if (failure.tag === 'some') { stats.putFailed++; stats.putError = failure.value; } else stats.putOk++;
+    return;
+  }
+  if (fate.kind === 'refused') refused(stats, fate.error);
+  else behind(fate.bytes);
+  // a failed delete is ignored, whether it rejects or throws before it returns a promise
+  await Promise.resolve().then(async () => { await cache.delete(key); return null; }).catch(() => null);
+}
+
+// verifyBeforeStore's MISS: the fetch answers at once and storeVerified runs behind it (handed to waitUntil when there
+// is one; a waitUntil that throws when called is this fetch's rejection, as without the flag).
+async function verifiedMiss(store: VerifiedStore, waitUntil: CachingConfig['waitUntil'], abandoning: <T>(called: Promise<T>) => Promise<T>, h: Headers): Promise<Response> {
+  const verified = storeVerified(store);
+  if (waitUntil) await abandoning(calling('waitUntil', () => { waitUntil(verified); }));
+  return new Response(store.split.client, { status: 200, headers: h });
+}
+
 export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: CachingOptions = {}): CachingFetch {
   const { waitUntil, namespace, shouldCache, maxAge, verifyBeforeStore, limits } = withDefaults(options, cachingDefaults(getOrElse(readKey(options, 'verifyBeforeStore'), false)));
   const inner = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
@@ -423,6 +458,7 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
   // chunks the cache layer itself parsed (the store-side gate); a HIT adds none
   const counters = { parsed: 0 };
   const checked = parseLimits(limits);
+  // oxlint-disable-next-line eslint/complexity -- main's MISS path line for line (byte-identical without verifyBeforeStore), plus the one branch to verifiedMiss
   const f = async (url: string | URL, init: RequestInit = {}): Promise<Response> => {
     const { init: wire, names } = peelRecordHeaders(init);
     const body = wire.body;
@@ -457,16 +493,20 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
     stored.set('content-type', ct);
     stored.set('cache-control', `public, max-age=${maxAge}, immutable`);
     const request = parseUploadPackRequest(body);
-    const fetchRequest = fetchRequestOf(request);
-    const split = splitVerified(res.body, answerGate(fetchRequest.tag === 'some', fetchRequest.tag === 'some' && fetchRequest.value.done, checked.value), counters);
-    const rule = storeRule(verifyBeforeStore, fetchRequest, checked.value);
+    const split = splitVerified(res.body, answerGate(request.ok && request.value.command === 'fetch', request.ok && request.value.command === 'fetch' && request.value.done, checked.value), counters);
     // The put's fate is observable: a cache that silently refuses to store would otherwise look like a permanent miss rate.
     // A caller callback that throws when called (the put, then waitUntil) is this fetch's rejection, the named Err; the
     // answer is abandoned first, so the origin is cancelled and nothing stays stored.
     // oxlint-disable-next-line typescript/promise-function-async -- the callback's own promise, passed on once the answer is cancelled
     const abandoning = <T>(called: Promise<T>): Promise<T> => called.catch(async () => { await split.client.cancel().catch(() => null); return called; });
-    const store = async (called: Promise<unknown>): Promise<void> => {
-      const failure = await called.then((): Option<string> => none, (e: unknown): Option<string> => ({ tag: 'some', value: thrownText(e).slice(0, 200) }));
+    // verifyBeforeStore: the put is never called here. It is called in storeVerified, once verifyFetchAnswer accepted the
+    // whole answer, after this fetch answered: a put that throws or rejects there is counted (putFailed; putError the
+    // 'cache.put' Err's message for a throw, the rejection's own for a reject), never this fetch's rejection.
+    if (verifyBeforeStore) return verifiedMiss({ rule: storeRule(fetchRequestOf(request), checked.value), split, cache, key, stored, stats }, waitUntil, abandoning, h);
+    // oxlint-disable-next-line typescript/promise-function-async -- the cache's own promise, passed through
+    const putting = (await abandoning(calling('cache.put', () => cache.put(key, new Response(split.cache, { status: 200, headers: stored }))))).got;
+    const store = async (): Promise<void> => {
+      const failure = await putting.then((): Option<string> => none, (e: unknown): Option<string> => ({ tag: 'some', value: thrownText(e).slice(0, 200) }));
       // a store that settled without reading the answer to its end decided for itself
       split.unread();
       const fate = await split.fate;
@@ -482,26 +522,7 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
       // a failed delete is ignored, whether it rejects or throws before it returns a promise
       await Promise.resolve().then(async () => { await cache.delete(key); return null; }).catch(() => null);
     };
-    // under verifyBeforeStore the put waits for verifyFetchAnswer, after this fetch answered: a put that throws is counted, not this fetch's rejection
-    // oxlint-disable-next-line typescript/promise-function-async -- the cache's own promise, awaited
-    const putVerified = async (verified: ReadableStream<Uint8Array> | Uint8Array<ArrayBuffer>): Promise<void> => { await (await calling('cache.put', () => cache.put(key, new Response(verified, { status: 200, headers: stored })))).got; };
-    const storeVerified = async (): Promise<void> => {
-      const held = await heldFor(rule, split);
-      if (held.kind === 'refused') {
-        // nothing was handed to the store; the gate's own refusal, when there was one, is the reason
-        split.unread();
-        const fate = await split.fate;
-        if (fate.kind === 'behind') { stats.putFailed++; stats.putError = `the store fell ${fate.bytes} bytes behind the client (window ${CACHE_LAG_BYTES})`; }
-        else refused(stats, fate.kind === 'refused' ? fate.error : held.error);
-        return;
-      }
-      await store(putVerified(held.body));
-    };
-    // Without verifyBeforeStore the put is called here, eagerly, inside the fetch (main's rule, unchanged). Under the flag
-    // it is called in storeVerified, once verifyFetchAnswer accepted the answer: the fetch has answered by then, so a
-    // put that throws there is counted (putFailed; putError the 'cache.put' Err's message), never the fetch's rejection.
-    // oxlint-disable-next-line typescript/promise-function-async -- the cache's own promise, passed through
-    const put = rule.kind === 'stream' ? store((await abandoning(calling('cache.put', () => cache.put(key, new Response(split.cache, { status: 200, headers: stored }))))).got) : storeVerified();
+    const put = store();
     if (waitUntil) await abandoning(calling('waitUntil', () => { waitUntil(put); }));
     return new Response(split.client, { status: 200, headers: h });
   };
