@@ -262,8 +262,10 @@ if (!stale.ok) {
       console.warn('limit', e.what, e.got, e.max); break;
     case 'ambiguous':  // the push was sent and may have landed: read the ref back before doing anything else
       console.warn('unknown outcome'); break;
-    case 'network': case 'timeout': case 'rate_limited': case 'upstream_5xx': case 'protocol': case 'pack_corrupt':
-      console.warn('transient: retry with backoff', e.code); break;  // isRetryable(e) is true for exactly these
+    case 'network': case 'timeout': case 'rate_limited': case 'upstream_5xx': case 'protocol':
+      console.warn('transient: retry with backoff', e.code); break;  // isRetryable(e) is true for these
+    case 'pack_corrupt':  // e.origin === 'remote': the server's bytes, retry (isRetryable is true); absent: your own bytes, do not
+      console.warn('corrupt', e.origin ?? 'local'); break;
     case 'merge_conflict': case 'not_fast_forward': case 'not_linear': case 'unrelated_histories':
       console.warn('history needs a human', e.code); break;
     case 'push_rejected': case 'push_partial': case 'remote_error':  // a hook, branch protection, or the server said no

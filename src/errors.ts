@@ -25,7 +25,7 @@ export type Code =
 export const RETRY: Readonly<Record<Code, Retry>> = Object.freeze({
   bad_request: 'no', unsupported: 'no', network: 'yes', timeout: 'yes', aborted: 'no', http: 'no', auth: 'no',
   not_found: 'no', rate_limited: 'yes', upstream_5xx: 'yes', not_git: 'no', protocol: 'yes',
-  pack_corrupt: 'yes', remote_error: 'no', limit_exceeded: 'no', match_count: 'no',
+  pack_corrupt: 'no', remote_error: 'no', limit_exceeded: 'no', match_count: 'no',
   lfs_pointer: 'no', cas_conflict: 'fresh', push_rejected: 'no', push_partial: 'no', merge_conflict: 'no',
   not_fast_forward: 'no', not_linear: 'no', unrelated_histories: 'no', ambiguous: 'read', internal: 'no',
 });
@@ -95,6 +95,10 @@ export type ExtraFields = {
   // 'empty_response': a fetch response with no section in it, not even its flush (v2End): what git's upload-pack sends
   // when it dies on an argument it did not advertise (fetch.ts filterAdvertised).
   readonly reason: Reason;
+  // pack_corrupt only (#300-5): 'remote' when the corrupt bytes came from the server over a fetch (operation() sets it
+  // once an upload-pack request was handed to the transport), so a retry may get good bytes. Absent: the bytes were the
+  // caller's own (bytes, a RangeSource, a saved spool, a pure codec), and retrying them cannot succeed.
+  readonly origin: 'remote';
 };
 // The error context bag: one of the two places Input is allowed (docs/STACK.md, Absence). Any subset of the fields.
 export type Extra = Input<ExtraFields>;
@@ -119,7 +123,9 @@ export const isPlyError = (e: unknown): e is PlyError => e instanceof Error && '
 // loosely, through absent.ts `field`: a primitive, null, or an object without a code has none, and that is 'no'.
 export const retryPolicy = (e: unknown): Retry => {
   const code = field(e, 'code');
-  return code.tag === 'some' && isPlyCode(code.value) ? RETRY[code.value] : 'no';
+  if (code.tag !== 'some' || !isPlyCode(code.value)) return 'no';
+  if (code.value === 'pack_corrupt') return getOrElse(field(e, 'origin'), null) === 'remote' ? 'yes' : 'no';
+  return RETRY[code.value];
 };
 export const isRetryable = (e: unknown): boolean => retryPolicy(e) === 'yes';
 

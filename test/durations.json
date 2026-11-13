@@ -116,6 +116,7 @@
   "test/resolve-memory.test.js": 8,
   "test/response-headers.test.js": 0,
   "test/result.test.js": 0,
+  "test/retry-origin.test.js": 1,
   "test/scan-pack-index.test.js": 7,
   "test/sha1.test.js": 0,
   "test/sign.test.js": 0,

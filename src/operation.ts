@@ -80,7 +80,11 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
   const outcome: Outcome = (kind, result, ...extra) => { const [given = {}] = extra; finish({ ...given, [`${name}.outcome`]: kind }).end(); return ok(result); };
   // An Err leaves through here: the outcome and error.type are its code (read before root.error scrubs it), the error is
   // recorded on the root, and it carries the root span for a caller's retry link.
+  let fetchHandedOver = false;
+  // A pack_corrupt after an upload-pack request was handed over may be the server's bytes: origin 'remote' makes it
+  // retryable (errors.ts retryPolicy). Before that, the corrupt bytes were the caller's own and it stays 'no'.
   const failed = (e: PlyError): Result<R, PlyError> => {
+    if (e.code === 'pack_corrupt' && fetchHandedOver) Object.assign(e, { origin: 'remote' });
     finish({ [`${name}.outcome`]: e.code }).error(e, e.code).end();
     Object.assign(e, { span: root });
     return err(e);
@@ -103,7 +107,7 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
     // plyMade: this frames() is ply's own over an already guarded `given`, so an operation handed `t` guards nothing again.
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.create returns any; a view of `given` (like withParent) whose frames() records the hand-over
     const t = plyMade(Object.create(given, { frames: { enumerable: true, value: function frames(this: Transport, service: string, sent: RequestBody, span: Span, hints: Hints): AsyncIterable<Frame> {
-      if (service !== UPLOAD_PACK) pushHandedOver = true;
+      if (service === UPLOAD_PACK) fetchHandedOver = true; else pushHandedOver = true;
       return given.frames.call(this, service, sent, span, hints);
     } } }) as Transport);
     // The root and every span under it redact the credential; root.error(e) below scrubs the error the caller gets.
