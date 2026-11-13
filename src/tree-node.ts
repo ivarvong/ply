@@ -22,7 +22,7 @@ import { MODE_BLOB, MODE_EXEC, MODE_LINK } from './format.js';
 import { err, ok } from './result.js';
 import type { Result } from './result.js';
 import type { Input } from './absent.js';
-import { withDefaults } from './absent.js';
+import { isArgObject, withDefaults } from './absent.js';
 import { pushTree } from './tree.js';
 import type { PushTreeOptions, PushTreeResult, TreeSpec } from './tree.js';
 
@@ -66,6 +66,8 @@ type DirError = ErrorOf<'bad_request' | 'limit_exceeded'>;
 // directory, a permission): bad_request naming 'dir', with node:fs's error (its errno `code`, `path`) as `cause`.
 // Definite: the walk precedes any request. filesFromDir never rejects.
 export async function filesFromDir(dir: string, options: FilesFromDirOptions | null = null): Promise<Result<DirFile[], DirError>> {
+  if (typeof dir !== 'string') return fail('bad_request', 'filesFromDir: dir must be a string', { what: 'dir' });
+  if (options !== null && !isArgObject(options)) return fail('bad_request', 'filesFromDir: options must be an object or null', { what: 'options' });
   const { limits, filter } = withDefaults<FilesFromDirConfig>(options, { limits: DEFAULT_LIMITS, filter: null });
   const checked = parseLimits(limits);
   if (!checked.ok) return checked;
@@ -114,7 +116,10 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
 }
 
 export type PushDirSpec = Omit<TreeSpec, 'files'> & { readonly dir: string } & Input<{ readonly filter: DirFilter | null }>;
-export async function pushDir(url: string, { dir, filter = null, ...spec }: PushDirSpec, opts: PushTreeOptions = {}): Promise<Result<PushTreeResult, PlyError>> {
+export async function pushDir(url: string, given: PushDirSpec, opts: PushTreeOptions = {}): Promise<Result<PushTreeResult, PlyError>> {
+  if (typeof given !== 'object' || !isArgObject(given)) return fail('bad_request', 'pushDir: spec must be an object', { what: 'spec' });
+  if (!isArgObject(opts)) return fail('bad_request', 'pushDir: options must be an object', { what: 'options' });
+  const { dir, filter = null, ...spec } = given;
   const limits = limitsOf(opts);
   if (!limits.ok) return limits;
   const files = await filesFromDir(dir, { limits: limits.value, filter });

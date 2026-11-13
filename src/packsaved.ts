@@ -22,8 +22,8 @@
 // without ids finds no REF base), resolved columns the index
 // contradicts or whose bases do not form chains ending at a whole object or a thin base: see checkResolved).
 // loadTransferPack (transferload.ts) turns any refusal into a fresh scan and says why on its span.
-import type { PlyError } from './errors.js';
-import { fail } from './errors.js';
+import type { ErrorOf, PlyError } from './errors.js';
+import { fail, argsError } from './errors.js';
 import type { Option, Result } from './result.js';
 import { ok, err, some, none, isSome, assertNever } from './result.js';
 import type { RangeSource, Halt, Halted } from './rangesource.js';
@@ -356,7 +356,7 @@ function statsOf(v: DataView, at: number): ResolveStats {
 // more entries than it, before the check or any column.
 // The columns returned are views into `bytes` where they can be (see getF64s): keep `bytes` unchanged while the index
 // is in use, as loadTransferPack does (it hands the same bytes back as `saved`).
-export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity, maxDeltaChain: number = DEFAULT_LIMITS.maxDeltaChain, maxPackObjects: number = DEFAULT_LIMITS.maxPackObjects): Result<SavedIndex, SavedIndexRefusal> {
+export function decodeSavedBytes(bytes: Uint8Array, want: PackIdentity, maxDeltaChain: number, maxPackObjects: number): Result<SavedIndex, SavedIndexRefusal> {
   const head = readHeader(bytes, maxPackObjects);
   if (!head.ok) return head;
   const h = head.value;
@@ -387,4 +387,11 @@ export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity, maxDelta
   if (!hasResolved) return ok({ pack, resolved: none });
   const r: ResolvedColumns = { size: getF64s(c, n), base: getI32s(c, n), depth: getI32s(c, n), oid: getBytes(c, n * OID_BYTES), type: getBytes(c, n) };
   return ok({ pack, resolved: some(resolvedIndexOf(r, statsOf(c.view, c.at))) });
+}
+
+// The public entry: the arguments' shape first (#296: null bytes or want is bad_request naming it, not a TypeError).
+export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity, maxDeltaChain: number = DEFAULT_LIMITS.maxDeltaChain, maxPackObjects: number = DEFAULT_LIMITS.maxPackObjects): Result<SavedIndex, SavedIndexRefusal | ErrorOf<'bad_request'>> {
+  const shape = argsError('decodeSavedIndex', [['bytes', bytes, 'bytes'], ['want', want, 'object']]);
+  if (shape !== null) return shape;
+  return decodeSavedBytes(bytes, want, maxDeltaChain, maxPackObjects);
 }

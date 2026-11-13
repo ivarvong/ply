@@ -20,7 +20,7 @@
 // Measured: 71 bytes per entry on a REF-only pack (31 + whole oid 20 + REF base 20), plus 4 per whole object while
 // settling.
 import type { PlyError, ErrorOf } from './errors.js';
-import { plyError } from './errors.js';
+import { plyError, argsError } from './errors.js';
 import type { Option, Result } from './result.js';
 import { ok, err, some, none, assertNever } from './result.js';
 import type { Halt, Halted } from './rangesource.js';
@@ -427,6 +427,8 @@ export function scanLimitsOf(input: Partial<ScanIndexOpts>): Result<CheckedLimit
 }
 
 export async function scanPackIndex(source: ScanSource, input: Partial<ScanIndexOpts> = {}): Promise<Result<ScannedPack, ScanError>> {
+  const shape = argsError('scanPackIndex', [['source', source, 'object'], ['options', input, 'object?']]);
+  if (shape !== null) return shape;
   const opts = withDefaults(input, defaultOpts());
   const limits = parseLimits(opts.limits);
   if (!limits.ok) return limits;

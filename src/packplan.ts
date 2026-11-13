@@ -29,7 +29,7 @@
 // plan version, the source pack's trailer, the budget, the options and the batches) names it, so a resumed transfer can
 // tell its plan from another.
 import type { PlyError } from './errors.js';
-import { fail } from './errors.js';
+import { fail, argsError } from './errors.js';
 import type { Result } from './result.js';
 import { ok, err } from './result.js';
 import { limitExceeded } from './limits.js';
@@ -350,6 +350,8 @@ export function planHash(p: Omit<PackPlan, 'hash'>): string {
 
 // Plan the pushes for `pack` (its scanPackIndex index) given `resolved` (resolvePackRange over the same pack).
 export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, input: Input<PlanOpts> & { readonly budget: PushBudget }): Result<PackPlan, PlyError> {
+  const shape = argsError('planPackBatches', [['pack', pack, 'object'], ['resolved', resolved, 'object'], ['options', input, 'object']]);
+  if (shape !== null) return shape;
   const opts = withDefaults<PlanOpts>(input, { budget: input.budget, select: null, crossBatchRef: false });
   if (resolved.count !== pack.count) return fail('bad_request', `resolved index has ${resolved.count} entries, the pack ${pack.count}`);
   const budgetBad = checkBudget(opts.budget);

@@ -1153,7 +1153,12 @@ test('readFile: the blob streamed and verified, its size first; directories and 
   assert.equal(await readAll(big.stream), 'x'.repeat(5000));
   const link = await unwrapAsync(readFile('http://fake/r.git', { path: 'link' }, env(r).opts));
   assert.deepEqual([link.mode, await readAll(link.stream)], ['120000', 'README']);
-  const exe = await unwrapAsync(readFile('http://fake/r.git', { path: 'run.sh/' }, env(r).opts));
+  // a trailing '/' names a directory (git: `git cat-file -t HEAD:run.sh/` is "path 'run.sh/' does not exist"), so a
+  // file path that ends in one is refused before any request (#300-8; it was read as run.sh before)
+  const slash = await readFile('http://fake/r.git', { path: 'run.sh/' }, env(r).opts);
+  assert.equal(slash.ok, false);
+  assert.deepEqual([slash.error.code, slash.error.what], ['bad_request', 'path']);
+  const exe = await unwrapAsync(readFile('http://fake/r.git', { path: 'run.sh' }, env(r).opts));
   assert.equal(exe.mode, '100755');
   await readAll(exe.stream);
   await rejects(unwrapAsync(readFile('http://fake/r.git', { path: 'src' }, env(r).opts)), 'not_found', 'src is a directory', { miss: { kind: 'is_directory', path: 'src', tree: GIT.src } });

@@ -68,6 +68,15 @@ export function validateWire(value: unknown, what: string): Result<WireField, Ba
   return ok(value);
 }
 
+// An HTTP field value (RFC 9110 §5.5): field-vchar (VCHAR, obs-text 0x80-0xFF), SP and HTAB. A control character
+// or a code point above U+00FF is no header value (fetch refuses it as a ByteString), so it is refused here, before
+// it could fail later as a retryable network error (#300-1). It is also a WireField (no NUL, CR or LF).
+export function validateFieldValue(value: unknown, what: string): Result<WireField, Bad> {
+  // oxlint-disable-next-line no-control-regex -- RFC 9110 field-content excludes the controls; matching them is the point
+  if (!isWireField(value) || /[^\t\u0020-\u007E\u0080-\u00FF]/u.test(value)) return bad(what, 'must be an HTTP field value: visible ASCII, Latin-1, space or tab');
+  return ok(value);
+}
+
 // The first check of validateRef, and the brand it grants: a value leaves validateRef as a Refname only
 // after every check below it, so the brand is the whole check (refname.ts reads the brand; no second test).
 const isFullRef = (ref: unknown): ref is Refname => typeof ref === 'string' && ref.startsWith('refs/');
