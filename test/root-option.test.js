@@ -1,5 +1,5 @@
 // The Option constructors a public signature takes (encodeSavedIndex's `resolved`, loadTransferPack's `saved`) are
-// importable from the package root, and the shared `none` cannot be corrupted by a caller (#301 item 3).
+// importable from the package root (#301 item 3). `none` is one shared plain object: README says never assign to it; nothing here freezes or checks that.
 // Expected values come from the README contract: `some(value)` is `{ tag: 'some', value }`, `none` is `{ tag: 'none' }`.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';

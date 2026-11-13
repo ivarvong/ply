@@ -154,3 +154,48 @@ test('README wire-span attributes: receive-pack POST refused 403, then a 200 adv
   assert.equal(typeof s.attrs['git.request.bytes'], 'number', 'the POST set it before it was sent');
   assert.equal(s.attrs['git.response.bytes'], RECEIVE_AD.length, 'the GET read its advertisement whole');
 });
+
+// A stale redirect memo: the remembered base answers the POST with a 3xx, so ply drops the memo, re-settles with a GET
+// on the POST's own span and re-sends the POST. README: the span then ends with the GET's `http.request.method`
+// (`GET`) and the re-sent POST's status, request bytes and response bytes. Expected values: the bytes the fake server
+// received in the re-sent POST, and the length of the answer it sent (a ref pkt plus a flush, hand-counted 61 + 4).
+test('README wire-span attributes: a stale redirect memo re-send ends its span with method GET and the POST\'s bytes', async () => {
+  const OID = 'a'.repeat(40);
+  const answer = new TextEncoder().encode(`003d${OID} refs/heads/main\n0000`);
+  assert.equal(answer.length, 65);
+  const host = 'https://stale-memo.example.invalid';
+  const hits = []; let staleSent = -1; let memoSettled = false;
+  const fetchImpl = async (url, init) => {
+    const u = String(url); const method = init?.method ?? 'GET';
+    hits.push(`${method} ${new URL(u).pathname}`);
+    if (u.includes('/old.git/info/refs')) {
+      if (!memoSettled) return new Response(null, { status: 301, headers: { location: `${host}/a.git/info/refs?service=git-upload-pack` } });
+      return new Response(UPLOAD_AD, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } });
+    }
+    if (u.includes('/a.git/info/refs')) return new Response(UPLOAD_AD, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } });
+    const sent = (await new Response(init.body).arrayBuffer()).byteLength;
+    if (u.includes('/a.git/') && memoSettled) return new Response(null, { status: 301, headers: { location: `${host}/b.git/git-upload-pack` } });
+    staleSent = sent;
+    return new Response(answer, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+  };
+  const first = createTransport(`${host}/old.git`, { fetchImpl, followRedirects: 'initial' });
+  assert.ok(first.ok);
+  assert.ok((await lsRefs(first.value, ['refs/heads/'])).ok, 'first transport settles old.git -> a.git');
+  memoSettled = true; hits.length = 0; staleSent = -1;
+  const ex = arrayExporter();
+  const t = createTransport(`${host}/old.git`, { fetchImpl, followRedirects: 'initial', tracer: new Tracer({ exporter: ex }) });
+  assert.ok(t.ok);
+  const r = await lsRefs(t.value, ['refs/heads/']);
+  assert.ok(r.ok, JSON.stringify(r.error));
+  assert.deepEqual(hits, ['POST /a.git/git-upload-pack', 'GET /old.git/info/refs', 'POST /old.git/git-upload-pack']);
+  const s = wireSpan(ex, 'git.upload-pack ls-refs');
+  assert.ok(s, 'ls-refs span');
+  assert.equal(s.attrs['http.request.method'], 'GET', 'the re-settling GET leaves its method');
+  assert.equal(s.attrs['http.response.status_code'], 200);
+  assert.equal(s.attrs['git.request.bytes'], staleSent, 'the re-sent POST body, as the server received it');
+  assert.equal(s.attrs['git.response.bytes'], answer.length, 'the re-sent POST read its answer whole');
+  // and README says so, in the telemetry bullet
+  const bullet = README.split('\n').find(l => l.startsWith('- On the HTTP transport (`createTransport`)'));
+  assert.ok(bullet, 'README telemetry bullet');
+  assert.match(bullet, /stale redirect memo[^.]*ends with `http\.request\.method` \(`GET`/);
+});
