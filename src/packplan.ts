@@ -32,7 +32,7 @@ import type { PlyError } from './errors.js';
 import { fail } from './errors.js';
 import type { Result } from './result.js';
 import { ok, err } from './result.js';
-import { limitExceeded, LIMIT_OBJECT_OVERHEAD, DEFAULT_LIMITS } from './limits.js';
+import { limitExceeded, DEFAULT_LIMITS } from './limits.js';
 import type { ScannedPack } from './packscanindex.js';
 import type { ResolvedIndex } from './packrangeresolve.js';
 import { NO_BASE, THIN_BASE } from './packrangeresolve.js';
@@ -67,8 +67,9 @@ export type PlanOpts = {
   readonly select: readonly number[] | null;
   // allow a delta whose base is pushed in an earlier batch (or already on the destination) as REF_DELTA
   readonly crossBatchRef: boolean;
-  // bytes the plan's per-entry structures may hold, LIMIT_OBJECT_OVERHEAD per pack entry (default: DEFAULT_LIMITS's)
-  readonly maxInflatedTotal: number;
+  // pack entries the plan holds per-entry structures for, at most (default: DEFAULT_LIMITS.maxPackObjects, what the
+  // default scan admits; raise it with the scan's own limit)
+  readonly maxPackObjects: number;
 };
 // 'blobs': only blobs (and their deltas); 'final': the trees, commits and tags (with any blobs that fit), always last.
 export type BatchKind = 'blobs' | 'final';
@@ -350,14 +351,19 @@ export function planHash(p: Omit<PackPlan, 'hash'>): string {
   return new Sha1().update(te.encode(canonical(p))).hex();
 }
 
+// Entries a plan holds per-entry structures for by default: what the default scan admits.
+export const PLAN_MAX_PACK_OBJECTS: number = DEFAULT_LIMITS.maxPackObjects;
+export function packObjectsBound(count: number, max: number): Result<null, PlyError> {
+  return count > max ? err(limitExceeded('maxPackObjects', count, max)) : ok(null);
+}
+
 // Plan the pushes for `pack` (its scanPackIndex index) given `resolved` (resolvePackRange over the same pack).
 export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, input: Input<PlanOpts> & { readonly budget: PushBudget }): Result<PackPlan, PlyError> {
-  const opts = withDefaults<PlanOpts>(input, { budget: input.budget, select: null, crossBatchRef: false, maxInflatedTotal: DEFAULT_LIMITS.maxInflatedTotal });
+  const opts = withDefaults<PlanOpts>(input, { budget: input.budget, select: null, crossBatchRef: false, maxPackObjects: DEFAULT_LIMITS.maxPackObjects });
   if (resolved.count !== pack.count) return fail('bad_request', `resolved index has ${resolved.count} entries, the pack ${pack.count}`);
-  // #298-1: the per-entry structures, charged at LIMIT_OBJECT_OVERHEAD against maxInflatedTotal (what holds parsed
-  // pack objects), refused before they are allocated
-  const held = pack.count * LIMIT_OBJECT_OVERHEAD;
-  if (held > opts.maxInflatedTotal) return err(limitExceeded('maxInflatedTotal', held, opts.maxInflatedTotal));
+  // #298-1: the per-entry structures are bounded by the same object count the scan admits, refused before allocation
+  const bound = packObjectsBound(pack.count, opts.maxPackObjects);
+  if (!bound.ok) return bound;
   const budgetBad = checkBudget(opts.budget);
   if (budgetBad !== null) return err(budgetBad);
   const chosen = selection(pack.count, opts.select);

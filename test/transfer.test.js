@@ -633,24 +633,67 @@ test('temp trees: a crafted id distribution (16,500 ids under one first byte) gi
   assert.deepEqual(listed.toSorted(), ids.toSorted());
 });
 
-// #298-1: the planner's per-entry structures are charged at LIMIT_OBJECT_OVERHEAD (3 KiB, limits.ts) against
-// maxInflatedTotal, the byte budget that holds parsed pack objects, and refused before they are allocated.
-test('planTransfer: a pack whose entries would outgrow maxInflatedTotal is refused as limit_exceeded, nothing allocated', () => {
-  const big = 1_000; // 1,000 x 3,072 = 3,072,000 bytes > 1 MiB
-  const pack = { count: big };
-  const resolved = { count: big, oid: () => { throw new Error('read'); }, type: () => { throw new Error('read'); }, find: () => ({ tag: 'none' }), columns: {} };
-  const r = planPackBatches(pack, resolved, { budget: BUDGET, maxInflatedTotal: 1024 * 1024 });
+// #298-1: the planner holds per-entry structures for at most maxPackObjects entries (the scan's own limit, README
+// limits table: 100,000 by default), refused before any is allocated; at the limit it plans past the check.
+const stubResolved = count => ({ count, oid: () => { throw new Error('read'); }, type: () => { throw new Error('read'); }, find: () => ({ tag: 'none' }), columns: {} });
+test('planPackBatches: a pack over maxPackObjects is refused as limit_exceeded before an entry is read', () => {
+  const r = planPackBatches({ count: 1_000 }, stubResolved(1_000), { budget: BUDGET, maxPackObjects: 999 });
   assert.equal(r.ok, false);
   assert.equal(r.error.code, 'limit_exceeded');
-  assert.equal(r.error.got, 3_072_000);
-  assert.equal(r.error.max, 1_048_576);
+  assert.equal(r.error.what, 'maxPackObjects');
+  assert.equal(r.error.got, 1_000);
+  assert.equal(r.error.max, 999);
+  const def = planPackBatches({ count: 100_001 }, stubResolved(100_001), { budget: BUDGET });
+  assert.equal(def.error?.what, 'maxPackObjects');
+});
+test('planPackBatches: a pack of exactly maxPackObjects (default 100,000) is not refused by the bound', () => {
+  for (const [count, opts] of [[1_000, { maxPackObjects: 1_000 }], [100_000, {}]]) {
+    // every entry a 3-byte blob with no base (the planner's columns), so the plan runs past the bound to the budget
+    const cols = new Map();
+    const columns = new Proxy({}, { get: (_, k) => { if (!cols.has(k)) cols.set(k, new Float64Array(count).fill(k === 'type' ? 3 : k === 'base' ? -1 : 3)); return cols.get(k); } });
+    let r;
+    try { r = planPackBatches({ count }, { ...stubResolved(count), columns }, { budget: { ...BUDGET, maxObjects: count, maxRequestBytes: 1 << 30 }, ...opts }); } catch (e) { r = { ok: false, error: { what: `threw ${e.message}` } }; }
+    assert.notEqual(r.ok === false ? r.error.what : null, 'maxPackObjects', `count ${count}`);
+  }
+});
+test('planTransfer: refuses a pack over maxPackObjects before reading any entry (treeEntries)', () => {
+  const r = planTransfer({ count: 1_000, columns: {} }, stubResolved(1_000), { budget: BUDGET, ref: 'refs/heads/x', commit: new Uint8Array(0), maxPackObjects: 999 });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.what, 'maxPackObjects');
+  assert.equal(r.error.got, 1_000);
 });
 
-// #298-3: the reserve for generated trees grows with the batch only once a group can fan out again. Hand-derived: a
-// fan-out needs a group of 16,001 ids, so 16,000 objects add none; 32,002 objects may fan out twice per depth.
-test('extraTrees: no extra trees until a batch can hold a group over TRANSFER_TREE_ENTRIES', () => {
-  assert.equal(extraTrees(300), 0);
-  assert.equal(extraTrees(16_000), 0);
-  assert.equal(extraTrees(16_001), 18 * 256);
-  assert.equal(extraTrees(32_002), 2 * 18 * 256);
+// #298-3: hand-derived: a fan of g ids is split into ceil(g / 16,000) subtrees, so 16,000 ids under one first byte
+// give one subtree of 16,000, 16,001 give two (16,000 + 1); git reads every id back.
+for (const [count, sizes] of [[16_000, [16_000]], [16_001, [16_000, 1]]]) {
+  test(`temp trees: ${count} ids under one first byte give subtrees of ${sizes.join(' + ')}`, () => {
+    const ids = [];
+    for (let i = 0; i < count; i++) ids.push(`00${i.toString(16).padStart(6, '0')}${'ab'.repeat(16)}`);
+    const resolved = { count: ids.length, oid: i => (i < ids.length ? { tag: 'some', value: ids[i] } : { tag: 'none' }), type: () => ({ tag: 'some', value: 3 }) };
+    const { subtrees, root: rootTree } = must(batchTrees(resolved, [...ids.keys()]));
+    const scratch = makeBareRepo(root, `scratch${n++}`);
+    for (const o of [...subtrees, rootTree]) assert.equal(git(scratch, ['hash-object', '-w', '-t', 'tree', '--stdin'], { input: Buffer.from(o.data) }).trim(), o.oid);
+    const sizesSeen = subtrees.map(o => git(scratch, ['ls-tree', o.oid], { maxBuffer: 1 << 26 }).split('\n').filter(Boolean).length);
+    assert.deepEqual(sizesSeen.toSorted((a, b) => b - a), sizes);
+    const listed = git(scratch, ['ls-tree', '-r', rootTree.oid], { maxBuffer: 1 << 26 }).split('\n').filter(Boolean).map(l => l.split(/\s+/)[2]);
+    assert.deepEqual(listed.toSorted(), ids.toSorted());
+  });
+}
+
+// #298-3: the reserve grows only by the trees a split can add: floor(maxObjects / 16,000) (hand-derived above), so
+// the README's Artifacts example (50,000 objects) reserves 3 extra trees, not thousands.
+test('extraTrees: floor(maxObjects / 16,000)', () => {
+  assert.equal(extraTrees(15_999), 0);
+  assert.equal(extraTrees(16_000), 1);
+  assert.equal(extraTrees(50_000), 3);
+});
+
+// #298-3: the plan's budget carries ply's reserve, hand-derived from the README: 258 generated objects plus
+// floor(maxObjects / 16,000) split trees, and 68 bytes per batch object and per split tree plus 32 KiB.
+test('planTransfer: the planned budget reserves the split trees a batch of maxObjects may add', async () => {
+  const from = await spooled(src.packs.ofs);
+  const budget = { ...BUDGET, maxObjects: 32_000, maxRequestBytes: 1 << 26 };
+  const plan = must(planTransfer(from.pack, from.resolved, { budget, ref: REF, commit: src.commit }));
+  assert.equal(plan.pack.budget.reserveObjects, 258 + 2);
+  assert.equal(plan.pack.budget.reserveBytes, (32_000 + 2) * 68 + 32 * 1024);
 });
