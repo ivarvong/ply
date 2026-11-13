@@ -48,6 +48,14 @@ export const HEADER_VALUE_MAX = 128;
 export const MAX_RECORDED_HEADERS = 8;
 const HEADER_NAME = /^[0-9A-Za-z._-]+$/;
 // Private channel to cachingFetch (packcache.ts keeps the same literals). The edit bundle must not import that module.
+// A GET made on a POST's span (the pre-GET, a stale memo's GET): its body count moves to git.advertisement.bytes, so
+// git.response.bytes on that span is the POST's own and is absent when the POST reads no body (README telemetry).
+function asAdvertisement(span: Span): void {
+  const n = span.attrs['git.response.bytes'];
+  delete span.attrs['git.response.bytes'];
+  delete span.attrs['http.response.body.size'];
+  span.set({ 'git.advertisement.bytes': typeof n === 'number' ? n : 0 });
+}
 // The hint is set only when fetchImpl is cachingFetch, and that wrapper strips it before the origin fetch.
 const RECORD_HEADERS_REQUEST = 'x-ply-record-headers';
 const CACHING_FETCH_BRAND = 'plyCachingFetch';
@@ -658,6 +666,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     unsettle(service);
     const ad = await advertise(service, span);
     if (!ad.ok) return ad;
+    asAdvertisement(span);
     const again = `${base}/${service}`;
     span.set({ 'url.full': redactUrl(again), 'server.address': hostOf(), ...redirectAttrs() });
     clock.feed('request_sent');
@@ -677,6 +686,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
       if (shared !== null) await shared.catch(() => null);
       const ad = initialSettled ? null : await advertise(service, span);
       if (ad !== null && !ad.ok) { yield ad; return; }
+      if (ad !== null) asAdvertisement(span);
     }
     const target = `${base}/${service}`;
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- an absent hint is no hint

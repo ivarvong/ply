@@ -642,7 +642,7 @@ Each layer is testable without the one below it, and `test/bundle.test.js` asser
 - Span names: `git.<service> <command>` for wire round trips (`git.upload-pack ls-refs`, `git.upload-pack fetch`, `git.receive-pack`); `git.<op>` for operation roots (`git.edit`, `git.commit`, `git.push_tree`, `git.checkout`, `git.read_log`, `git.merge`, `git.rebase`, `git.cherry_pick`, `git.revert`, `git.branch_create`, `git.branch_delete`, `git.tag_create`); `git.<op>.<phase>` for their children.
 - Attribute keys: dotted lowercase under `git.` `http.` `url.` `server.` `mem.` `error.` `ply.` `exception.`.
 - Every trace root (operation roots and the spans that follow them, below) carries `<name>.outcome` (`ok`, `noop`, `fast_forward`, `cancelled`, …, or the error code).
-- Every wire span carries `git.transport` and `server.address`. A POST exchange also carries `git.request.bytes` (the body's length). `git.response.bytes` is set once a response body has been read to its end: on the advertisement GET (`discover`, and the GET ply makes before a first POST) and on a POST. A GET carries no `git.request.bytes` (it sends no body), and an exchange that fails before its body is read whole (a non-2xx, a timeout, a cut stream) carries no `git.response.bytes`.
+- Every wire span carries `git.transport` and `server.address`. A POST exchange also carries `git.request.bytes` (the body's length). `git.response.bytes` is set once a response body has been read to its end: on the advertisement GET (`discover`, and the GET ply makes before a first POST) and on a POST. A GET carries no `git.request.bytes` (it sends no body), and an exchange that fails before its body is read whole (a non-2xx, a timeout, a cut stream) carries no `git.response.bytes`. The GET ply makes on a POST's own span (`followRedirects: 'initial'`, or a stale redirect memo) records its body as `git.advertisement.bytes`, so `git.response.bytes` on a POST span is always the POST's.
 
 ### Telemetry contract
 
@@ -744,7 +744,7 @@ The same decoders as streams, for a `for await` (#241): `scanPack(source, { limi
 import { scanPack } from 'ply';
 
 // pack: a ReadableStream or AsyncIterable of a pack's bytes. An invalid pack errors the stream (a PlyError).
-const sizes = [];  // each object's type and inflated size, in pack order
+const sizes = [];  // each object's inflated size, in pack order
 let size = 0;
 for await (const piece of scanPack(pack)) {
   switch (piece.kind) {

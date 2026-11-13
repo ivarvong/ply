@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { scanPack, readCommit, Tracer } from '../src/index.js';
+import { scanPack, readCommit, Tracer, discover, lsRefs, createTransport } from '../src/index.js';
 import { arrayExporter, flattenLine } from '../src/otel.js';
 import { startGitServer, makeBareRepo, tmpRoot, commitFiles, git, gitBuf } from './server.js';
 
@@ -58,4 +58,51 @@ test('README wire-span attributes: GET has no request bytes, POST has them, a fa
     }
     assert.ok(failed > 0, 'the missing repository produced a failed exchange span');
   } finally { await srv.close(); cleanup(); }
+});
+
+// discover() is a lone GET: README says a GET carries no git.request.bytes, and git.response.bytes only once its body
+// was read whole (the 200; never the 404). Expected byte count: git's own advertisement, measured with curl-free fetch.
+test('README wire-span attributes on discover(): GET 200 has response bytes and no request bytes, GET 404 has neither', async () => {
+  const { root, cleanup } = tmpRoot(); const srv = await startGitServer(root);
+  try {
+    const bare = makeBareRepo(root, 'r'); const work = join(root, 'w'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+    commitFiles(work, bare, { 'a.txt': 'a\n' }, 'seed');
+    const raw = await fetch(`${srv.url}/r.git/info/refs?service=git-upload-pack`, { headers: { 'git-protocol': 'version=2' } });
+    const want = (await raw.arrayBuffer()).byteLength;
+    for (const [repo, okWant] of [['r', true], ['missing', false]]) {
+      const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex });
+      const t = createTransport(`${srv.url}/${repo}.git`, { tracer });
+      assert.ok(t.ok);
+      const r = await discover(t.value);
+      assert.equal(r.ok, okWant);
+      const [s] = ex.lines.flatMap(flattenLine).filter(x => x.name === 'git.upload-pack discover');
+      assert.ok(s, 'discover span');
+      assert.equal(s.attrs['http.request.method'], 'GET');
+      assert.ok(!('git.request.bytes' in s.attrs), `${repo}: a GET sends no body`);
+      if (okWant) assert.equal(s.attrs['git.response.bytes'], want);
+      else assert.ok(!('git.response.bytes' in s.attrs), `${repo}: a 404 read no body`);
+    }
+  } finally { await srv.close(); cleanup(); }
+});
+
+// followRedirects 'initial': the first POST makes its GET on the POST's own span. A POST that then fails (500) read no
+// POST body, so README's "a non-2xx exchange carries no git.response.bytes" must hold on that span too.
+test('README wire-span attributes: pre-GET then a failed POST carries no git.response.bytes', async () => {
+  const ad = new TextEncoder().encode('000eversion 2\n0013ls-refs=unborn\n0011fetch=shallow\n0000');
+  const fetchImpl = async (url, init) => {
+    if (String(url).includes('/info/refs')) return new Response(ad, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } });
+    await new Response(init.body).arrayBuffer();
+    return new Response('boom', { status: 500, headers: { 'content-type': 'text/plain' } });
+  };
+  const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex });
+  const t = createTransport('https://example.invalid/r.git', { fetchImpl, followRedirects: 'initial', tracer });
+  assert.ok(t.ok, JSON.stringify(t.error));
+  const r = await lsRefs(t.value, ['refs/heads/']);
+  assert.equal(r.ok, false);
+  const [s] = ex.lines.flatMap(flattenLine).filter(x => x.name === 'git.upload-pack ls-refs');
+  assert.ok(s, 'ls-refs span');
+  assert.equal(s.attrs['http.request.method'], 'POST');
+  assert.equal(s.attrs['http.response.status_code'], 500);
+  assert.equal(typeof s.attrs['git.request.bytes'], 'number');
+  assert.ok(!('git.response.bytes' in s.attrs), `a 500 POST read no body, got ${s.attrs['git.response.bytes']}`);
 });
