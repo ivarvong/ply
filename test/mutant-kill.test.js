@@ -32,6 +32,10 @@ import { createTransport as createTransportR } from '../src/http.js';
 import { verifyRef } from '../src/operation.js';
 import { syncRef } from '../src/sync.js';
 import { negotiate as negotiateR } from '../src/negotiate.js';
+import { fetchPack as fetchPackR } from '../src/fetchpack.js';
+import { fetchObject as fetchObjectR } from '../src/fetch.js';
+import { listTree as listTreeR } from '../src/read.js';
+import { isRetryable, retryPolicy, plyError } from '../src/errors.js';
 import { parseOid, parseCommitId } from '../src/oid.js';
 import {
   OID_BYTES, OID_HEX_CHARS, HEX_DIGIT_MIN, HEX_DIGIT_MAX, HEX_LOWER_MIN, HEX_LOWER_MAX, PACK_SIGNATURE, PACK_HEADER_BYTES, PACK_VERSION,
@@ -2520,4 +2524,53 @@ test('S2 #300-2: an advertisement non-2xx or foreign content type, and a POST fo
   const e = await (async () => { for await (const frame of transport(200, 'text/html', rec).frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })().then(() => null, x => x);
   assert.equal(e.code, 'not_git');
   assert.equal(rec.cancelled, 1, 'POST 200 text/html: body cancelled once');
+});
+
+// #300-5 round 3: a pack_corrupt is retryable exactly when the corrupt bytes came from the server (README error table:
+// retrying a server's transient corruption may succeed; retrying the caller's own bytes cannot). A fake smart-HTTP
+// server over fetchImpl: a v2 advertisement, ls-refs naming HEAD, and a fetch answer whose PACK is built by buildPack and
+// then has one trailer byte flipped (`flip`), so the pack fails its trailer check the way a corrupt network answer would.
+async function corruptServer({ flip }) {
+  const author = unwrap(ident(unwrap(validateIdent({ name: 'g', email: 'g@x', time: 1700000000 }))));
+  const tree = hashObject('tree', new Uint8Array(0));
+  const cdata = unwrap(encodeCommit({ tree, parents: [], author, committer: author, message: 'c\n' }));
+  const commit = hashObject('commit', cdata);
+  const { pack } = await buildPack([{ type: TYPE.COMMIT, data: cdata }]);
+  const sent = pack.slice();
+  if (flip) sent[sent.length - 1] ^= 0xff;
+  const res = (ct, ...parts) => new Response(concat(parts), { status: 200, headers: { 'content-type': ct } });
+  const P = s => unwrap(pkt(s));
+  const fetchImpl = async (url, init) => {
+    if (init === undefined || init.method === undefined || init.method === 'GET') {
+      return res('application/x-git-upload-pack-advertisement', P('version 2\n'), P('ls-refs=unborn\n'), P('fetch=shallow filter\n'), P('object-format=sha1\n'), FLUSH);
+    }
+    const body = td.decode(init.body);
+    if (body.includes('command=ls-refs')) return res('application/x-git-upload-pack-result', P(`${commit} HEAD\n`), FLUSH);
+    return res('application/x-git-upload-pack-result', P('packfile\n'), unwrap(pkt(concat([Uint8Array.of(SIDEBAND_PACK), sent]))), FLUSH);
+  };
+  return { fetchImpl, commit, tree };
+}
+
+test('S2 #300-5: a corrupt PACK the server sent is pack_corrupt and retryable through fetchPack and fetchObject', async () => {
+  const { fetchImpl, commit } = await corruptServer({ flip: true });
+  const t = createTransport('http://127.0.0.1:9/r.git', { fetchImpl, tracer: tracerStub });
+  const p = await fetchPackR(t, { wants: [commit] });
+  assert.equal(p.ok, false); assert.equal(p.error.code, 'pack_corrupt');
+  assert.equal(isRetryable(p.error), true, 'fetchPack: a server corruption may be transient');
+  const o = await fetchObjectR(t, { oid: commit });
+  assert.equal(o.ok, false); assert.equal(o.error.code, 'pack_corrupt');
+  assert.equal(isRetryable(o.error), true, 'fetchObject: a server corruption may be transient');
+  // the same server with the byte intact answers: the fault is the flipped byte, nothing else in the fake
+  const good = await corruptServer({ flip: false });
+  const ok = await fetchPackR(createTransport('http://127.0.0.1:9/r.git', { fetchImpl: good.fetchImpl, tracer: tracerStub }), { wants: [good.commit] });
+  assert.equal(ok.ok, true, ok.ok ? '' : ok.error.message);
+});
+
+test('S2 #300-5: a corrupt tree in the caller cache, inside a networked listTree, is pack_corrupt and not retryable', async () => {
+  const { fetchImpl, tree } = await corruptServer({ flip: false });
+  const r = await listTreeR('http://127.0.0.1:9/r.git', { path: '' }, { fetchImpl, cache: new Map([[tree, Uint8Array.of(1, 2, 3, 4, 5)]]) });
+  assert.equal(r.ok, false); assert.equal(r.error.code, 'pack_corrupt');
+  assert.equal(isRetryable(r.error), false, 'the caller\'s own bytes: a retry reads the same bytes');
+  assert.equal(retryPolicy(plyError('pack_corrupt', 'x')), 'no');
+  assert.equal(retryPolicy(plyError('pack_corrupt', 'x', { origin: 'remote' })), 'yes');
 });

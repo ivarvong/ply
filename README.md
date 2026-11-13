@@ -264,7 +264,7 @@ if (!stale.ok) {
       console.warn('unknown outcome'); break;
     case 'network': case 'timeout': case 'rate_limited': case 'upstream_5xx': case 'protocol':
       console.warn('transient: retry with backoff', e.code); break;  // isRetryable(e) is true for these
-    case 'pack_corrupt':  // e.origin === 'remote': the server's bytes, retry (isRetryable is true); absent: your own bytes, do not
+    case 'pack_corrupt':  // origin 'remote': parsed from bytes a fetch received (fetchPack, fetchObject, reads, openBlob), isRetryable true; absent: parsed from bytes you supplied (cache values, bytes, RangeSource, spool, saved index), do not retry
       console.warn('corrupt', e.origin ?? 'local'); break;
     case 'merge_conflict': case 'not_fast_forward': case 'not_linear': case 'unrelated_histories':
       console.warn('history needs a human', e.code); break;

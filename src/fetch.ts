@@ -680,6 +680,9 @@ export async function fetchExchange<T>(t: Transport, attrs: Attrs, fn: (span: Sp
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
   const r = await coded('pack_corrupt', () => spanned(t, 'git.upload-pack fetch', clientSpan(t, attrs), (span: Span): Promise<Result<T, PlyError>> => { held.span = span; return fn(span); }));
   if (!r.ok && held.span !== null) stampCacheStatus(r.error, held.span);
+  // #300-5: a pack_corrupt here came from parsing the bytes this exchange received from the server, so a retry may get
+  // good ones: origin 'remote' (errors.ts retryPolicy). Bytes the caller supplied are parsed elsewhere and stay unstamped.
+  if (!r.ok && r.error.code === 'pack_corrupt') Object.assign(r.error, { origin: 'remote' });
   return r;
 }
 // A verification failure after a cache HIT is retried once past the cache (packcache.ts); a corrupt live response is not.

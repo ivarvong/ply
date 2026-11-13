@@ -536,10 +536,12 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
     if (isFailSiteRecorder(record)) record(failHere);
     const code = thrownCodeOr(e, null);
     if (isPlyCode(code)) {
+      // #300-5: every byte this stream parses came from the server, so its corruption may be transient (errors.ts).
+      if (code === 'pack_corrupt' && e !== null && typeof e === 'object') Reflect.set(e, 'origin', 'remote');
       if (!span.ended) { fetchSpan.error(e).end(); endInflate({ 'git.blob.inflate.outcome': code }); span.error(e).set({ 'git.read.blob.outcome': code }).end(); }
       return e;
     }
-    const wrapped = plyError('pack_corrupt', `blob stream: ${thrownText(e)}`, { cause: e });
+    const wrapped = plyError('pack_corrupt', `blob stream: ${thrownText(e)}`, { cause: e, origin: 'remote' });
     if (!span.ended) { fetchSpan.error(wrapped).end(); endInflate({ 'git.blob.inflate.outcome': wrapped.code }); span.error(wrapped).set({ 'git.read.blob.outcome': wrapped.code }).end(); }
     return wrapped;
   };

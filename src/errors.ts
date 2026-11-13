@@ -95,9 +95,10 @@ export type ExtraFields = {
   // 'empty_response': a fetch response with no section in it, not even its flush (v2End): what git's upload-pack sends
   // when it dies on an argument it did not advertise (fetch.ts filterAdvertised).
   readonly reason: Reason;
-  // pack_corrupt only (#300-5): 'remote' when the corrupt bytes came from the server over a fetch (operation() sets it
-  // once an upload-pack request was handed to the transport), so a retry may get good bytes. Absent: the bytes were the
-  // caller's own (bytes, a RangeSource, a saved spool, a pure codec), and retrying them cannot succeed.
+  // pack_corrupt only (#300-5): 'remote' when the corrupt bytes were received from the server by an upload-pack fetch
+  // exchange (fetch.ts fetchExchange: fetchPack, fetchObject and every read built on them), so a retry may get good bytes.
+  // Absent: the bytes were parsed from something the caller supplied (a cache Map value, bytes, a RangeSource, a saved
+  // spool or index, a pure codec), and retrying them cannot succeed.
   readonly origin: 'remote';
 };
 // The error context bag: one of the two places Input is allowed (docs/STACK.md, Absence). Any subset of the fields.
