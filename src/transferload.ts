@@ -81,7 +81,7 @@ async function fromSaved(source: RangeSource, cfg: LoadConfig, span: Span, bytes
 
 // See the top of this file.
 export async function loadTransferPack(dst: Transport, source: RangeSource, saved: Option<Uint8Array>, opts: LoadOpts = {}): Promise<Result<LoadedPack, PlyError>> {
-  const shape = argsError('loadTransferPack', [['dst', dst, 'object'], ['source', source, 'object'], ['saved', saved, 'object'], ['options', opts, 'object?']]);
+  const shape = argsError('loadTransferPack', [['dst', dst, 'object'], ['source', source, 'object'], ['saved', saved, 'object'], ['options', opts, 'object']]);
   if (shape !== null) return shape;
   const input = withDefaults<LoadConfig>(opts, { scan: {}, resolve: {}, signal: UNCANCELLABLE });
   const span0 = { parent: dst.parent, kind: KIND.INTERNAL, attrs: { 'git.transfer.load.saved_in': saved.tag === 'some' ? saved.value.length : 0, 'git.transfer.spool.bytes': source.size }, scrub: dst.scrub };

@@ -427,7 +427,7 @@ export function scanLimitsOf(input: Partial<ScanIndexOpts>): Result<CheckedLimit
 }
 
 export async function scanPackIndex(source: ScanSource, input: Partial<ScanIndexOpts> = {}): Promise<Result<ScannedPack, ScanError>> {
-  const shape = argsError('scanPackIndex', [['source', source, 'object'], ['options', input, 'object?']]);
+  const shape = argsError('scanPackIndex', [['source', source, 'object'], ['options', input, 'object']]);
   if (shape !== null) return shape;
   const opts = withDefaults(input, defaultOpts());
   const limits = parseLimits(opts.limits);

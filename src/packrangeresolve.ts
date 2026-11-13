@@ -614,7 +614,7 @@ export function resolveOptsOf(input: Partial<ResolveRangeOpts>): Result<CheckedO
 
 // Resolve every entry of `pack` (scanPackIndex's index of the bytes `source` serves). See the top of this file.
 export async function resolvePackRange(pack: ScannedPack, source: RangeSource, input: Partial<ResolveRangeOpts> = {}): Promise<Result<ResolvedIndex, PlyError>> {
-  const shape = argsError('resolvePackRange', [['pack', pack, 'object'], ['source', source, 'object'], ['options', input, 'object?']]);
+  const shape = argsError('resolvePackRange', [['pack', pack, 'object'], ['source', source, 'object'], ['options', input, 'object']]);
   if (shape !== null) return shape;
   const parsed = resolveOptsOf(input);
   if (!parsed.ok) return parsed;

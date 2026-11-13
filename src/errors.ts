@@ -10,7 +10,7 @@ import type { ObjectTypeName } from './format.js';
 import type { Err } from './result.js';
 import { err, getOrElse } from './result.js';
 import type { Input } from './absent.js';
-import { field, isMissing } from './absent.js';
+import { field } from './absent.js';
 
 export type Retry = 'yes' | 'fresh' | 'no' | 'read';
 
@@ -218,11 +218,11 @@ export const remoteQuoted = (text: string, max: number = REMOTE_TEXT_MAX): strin
 
 // The shape check of a public entry point's arguments (#296): a caller passing null, a number or an array where an
 // object is documented gets bad_request naming the argument, never a TypeError from the first property read.
-// 'object?' also takes a missing value (a defaulted argument); 'bytes' is a Uint8Array.
-export type ArgKind = 'object' | 'object?' | 'array' | 'bytes';
-const ARG_NOUN: Readonly<Record<ArgKind, string>> = { object: 'an object', 'object?': 'an object', array: 'an array', bytes: 'a Uint8Array' };
+// An optional options argument is defaulted (`= {}`) in the signature, so undefined never reaches the check; 'bytes'
+// is a Uint8Array.
+export type ArgKind = 'object' | 'array' | 'bytes';
+const ARG_NOUN: Readonly<Record<ArgKind, string>> = { object: 'an object', array: 'an array', bytes: 'a Uint8Array' };
 const argFits = (value: unknown, kind: ArgKind): boolean => {
-  if (kind === 'object?' && isMissing(value)) return true;
   if (kind === 'array') return Array.isArray(value);
   if (kind === 'bytes') return value instanceof Uint8Array;
   return typeof value === 'object' && value !== null && !Array.isArray(value);

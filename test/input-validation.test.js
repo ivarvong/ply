@@ -24,6 +24,8 @@ test('node entry points answer a null or mis-typed argument with bad_request nam
   await coded('pushRepo options 5', () => pushRepo('/nonexistent', 'https://example.invalid/x', {}, 5), 'options');
   await coded('pushRepo spec null', () => pushRepo('/nonexistent', 'https://example.invalid/x', null), 'spec');
   await coded('pushDir spec null', () => pushDir('https://example.invalid/x', null), 'spec');
+  await coded('pushDir spec omitted', () => pushDir('https://example.invalid/x'), 'spec');
+  await coded('filesFromDir dir omitted', () => filesFromDir(), 'dir');
   await coded('pushDir spec 5', () => pushDir('https://example.invalid/x', 5), 'spec');
   await coded('pushDir spec []', () => pushDir('https://example.invalid/x', []), 'spec');
   await coded('pushDir options []', () => pushDir('https://example.invalid/x', { dir: '/nonexistent' }, []), 'options');
@@ -61,23 +63,32 @@ test('a file path with a trailing slash names a directory and is refused; a tree
 // index.ts is imported dynamically: the mutation suite has no static index import (#313).
 const index = () => import('../src/index.ts');
 const O = {};
+// Each argument: [name, well-shaped stand-in, required]. README §errors: an argument of the wrong shape is a caller
+// error, a coded bad_request naming it. Wrong shapes, by the argument's TypeScript type: null, undefined (for a
+// required one), a number, and an array where an object is declared (an array is no options/pack/source record) or
+// an object where an array or bytes is declared. An omitted optional options argument is the default, never refused.
+const OBJ = [null, 5, []];
 const STACK = [
-  ['scanPackIndex', [['source', O], ['options', O]]],
-  ['resolvePackRange', [['pack', O], ['source', O], ['options', O]]],
-  ['planPackBatches', [['pack', O], ['resolved', O], ['options', O]]],
-  ['packSubset', [['source', O], ['pack', O], ['selection', []], ['options', O]]],
-  ['planTransfer', [['pack', O], ['resolved', O], ['options', O]]],
-  ['copyTree', [['dst', O], ['from', O], ['options', O]]],
-  ['decodeSavedIndex', [['bytes', new Uint8Array(0)], ['want', O]]],
-  ['loadTransferPack', [['dst', O], ['source', O], ['saved', O], ['options', O]]],
-  ['pushPack', [['transport', O], ['options', O]]],
+  ['scanPackIndex', [['source', O, true], ['options', O, false]]],
+  ['resolvePackRange', [['pack', O, true], ['source', O, true], ['options', O, false]]],
+  ['planPackBatches', [['pack', O, true], ['resolved', O, true], ['options', O, true]]],
+  ['packSubset', [['source', O, true], ['pack', O, true], ['selection', [], true, [null, 5, O]], ['options', O, false]]],
+  ['planTransfer', [['pack', O, true], ['resolved', O, true], ['options', O, true]]],
+  ['copyTree', [['dst', O, true], ['from', O, true], ['options', O, true]]],
+  ['decodeSavedIndex', [['bytes', new Uint8Array(0), true, [null, 5, [], O]], ['want', O, true]]],
+  ['loadTransferPack', [['dst', O, true], ['source', O, true], ['saved', O, true], ['options', O, false]]],
+  ['pushPack', [['transport', O, true], ['options', O, true]]],
 ];
+const show = v => (v === undefined ? 'undefined' : JSON.stringify(v));
 for (const [name, args] of STACK) {
-  test(`${name}: null for each argument is bad_request naming it, never a throw (#296-2)`, async () => {
+  test(`${name}: null, undefined, a number or an array/object of the wrong kind for each argument is bad_request naming it, never a throw (#296-2)`, async () => {
     const fn = (await index())[name];
     for (let i = 0; i < args.length; i++) {
-      const call = args.map(([, v], j) => (j === i ? null : v));
-      await coded(`${name}(${args.map(([n], j) => (j === i ? 'null' : n)).join(', ')})`, () => fn(...call), args[i][0]);
+      const [what, , required, wrong = OBJ] = args[i];
+      for (const bad of required ? [...wrong, undefined] : wrong) {
+        const call = args.map(([, v], j) => (j === i ? bad : v));
+        await coded(`${name}(${args.map(([n], j) => (j === i ? show(bad) : n)).join(', ')})`, () => fn(...call), what);
+      }
     }
   });
 }
@@ -295,4 +306,20 @@ test('every function export of index.ts, null in each argument position: no thro
   }
   assert.deepEqual(throws.filter(s => !STILL_THROWS.has(s)), [], 'a call shape outside the allow-list throws');
   assert.deepEqual([...STILL_THROWS].filter(s => !throws.includes(s)), [], 'a listed shape no longer throws: remove it from STILL_THROWS');
+});
+
+// The other half of the options contract: an omitted optional options argument means the defaults (README: options
+// are optional), so the call answers exactly as it does with {}; it is never bad_request naming 'options'.
+test('an omitted optional options argument answers as {} does, never bad_request options (#296-2)', async () => {
+  const m = await index();
+  const empty = () => (async function* () {})();
+  const cases = [
+    ['scanPackIndex', o => m.scanPackIndex(empty(), ...o)],
+    ['loadTransferPack', o => m.loadTransferPack(O, O, O, ...o)],
+  ];
+  for (const [name, call] of cases) {
+    const omitted = await call([]);
+    assert.notEqual(omitted.ok === false && omitted.error.what, 'options', `${name}: omitted options refused`);
+    assert.deepEqual(omitted, await call([{}]), `${name}: omitted differs from {}`);
+  }
 });
