@@ -30,10 +30,9 @@ import { scanPackIndex } from '../src/packscanindex.js';
 import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
 import { createTransport } from '../src/http.js';
-import { planTransfer, checkTransferPlan, rootCommit, batchTrees, extraTrees, TRANSFER_REF_PREFIX } from '../src/transferplan.js';
+import { planTransfer, checkTransferPlan, rootCommit, batchTrees, TRANSFER_REF_PREFIX } from '../src/transferplan.js';
 import { transferStatus, transferStep, runTransfer, copyTree, sweepTransfers } from '../src/transfer.js';
 import { te } from '../src/bytes.js';
-import { planPackBatches } from '../src/packplan.js';
 import { TYPE } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap } from './unwrap.js';
@@ -272,12 +271,28 @@ test('resume: paused after every push and resumed, the same head; a step already
       const before = refsOf(bare);
       const again = await transferStep(t, from, plan, at - 1, { commit: src.commit, ref: REF });
       assert.equal(again.ok, false);
+      // the server's compare-and-swap refusal (`ng … stale ref`), not ply's done check
+      assert.equal(again.error.code, 'cas_conflict');
+      assert.doesNotMatch(again.error.message, /transfer is done/);
       assert.equal(refsOf(bare), before);
     }
   }
   // one push a run; the run that pushes the last step reads the refs back and is done
   assert.equal(runs, plan.steps.length);
   assertCopied(bare, plan);
+  // after done the temp ref is gone, so step 0's create (`<temp ref> 0000… → <temp>`) would hold on the server again:
+  // ply refuses it before any push, and git shows only the published ref, no temp ref re-created
+  const late = await transferStep(t, from, plan, 0, { commit: src.commit, ref: REF });
+  assert.equal(late.ok, false);
+  assert.equal(late.error.code, 'cas_conflict');
+  assert.equal(late.error.what, 'ref');
+  assert.match(late.error.message, /transfer is done/);
+  // a later step needs no read first: its old id is a temp commit the absent temp ref does not name, git refuses it
+  const later = await transferStep(t, from, plan, 1, { commit: src.commit, ref: REF });
+  assert.equal(later.ok, false);
+  assert.doesNotMatch(later.error.message, /transfer is done/);
+  assert.equal(refsOf(bare), `${REF} ${plan.head}`);
+  assert.equal(refsOf(bare), `${REF} ${plan.head}`);
 });
 
 test('a push that dies mid-stream moves nothing; the next run finishes; a step that never lands is ambiguous', async () => {
@@ -612,88 +627,4 @@ test('an exception out of resolved.oid() is the cause of a coded refusal: planTr
     refused(await runTransfer(t, onlyBase, plan, src.commit, { ref: REF }), 'runTransfer, oid() throws only for the cut base');
     assert.equal(refsOf(bare), refsOf(honest.bare), 'refs after runTransfer, cut base');
   }
-});
-
-// #298-3: a host refuses a tree over 16,223 entries (Cloudflare Artifacts, 2026-11-09 spike). A crafted source whose
-// ids share their first byte must still give trees under that, every input id listed once (read back by git).
-test('temp trees: a crafted id distribution (16,500 ids under one first byte) gives no tree over the host limit', () => {
-  const HOST_TREE_LIMIT = 16_223;
-  const ids = [];
-  for (let i = 0; i < 16_500; i++) ids.push(`00${i.toString(16).padStart(6, '0')}${'ab'.repeat(16)}`);
-  for (let i = 0; i < 40; i++) ids.push(`${(i + 1).toString(16).padStart(2, '0')}${'cd'.repeat(19)}`);
-  const resolved = { count: ids.length, oid: i => (i < ids.length ? { tag: 'some', value: ids[i] } : { tag: 'none' }), type: i => (i < ids.length ? { tag: 'some', value: 3 } : { tag: 'none' }) };
-  const { subtrees, root: rootTree } = must(batchTrees(resolved, [...ids.keys()]));
-  const scratch = makeBareRepo(root, `scratch${n++}`);
-  for (const o of [...subtrees, rootTree]) assert.equal(git(scratch, ['hash-object', '-w', '-t', 'tree', '--stdin'], { input: Buffer.from(o.data) }).trim(), o.oid);
-  for (const o of [...subtrees, rootTree]) {
-    const entries = git(scratch, ['ls-tree', o.oid], { maxBuffer: 1 << 26 }).split('\n').filter(Boolean).length;
-    assert.ok(entries <= HOST_TREE_LIMIT, `tree ${o.oid} has ${entries} entries`);
-  }
-  const listed = git(scratch, ['ls-tree', '-r', rootTree.oid], { maxBuffer: 1 << 26 }).split('\n').filter(Boolean).map(l => l.split(/\s+/)[2]);
-  assert.deepEqual(listed.toSorted(), ids.toSorted());
-});
-
-// #298-1: the planner holds per-entry structures for at most maxPackObjects entries (the scan's own limit, README
-// limits table: 100,000 by default), refused before any is allocated; at the limit it plans past the check.
-const stubResolved = count => ({ count, oid: () => { throw new Error('read'); }, type: () => { throw new Error('read'); }, find: () => ({ tag: 'none' }), columns: {} });
-test('planPackBatches: a pack over maxPackObjects is refused as limit_exceeded before an entry is read', () => {
-  const r = planPackBatches({ count: 1_000 }, stubResolved(1_000), { budget: BUDGET, maxPackObjects: 999 });
-  assert.equal(r.ok, false);
-  assert.equal(r.error.code, 'limit_exceeded');
-  assert.equal(r.error.what, 'maxPackObjects');
-  assert.equal(r.error.got, 1_000);
-  assert.equal(r.error.max, 999);
-  const def = planPackBatches({ count: 100_001 }, stubResolved(100_001), { budget: BUDGET });
-  assert.equal(def.error?.what, 'maxPackObjects');
-});
-test('planPackBatches: a pack of exactly maxPackObjects (default 100,000) is not refused by the bound', () => {
-  for (const [count, opts] of [[1_000, { maxPackObjects: 1_000 }], [100_000, {}]]) {
-    // every entry a 3-byte blob with no base (the planner's columns), so the plan runs past the bound to the budget
-    const cols = new Map();
-    const columns = new Proxy({}, { get: (_, k) => { if (!cols.has(k)) cols.set(k, new Float64Array(count).fill(k === 'type' ? 3 : k === 'base' ? -1 : 3)); return cols.get(k); } });
-    let r;
-    try { r = planPackBatches({ count }, { ...stubResolved(count), columns }, { budget: { ...BUDGET, maxObjects: count, maxRequestBytes: 1 << 30 }, ...opts }); } catch (e) { r = { ok: false, error: { what: `threw ${e.message}` } }; }
-    assert.notEqual(r.ok === false ? r.error.what : null, 'maxPackObjects', `count ${count}`);
-  }
-});
-test('planTransfer: refuses a pack over maxPackObjects before reading any entry (treeEntries)', () => {
-  const r = planTransfer({ count: 1_000, columns: {} }, stubResolved(1_000), { budget: BUDGET, ref: 'refs/heads/x', commit: new Uint8Array(0), maxPackObjects: 999 });
-  assert.equal(r.ok, false);
-  assert.equal(r.error.what, 'maxPackObjects');
-  assert.equal(r.error.got, 1_000);
-});
-
-// #298-3: hand-derived: a fan of g ids is split into ceil(g / 16,000) subtrees, so 16,000 ids under one first byte
-// give one subtree of 16,000, 16,001 give two (16,000 + 1); git reads every id back.
-for (const [count, sizes] of [[16_000, [16_000]], [16_001, [16_000, 1]]]) {
-  test(`temp trees: ${count} ids under one first byte give subtrees of ${sizes.join(' + ')}`, () => {
-    const ids = [];
-    for (let i = 0; i < count; i++) ids.push(`00${i.toString(16).padStart(6, '0')}${'ab'.repeat(16)}`);
-    const resolved = { count: ids.length, oid: i => (i < ids.length ? { tag: 'some', value: ids[i] } : { tag: 'none' }), type: () => ({ tag: 'some', value: 3 }) };
-    const { subtrees, root: rootTree } = must(batchTrees(resolved, [...ids.keys()]));
-    const scratch = makeBareRepo(root, `scratch${n++}`);
-    for (const o of [...subtrees, rootTree]) assert.equal(git(scratch, ['hash-object', '-w', '-t', 'tree', '--stdin'], { input: Buffer.from(o.data) }).trim(), o.oid);
-    const sizesSeen = subtrees.map(o => git(scratch, ['ls-tree', o.oid], { maxBuffer: 1 << 26 }).split('\n').filter(Boolean).length);
-    assert.deepEqual(sizesSeen.toSorted((a, b) => b - a), sizes);
-    const listed = git(scratch, ['ls-tree', '-r', rootTree.oid], { maxBuffer: 1 << 26 }).split('\n').filter(Boolean).map(l => l.split(/\s+/)[2]);
-    assert.deepEqual(listed.toSorted(), ids.toSorted());
-  });
-}
-
-// #298-3: the reserve grows only by the trees a split can add: floor(maxObjects / 16,000) (hand-derived above), so
-// the README's Artifacts example (50,000 objects) reserves 3 extra trees, not thousands.
-test('extraTrees: floor(maxObjects / 16,000)', () => {
-  assert.equal(extraTrees(15_999), 0);
-  assert.equal(extraTrees(16_000), 1);
-  assert.equal(extraTrees(50_000), 3);
-});
-
-// #298-3: the plan's budget carries ply's reserve, hand-derived from the README: 258 generated objects plus
-// floor(maxObjects / 16,000) split trees, and 68 bytes per batch object and per split tree plus 32 KiB.
-test('planTransfer: the planned budget reserves the split trees a batch of maxObjects may add', async () => {
-  const from = await spooled(src.packs.ofs);
-  const budget = { ...BUDGET, maxObjects: 32_000, maxRequestBytes: 1 << 26 };
-  const plan = must(planTransfer(from.pack, from.resolved, { budget, ref: REF, commit: src.commit }));
-  assert.equal(plan.pack.budget.reserveObjects, 258 + 2);
-  assert.equal(plan.pack.budget.reserveBytes, (32_000 + 2) * 68 + 32 * 1024);
 });

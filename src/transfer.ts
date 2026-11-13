@@ -16,9 +16,8 @@
 //
 // The caller owns where the loop runs and the spool (a RangeSource over the fetched pack): a Worker that cannot finish
 // in one request runs `maxSteps` steps, keeps the plan (plain JSON, checked against its hash) and resumes in the next.
-// Nothing about progress is held locally: the next step is read from the destination every time. A step the caller
-// sends again after the run is done is not refused for every step: steps 0..n-2 land again (the temp ref is re-created;
-// sweepTransfers clears it), only the last is `ng … stale ref` (see transferStep and README 'Resumable transfer').
+// Nothing about progress is held locally: the next step is read from the destination every time, so a step that
+// landed is never sent again (a replay would be `ng … stale ref` anyway: every update is a compare-and-swap).
 //
 // Spans (each under the transport's parent): git.transfer.run > git.transfer.status, git.transfer.step (> the push's
 // wire spans), git.transfer.settle; git.transfer.sweep. Every one carries git.transfer.plan.hash and an outcome.
@@ -169,10 +168,9 @@ async function sendStep(dst: Transport, span: Span, { from, plan, step, commit }
 }
 
 // One push: step `step` of `plan` (checked, and held to the pack: planFitsPack), its entries read from `from.source`. `commit` is the source commit's bytes (the
-// final step rebuilds the new commit from them). Every update is a compare-and-swap, so a step sent again while the
-// transfer is in flight is refused by the server (`ng … stale ref`). After done it is not: the final push deleted the
-// temp ref, so step 0's create holds again and each later batch step chains on it; only the final step stays refused
-// (`ref` exists). Such a late replay leaves a temp ref (transferStatus: done, tempLeft) for sweepTransfers.
+// final step rebuilds the new commit from them). Every update is a compare-and-swap, so a step that already landed is
+// refused by the server (`ng … stale ref`), never applied twice. The one exception is step 0 after done: the final
+// push deleted the temp ref, so step 0's create would hold again; transferStep reads the refs first and refuses it.
 async function stepSpan(dst: Transport, input: StepInput): Promise<Result<{ readonly pushed: Pushed }, PlyError>> {
   const r = await spanned(dst, 'git.transfer.step', internal(dst, { ...planAttrs(input.plan), 'git.transfer.step': input.step }), async (span: Span): Promise<Result<{ readonly pushed: Pushed }, PlyError>> => {
     const sent = await sendStep(withParent(dst, span), span, input);
@@ -193,6 +191,14 @@ export async function transferStep(dst: Transport, from: TransferPack, plan: Tra
   if (!(given.commit instanceof Uint8Array)) return fail('bad_request', 'transfer: `commit` is the source commit\'s bytes', { what: 'commit' });
   const fits = planFitsPack(checked.value, from.pack, from.resolved);
   if (!fits.ok) return fits;
+  // Step 0 creates the temp ref, a create the server would accept again once the final push has deleted it: a step 0
+  // sent after done is refused here, before any push (the refs are read; a read that fails is that failure). A step 0
+  // whose read precedes another runner's final push and whose push follows it still lands: tempLeft, for sweepTransfers.
+  if (step === 0) {
+    const status = await readStatus(dst, checked.value);
+    if (!status.ok) return status;
+    if (status.value.tag === 'done') return fail('cas_conflict', `transfer: ${checked.value.ref} is already at ${checked.value.head}; the transfer is done`, { expected: null, actual: checked.value.head, what: 'ref' });
+  }
   const r = await stepSpan(dst, { from, plan: checked.value, step, commit: given.commit });
   return r.ok ? r.value.pushed : r;
 }

@@ -590,24 +590,21 @@ test('a push whose fetch rejects before pulling the body is not a push: the netw
   }
 });
 
-test('batch steps sent again after done land again (git shows the temp ref re-created), only the final step is refused; status stays done, tempLeft true, and a sweep removes it', async () => {
+test('a step sent again after done never writes: step 0 is refused before any push (git shows only the published ref, no temp ref), every later step is refused, status stays done with no temp ref', async () => {
   const p = plan();
   assert.ok(p.steps.length >= 3);
   const { bare, t } = repo();
   assert.deepEqual(must(await runTransfer(t, from, p, src.commit, { settle: FAST, ref: REF })), { tag: 'done', head: p.head, pushes: p.steps.length, tempLeft: false });
   assertPublished(bare, p);
-  // step 0's only command is `<temp ref> 0000… → <step 0 temp>`: once the final push has deleted the temp ref, that
-  // compare-and-swap holds again, so git applies it (README, Resumable transfer: step 0 is the one step that can)
+  // step 0's only command is `<temp ref> 0000… → <step 0 temp>`: once the final push has deleted the temp ref that
+  // compare-and-swap would hold again on the server, so the refusal has to come from ply, before any push
   const late = await transferStep(t, from, p, 0, { commit: src.commit, ref: REF });
-  assert.deepEqual(late, { ok: true, value: { step: 0 } });
-  assert.equal(refsOf(bare), `${REF} ${p.head}\n${p.tempRef} ${p.steps[0].temp}`);
-  // and each later batch step chains on it (its old id is the temp commit the ref now names), so it lands too; only
-  // the final step is refused (`ref` exists)
-  const last = p.steps.length - 1;
-  for (let i = 1; i < last; i++) assert.deepEqual(await transferStep(t, from, p, i, { commit: src.commit, ref: REF }), { ok: true, value: { step: i } }, `step ${i}`);
-  assert.equal((await transferStep(t, from, p, last, { commit: src.commit, ref: REF })).ok, false, 'the final step');
-  assert.equal(refsOf(bare), `${REF} ${p.head}\n${p.tempRef} ${p.steps[last - 1].temp}`);
-  assert.deepEqual(must(await runTransfer(t, from, p, src.commit, { settle: FAST, ref: REF })), { tag: 'done', head: p.head, pushes: 0, tempLeft: true });
-  must(await sweepTransfers(t, {}));
+  assert.equal(late.ok, false);
+  assert.equal(late.error.code, 'cas_conflict');
+  assert.equal(refsOf(bare), `${REF} ${p.head}`);
+  // every later step's old id is a temp commit the (absent) temp ref does not name: git refuses it
+  for (let i = 1; i < p.steps.length; i++) assert.equal((await transferStep(t, from, p, i, { commit: src.commit, ref: REF })).ok, false, `step ${i}`);
+  assert.equal(refsOf(bare), `${REF} ${p.head}`);
+  assert.deepEqual(must(await runTransfer(t, from, p, src.commit, { settle: FAST, ref: REF })), { tag: 'done', head: p.head, pushes: 0, tempLeft: false });
   assertPublished(bare, p);
 });
