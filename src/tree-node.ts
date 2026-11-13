@@ -116,7 +116,7 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
 
 export type PushDirSpec = Omit<TreeSpec, 'files'> & { readonly dir: string } & Input<{ readonly filter: DirFilter | null }>;
 export async function pushDir(url: string, given: PushDirSpec, opts: PushTreeOptions = {}): Promise<Result<PushTreeResult, PlyError>> {
-  if (typeof given !== 'object' || !isArgObject(given)) return fail('bad_request', 'pushDir: spec must be an object', { what: 'spec' });
+  if (!isArgObject(given)) return fail('bad_request', 'pushDir: spec must be an object', { what: 'spec' });
   if (!isArgObject(opts)) return fail('bad_request', 'pushDir: options must be an object', { what: 'options' });
   const { dir, filter = null, ...spec } = given;
   const limits = limitsOf(opts);

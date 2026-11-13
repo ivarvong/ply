@@ -35,12 +35,23 @@ test('node entry points answer a null or mis-typed argument with bad_request nam
   await coded('pushDir options null', () => pushDir('https://example.invalid/x', { dir: '/nonexistent' }, null), 'options');
   await coded('filesFromDir dir null', () => filesFromDir(null), 'dir');
   await coded('filesFromDir options 5', () => filesFromDir('/nonexistent', 5), 'options');
+  // a well-shaped spec and options pass the shape checks: the first refusal is the unreadable directory itself
+  await coded('pushDir valid shape, missing dir', () => pushDir('https://example.invalid/x', { dir: '/nonexistent' }, {}), 'dir');
+  await coded('pushDir valid shape, options omitted', () => pushDir('https://example.invalid/x', { dir: '/nonexistent' }), 'dir');
 });
 
 test('a userAgent that is no RFC 9110 field-value is refused at parse (#300-1)', () => {
   for (const ua of [' ply', 'ply ', '\tply', 'ply\t', 'ply\u0001', 'ply\u007F', 'ply☃', 'ply\t\u0000', 'a\nb', 'ply😀']) {
     const r = createTransport('https://h/r', { userAgent: ua });
     assert.equal(r.ok, false, JSON.stringify(ua));
+    assert.equal(r.error.code, 'bad_request');
+    assert.equal(r.error.what, 'userAgent');
+  }
+  // a field value is a string (RFC 9110 §5.5 defines it over octets): a number or null is no value, even though
+  // RegExp.test would coerce it to '5' or 'null'
+  for (const ua of [5, null, {}]) {
+    const r = createTransport('https://h/r', { userAgent: ua });
+    assert.equal(r.ok, false, String(ua));
     assert.equal(r.error.code, 'bad_request');
     assert.equal(r.error.what, 'userAgent');
   }
