@@ -168,8 +168,10 @@ async function sendStep(dst: Transport, span: Span, { from, plan, step, commit }
 }
 
 // One push: step `step` of `plan` (checked, and held to the pack: planFitsPack), its entries read from `from.source`. `commit` is the source commit's bytes (the
-// final step rebuilds the new commit from them). Every update is a compare-and-swap, so a step that already landed is
-// refused by the server (`ng … stale ref`), never applied twice.
+// final step rebuilds the new commit from them). Every update is a compare-and-swap, so a step sent again while the
+// transfer is in flight is refused by the server (`ng … stale ref`). After done it is not: the final push deleted the
+// temp ref, so step 0's create holds again and each later batch step chains on it; only the final step stays refused
+// (`ref` exists). Such a late replay leaves a temp ref (transferStatus: done, tempLeft) for sweepTransfers.
 async function stepSpan(dst: Transport, input: StepInput): Promise<Result<{ readonly pushed: Pushed }, PlyError>> {
   const r = await spanned(dst, 'git.transfer.step', internal(dst, { ...planAttrs(input.plan), 'git.transfer.step': input.step }), async (span: Span): Promise<Result<{ readonly pushed: Pushed }, PlyError>> => {
     const sent = await sendStep(withParent(dst, span), span, input);
