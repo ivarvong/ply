@@ -16,8 +16,9 @@
 //
 // The caller owns where the loop runs and the spool (a RangeSource over the fetched pack): a Worker that cannot finish
 // in one request runs `maxSteps` steps, keeps the plan (plain JSON, checked against its hash) and resumes in the next.
-// Nothing about progress is held locally: the next step is read from the destination every time, so a step that
-// landed is never sent again (a replay would be `ng … stale ref` anyway: every update is a compare-and-swap).
+// Nothing about progress is held locally: the next step is read from the destination every time. A step the caller
+// sends again after the run is done is not refused for every step: steps 0..n-2 land again (the temp ref is re-created;
+// sweepTransfers clears it), only the last is `ng … stale ref` (see transferStep and README 'Resumable transfer').
 //
 // Spans (each under the transport's parent): git.transfer.run > git.transfer.status, git.transfer.step (> the push's
 // wire spans), git.transfer.settle; git.transfer.sweep. Every one carries git.transfer.plan.hash and an outcome.

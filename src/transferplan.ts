@@ -47,6 +47,8 @@ export { sweepPrefix, isTempKey } from './transfernames.js';
 export const TRANSFER_IDENT = 'ply transfer <ply-transfer@invalid> 0 +0000';
 // Generated objects per batch at most: 256 subtrees, the root tree, the temp commit.
 export const TRANSFER_GENERATED_OBJECTS = 258;
+// Entries in one generated tree at most: under the 16,223 a host refused above (Cloudflare Artifacts, 2026-11-09).
+export const TRANSFER_TREE_ENTRIES = 16_000;
 // Bytes of generated objects per batch object at most: a subtree entry is `100644 ` + 38 hex + NUL + 20 bytes = 66,
 // deflated stored at worst (a 5-byte header per 16 KiB block); the fixed part covers the root tree, the commits,
 // object headers and the two commands' pkt-lines.
@@ -108,32 +110,46 @@ function entryAt(r: ResolvedIndex, i: number): Result<{ readonly oid: Oid; reado
   }
 }
 
+function treeObject(list: readonly EntryOf[]): Result<GeneratedObject, PlyError> {
+  const data = encodeEntries([...list]);
+  return data.ok ? ok({ type: OBJ_TREE, data: data.value, oid: hashObject('tree', data.value) }) : data;
+}
+const leaf = (depth: number, group: readonly EntryOf[]): Result<GeneratedObject, PlyError> => treeObject(group.map(e => ({ ...e, name: e.oid.slice(depth) })));
+// A tree over `list` (ids sharing their first `depth` hex digits): subtrees by the next two digits; a group over
+// TRANSFER_TREE_ENTRIES fans out again (#298-3), so no tree a crafted id distribution gives is over a host's limit.
+function fanned(depth: number, list: readonly EntryOf[], out: GeneratedObject[]): Result<GeneratedObject, PlyError> {
+  const groups = new Map<string, EntryOf[]>();
+  for (const e of list) {
+    const fan = e.oid.slice(depth, depth + 2);
+    const g = getOrElse(mapGet(groups, fan), [] as EntryOf[]);
+    g.push(e);
+    groups.set(fan, g);
+  }
+  const top: EntryOf[] = [];
+  for (const [fan, group] of groups) {
+    const sub = group.length > TRANSFER_TREE_ENTRIES ? fanned(depth + 2, group, out) : leaf(depth + 2, group);
+    if (!sub.ok) return sub;
+    out.push(sub.value);
+    top.push({ mode: MODE_TREE, name: fan, oid: sub.value.oid });
+  }
+  return treeObject(top);
+}
+
 // The temp tree for a batch: its objects by id, fanned out by the id's first two hex digits. The root tree is last.
 export function batchTrees(resolved: ResolvedIndex, entries: readonly number[]): Result<{ readonly subtrees: readonly GeneratedObject[]; readonly root: GeneratedObject }, PlyError> {
-  // by fan, then by name: an id the batch holds twice (a pack may) is listed once
-  const groups = new Map<string, Map<string, EntryOf>>();
+  // by id: an id the batch holds twice (a pack may) is listed once
+  const byId = new Map<string, EntryOf>();
   for (const i of entries) {
     const e = entryAt(resolved, i);
     if (!e.ok) return e;
     const { oid, type } = e.value;
-    const fan = oid.slice(0, 2);
-    const group = getOrElse(mapGet(groups, fan), new Map<string, EntryOf>());
-    group.set(oid.slice(2), { mode: type === OBJ_TREE ? MODE_TREE : MODE_BLOB, name: oid.slice(2), oid });
-    groups.set(fan, group);
+    byId.set(oid, { mode: type === OBJ_TREE ? MODE_TREE : MODE_BLOB, name: oid, oid });
   }
   const subtrees: GeneratedObject[] = [];
-  const top: EntryOf[] = [];
-  for (const [fan, group] of groups) {
-    const data = encodeEntries([...group.values()]);
-    if (!data.ok) return data;
-    const oid = hashObject('tree', data.value);
-    subtrees.push({ type: OBJ_TREE, data: data.value, oid });
-    top.push({ mode: MODE_TREE, name: fan, oid });
-  }
-  const rootData = encodeEntries(top);
-  if (!rootData.ok) return rootData;
-  return ok({ subtrees, root: { type: OBJ_TREE, data: rootData.value, oid: hashObject('tree', rootData.value) } });
+  const root = fanned(0, [...byId.values()], subtrees);
+  return root.ok ? ok({ subtrees, root: root.value }) : root;
 }
+
 
 // A commit object, encoded and hashed.
 function commitObject(fields: Parameters<typeof encodeCommitOf>[0]): Result<GeneratedObject, PlyError> {
@@ -168,8 +184,16 @@ export function rootCommit(source: Uint8Array): Result<{ readonly source: Oid; r
 }
 
 // The caller's budget with room for each batch's generated objects and the commands.
+// Trees a batch of `maxObjects` objects may add past TRANSFER_GENERATED_OBJECTS (#298-3): a group fans out again only
+// above TRANSFER_TREE_ENTRIES ids, the groups of one depth are disjoint, and a fan-out happens only at a depth of 2..36
+// hex digits (38 leaves 2 digits, at most 256 names), so at most floor(maxObjects / (TRANSFER_TREE_ENTRIES + 1)) fan-outs of
+// 256 trees each per depth, 18 depths.
+export function extraTrees(maxObjects: number): number {
+  return 18 * 256 * Math.floor(maxObjects / (TRANSFER_TREE_ENTRIES + 1));
+}
 function reserved(b: PushBudget): PushBudget {
-  return { ...b, reserveObjects: b.reserveObjects + TRANSFER_GENERATED_OBJECTS, reserveBytes: b.reserveBytes + b.maxObjects * GEN_BYTES_PER_OBJECT + GEN_BYTES_FIXED };
+  const extra = extraTrees(b.maxObjects);
+  return { ...b, reserveObjects: b.reserveObjects + TRANSFER_GENERATED_OBJECTS + extra, reserveBytes: b.reserveBytes + (b.maxObjects + extra) * GEN_BYTES_PER_OBJECT + GEN_BYTES_FIXED };
 }
 
 // A step as canonical JSON: the variant's tag first, an absent prev as null (never the same text as an id).

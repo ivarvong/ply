@@ -30,9 +30,10 @@ import { scanPackIndex } from '../src/packscanindex.js';
 import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
 import { createTransport } from '../src/http.js';
-import { planTransfer, checkTransferPlan, rootCommit, batchTrees, TRANSFER_REF_PREFIX } from '../src/transferplan.js';
+import { planTransfer, checkTransferPlan, rootCommit, batchTrees, extraTrees, TRANSFER_REF_PREFIX } from '../src/transferplan.js';
 import { transferStatus, transferStep, runTransfer, copyTree, sweepTransfers } from '../src/transfer.js';
 import { te } from '../src/bytes.js';
+import { planPackBatches } from '../src/packplan.js';
 import { TYPE } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap } from './unwrap.js';
@@ -611,4 +612,45 @@ test('an exception out of resolved.oid() is the cause of a coded refusal: planTr
     refused(await runTransfer(t, onlyBase, plan, src.commit, { ref: REF }), 'runTransfer, oid() throws only for the cut base');
     assert.equal(refsOf(bare), refsOf(honest.bare), 'refs after runTransfer, cut base');
   }
+});
+
+// #298-3: a host refuses a tree over 16,223 entries (Cloudflare Artifacts, 2026-11-09 spike). A crafted source whose
+// ids share their first byte must still give trees under that, every input id listed once (read back by git).
+test('temp trees: a crafted id distribution (16,500 ids under one first byte) gives no tree over the host limit', () => {
+  const HOST_TREE_LIMIT = 16_223;
+  const ids = [];
+  for (let i = 0; i < 16_500; i++) ids.push(`00${i.toString(16).padStart(6, '0')}${'ab'.repeat(16)}`);
+  for (let i = 0; i < 40; i++) ids.push(`${(i + 1).toString(16).padStart(2, '0')}${'cd'.repeat(19)}`);
+  const resolved = { count: ids.length, oid: i => (i < ids.length ? { tag: 'some', value: ids[i] } : { tag: 'none' }), type: i => (i < ids.length ? { tag: 'some', value: 3 } : { tag: 'none' }) };
+  const { subtrees, root: rootTree } = must(batchTrees(resolved, [...ids.keys()]));
+  const scratch = makeBareRepo(root, `scratch${n++}`);
+  for (const o of [...subtrees, rootTree]) assert.equal(git(scratch, ['hash-object', '-w', '-t', 'tree', '--stdin'], { input: Buffer.from(o.data) }).trim(), o.oid);
+  for (const o of [...subtrees, rootTree]) {
+    const entries = git(scratch, ['ls-tree', o.oid], { maxBuffer: 1 << 26 }).split('\n').filter(Boolean).length;
+    assert.ok(entries <= HOST_TREE_LIMIT, `tree ${o.oid} has ${entries} entries`);
+  }
+  const listed = git(scratch, ['ls-tree', '-r', rootTree.oid], { maxBuffer: 1 << 26 }).split('\n').filter(Boolean).map(l => l.split(/\s+/)[2]);
+  assert.deepEqual(listed.toSorted(), ids.toSorted());
+});
+
+// #298-1: the planner's per-entry structures are charged at LIMIT_OBJECT_OVERHEAD (3 KiB, limits.ts) against
+// maxInflatedTotal, the byte budget that holds parsed pack objects, and refused before they are allocated.
+test('planTransfer: a pack whose entries would outgrow maxInflatedTotal is refused as limit_exceeded, nothing allocated', () => {
+  const big = 1_000; // 1,000 x 3,072 = 3,072,000 bytes > 1 MiB
+  const pack = { count: big };
+  const resolved = { count: big, oid: () => { throw new Error('read'); }, type: () => { throw new Error('read'); }, find: () => ({ tag: 'none' }), columns: {} };
+  const r = planPackBatches(pack, resolved, { budget: BUDGET, maxInflatedTotal: 1024 * 1024 });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'limit_exceeded');
+  assert.equal(r.error.got, 3_072_000);
+  assert.equal(r.error.max, 1_048_576);
+});
+
+// #298-3: the reserve for generated trees grows with the batch only once a group can fan out again. Hand-derived: a
+// fan-out needs a group of 16,001 ids, so 16,000 objects add none; 32,002 objects may fan out twice per depth.
+test('extraTrees: no extra trees until a batch can hold a group over TRANSFER_TREE_ENTRIES', () => {
+  assert.equal(extraTrees(300), 0);
+  assert.equal(extraTrees(16_000), 0);
+  assert.equal(extraTrees(16_001), 18 * 256);
+  assert.equal(extraTrees(32_002), 2 * 18 * 256);
 });
