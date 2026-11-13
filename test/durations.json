@@ -94,6 +94,7 @@
   "test/protocol.test.js": 493,
   "test/pullstream.test.js": 2,
   "test/pure.test.js": 1,
+  "test/readme-scanpack.test.js": 2,
   "test/push-budget.test.js": 4,
   "test/push-commands.test.js": 0,
   "test/push-once.test.js": 5,

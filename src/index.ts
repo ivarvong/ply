@@ -96,4 +96,5 @@ export { fetchPackFiltered } from './fetchpack.js';
 export { validateIdent, validateRef, validatePath } from './validate.js';
 export { compareVersionRefnames } from './refs.js';
 export { concat } from './bytes.js';
-export { assertNever } from './result.js';
+export { assertNever, some, none, isSome, isNone, matchOption } from './result.js';
+export type { Option, Some, None } from './result.js';
