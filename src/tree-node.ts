@@ -66,7 +66,6 @@ type DirError = ErrorOf<'bad_request' | 'limit_exceeded'>;
 // directory, a permission): bad_request naming 'dir', with node:fs's error (its errno `code`, `path`) as `cause`.
 // Definite: the walk precedes any request. filesFromDir never rejects.
 export async function filesFromDir(dir: string, options: FilesFromDirOptions | null = null): Promise<Result<DirFile[], DirError>> {
-  if (typeof dir !== 'string') return fail('bad_request', 'filesFromDir: dir must be a string', { what: 'dir' });
   if (options !== null && !isArgObject(options)) return fail('bad_request', 'filesFromDir: options must be an object or null', { what: 'options' });
   const { limits, filter } = withDefaults<FilesFromDirConfig>(options, { limits: DEFAULT_LIMITS, filter: null });
   const checked = parseLimits(limits);
