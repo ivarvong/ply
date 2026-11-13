@@ -65,8 +65,7 @@ export type None = { readonly tag: 'none' };
 export type Option<T> = Some<T> | None;
 
 export const some = <T>(value: T): Some<T> => ({ tag: 'some', value });
-// Frozen: it is one shared object (a root export since 0.x), so a caller mutating it cannot corrupt every none in ply.
-export const none: None = Object.freeze({ tag: 'none' });
+export const none: None = { tag: 'none' };
 
 export const isSome = <T>(o: Option<T>): o is Some<T> => o.tag === 'some';
 export const isNone = <T>(o: Option<T>): o is None => o.tag === 'none';

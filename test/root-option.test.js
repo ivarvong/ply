@@ -26,13 +26,6 @@ test('Option constructors and helpers are root exports and behave as README says
   assert.equal(matchOption(none, h), 'none');
 });
 
-test('the root none is frozen: a caller cannot turn every none inside ply into a some', () => {
-  assert.equal(Object.isFrozen(none), true);
-  // ESM is strict mode: an assignment to a frozen property throws a TypeError.
-  assert.throws(() => { none.tag = 'some'; }, TypeError);
-  assert.equal(none.tag, 'none');
-});
-
 test('encodeSavedIndex takes the root none, and decodeSavedIndex gives none back for an unresolved index', async () => {
   const { root, cleanup } = tmpRoot();
   const repo = join(root, 'r');

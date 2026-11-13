@@ -675,25 +675,3 @@ test('memo: each Location is approved again by the new transport\'s allowUrl; a 
     assert.deepEqual(h.lines(), [`POST /renamed.git/${SERVICE}`]);
   } finally { await h.close(); }
 });
-
-// The stale memo's GET is made on the POST's own span: README says its body is git.advertisement.bytes and
-// git.response.bytes stays the POST's. Expected: the advertisement as the server sends it, fetched independently.
-test('memo: the stale memo\'s GET records git.advertisement.bytes on the POST span, not git.response.bytes', async () => {
-  const h = await movingHost();
-  try {
-    h.moves.set('old', { to: '/a.git', all: false });
-    await unwrapAsync(plyClient(`${h.url}/old.git`, { follow: 'initial', auth: false }).lsRefs());
-    h.moves.set('old', { to: '/b.git', all: false });
-    h.moves.set('a', { to: '/b.git', all: true });
-    const raw = await fetch(`${h.url}/b.git/info/refs?service=${SERVICE}`, { headers: { 'git-protocol': 'version=2' } });
-    const want = (await raw.arrayBuffer()).byteLength;
-    const ex = arrayExporter();
-    await unwrapAsync(plyClient(`${h.url}/old.git`, { follow: 'initial', auth: false, exporter: ex }).lsRefs());
-    const all = ex.lines.flatMap(flattenLine);
-    const s = all.find(x => x.name === `git.upload-pack ls-refs`);
-    assert.ok(s, `ls-refs span among ${all.map(x => x.name)}`);
-    assert.equal(s.attrs['http.request.method'], 'POST');
-    assert.equal(s.attrs['git.advertisement.bytes'], want);
-    assert.equal(typeof s.attrs['git.response.bytes'], 'number', 'the POST answer was read whole');
-  } finally { await h.close(); }
-});

@@ -85,9 +85,10 @@ test('README wire-span attributes on discover(): GET 200 has response bytes and 
   } finally { await srv.close(); cleanup(); }
 });
 
-// followRedirects 'initial': the first POST makes its GET on the POST's own span. A POST that then fails (500) read no
-// POST body, so README's "a non-2xx exchange carries no git.response.bytes" must hold on that span too.
-test('README wire-span attributes: pre-GET then a failed POST carries no git.response.bytes', async () => {
+// followRedirects 'initial': the first POST makes its GET on the POST's own span. README: the GET sets git.response.bytes
+// there, and a POST that then fails (500) read no body of its own, so the span keeps the GET's count (the fake server's
+// advertisement length), not the POST's.
+test('README wire-span attributes: pre-GET then a failed POST keeps the GET\'s git.response.bytes', async () => {
   const ad = new TextEncoder().encode('000eversion 2\n0013ls-refs=unborn\n0011fetch=shallow\n0000');
   const fetchImpl = async (url, init) => {
     if (String(url).includes('/info/refs')) return new Response(ad, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } });
@@ -104,15 +105,14 @@ test('README wire-span attributes: pre-GET then a failed POST carries no git.res
   assert.equal(s.attrs['http.request.method'], 'POST');
   assert.equal(s.attrs['http.response.status_code'], 500);
   assert.equal(typeof s.attrs['git.request.bytes'], 'number');
-  assert.ok(!('git.response.bytes' in s.attrs), `a 500 POST read no body, got ${s.attrs['git.response.bytes']}`);
-  assert.ok(!('http.response.body.size' in s.attrs), `the GET's body size is not the POST's, got ${s.attrs['http.response.body.size']}`);
-  assert.equal(s.attrs['git.advertisement.bytes'], ad.length, 'the pre-GET body, as the fake server sent it');
+  assert.equal(s.attrs['git.response.bytes'], ad.length, 'the pre-GET body, as the fake server sent it');
+  assert.equal(s.attrs['http.response.body.size'], ad.length);
 });
 
 // A GET made on a POST's own span after the POST was answered (ls-refs' empty answer asks the advertisement why; a push
-// refused at its status line asks receive-pack's advertisement whether the refusal stands). README: git.response.bytes
-// on a POST span is always the POST's, a failed exchange carries none, and the GET's body is git.advertisement.bytes.
-// Expected values come from the fake server's own bytes: the POST's body length (0 or none) and the advertisement's.
+// refused at its status line asks receive-pack's advertisement whether the refusal stands). README: that GET, read
+// whole, sets git.response.bytes to the advertisement's length and leaves its own method and status on the span.
+// Expected values come from the fake server's own bytes (the advertisement's length).
 const UPLOAD_AD = new TextEncoder().encode('000eversion 2\n0013ls-refs=unborn\n0011fetch=shallow\n0000');
 const RECEIVE_AD = new TextEncoder().encode('003f0000000000000000000000000000000000000000 capabilities^{}\0report-status\n0000');
 const wireSpan = (ex, name) => ex.lines.flatMap(flattenLine).find(x => x.name === name);
@@ -130,14 +130,13 @@ test('README wire-span attributes: ls-refs empty 200 answer, then its advertisem
   assert.equal(r.ok, false);
   const s = wireSpan(ex, 'git.upload-pack ls-refs');
   assert.ok(s, 'ls-refs span');
-  assert.equal(s.attrs['http.request.method'], 'POST');
+  assert.equal(s.attrs['http.request.method'], 'GET', 'the GET after the answer leaves its method');
   assert.equal(s.attrs['http.response.status_code'], 200);
-  assert.equal(typeof s.attrs['git.request.bytes'], 'number');
-  assert.equal(s.attrs['git.response.bytes'], 0, 'the POST read an empty body');
-  assert.equal(s.attrs['git.advertisement.bytes'], UPLOAD_AD.length);
+  assert.equal(typeof s.attrs['git.request.bytes'], 'number', 'the POST set it before it was sent');
+  assert.equal(s.attrs['git.response.bytes'], UPLOAD_AD.length, 'the GET read its advertisement whole');
 });
 
-test('README wire-span attributes: receive-pack POST refused 403, then a 200 advertisement GET on the same span', async () => {
+test('README wire-span attributes: receive-pack POST refused 403, then a 200 advertisement GET on the same span sets its bytes', async () => {
   const fetchImpl = async (url, init) => {
     if (String(url).includes('/info/refs')) return new Response(RECEIVE_AD, { status: 200, headers: { 'content-type': 'application/x-git-receive-pack-advertisement' } });
     await new Response(init.body).arrayBuffer();
@@ -150,9 +149,8 @@ test('README wire-span attributes: receive-pack POST refused 403, then a 200 adv
   assert.equal(r.ok, false);
   const s = wireSpan(ex, 'git.receive-pack');
   assert.ok(s, `receive-pack span among ${ex.lines.flatMap(flattenLine).map(x => x.name)}`);
-  assert.equal(s.attrs['http.request.method'], 'POST');
-  assert.equal(s.attrs['http.response.status_code'], 403);
-  assert.equal(typeof s.attrs['git.request.bytes'], 'number');
-  assert.ok(!('git.response.bytes' in s.attrs), `a 403 POST read no body, got ${s.attrs['git.response.bytes']}`);
-  assert.equal(s.attrs['git.advertisement.bytes'], RECEIVE_AD.length);
+  assert.equal(s.attrs['http.request.method'], 'GET', 'the GET after the refusal leaves its method');
+  assert.equal(s.attrs['http.response.status_code'], 200);
+  assert.equal(typeof s.attrs['git.request.bytes'], 'number', 'the POST set it before it was sent');
+  assert.equal(s.attrs['git.response.bytes'], RECEIVE_AD.length, 'the GET read its advertisement whole');
 });
