@@ -27,7 +27,7 @@ import type { EntryOf } from './objects.js';
 import type { Input } from './absent.js';
 import { at, mapGet, withDefaults } from './absent.js';
 import type { PackPlan, PlannedBatch, PushBudget } from './packplan.js';
-import { planPackBatches, planHash, PLAN_VERSION } from './packplan.js';
+import { planPackBatches, planHash, packObjectsBound, PLAN_VERSION, PLAN_MAX_PACK_OBJECTS } from './packplan.js';
 import type { ScannedPack, ScannedType } from './packscanindex.js';
 import type { ResolvedIndex } from './packrangeresolve.js';
 import type { Oid } from './sha1.js';
@@ -47,6 +47,8 @@ export { sweepPrefix, isTempKey } from './transfernames.js';
 export const TRANSFER_IDENT = 'ply transfer <ply-transfer@invalid> 0 +0000';
 // Generated objects per batch at most: 256 subtrees, the root tree, the temp commit.
 export const TRANSFER_GENERATED_OBJECTS = 258;
+// Entries in one generated tree at most: under the 16,223 a host refused above (Cloudflare Artifacts, 2026-11-09).
+export const TRANSFER_TREE_ENTRIES = 16_000;
 // Bytes of generated objects per batch object at most: a subtree entry is `100644 ` + 38 hex + NUL + 20 bytes = 66,
 // deflated stored at worst (a 5-byte header per 16 KiB block); the fixed part covers the root tree, the commits,
 // object headers and the two commands' pkt-lines.
@@ -70,6 +72,9 @@ export type TransferConfig = {
   readonly crossBatchRef: boolean;
   // the last push creates the ref and deletes the temp ref atomically (default); false: one push, not atomic
   readonly atomic: boolean;
+  // pack entries planned for at most (planPackBatches maxPackObjects; default DEFAULT_LIMITS.maxPackObjects), refused
+  // as limit_exceeded before any per-entry structure is allocated
+  readonly maxPackObjects: number;
 };
 export type TransferOpts = Pick<TransferConfig, 'budget' | 'ref' | 'commit'> & Input<Omit<TransferConfig, 'budget' | 'ref' | 'commit'>>;
 // A step: a batch moves the temp ref from `prev` (none: the temp ref does not exist yet) to its temp commit; the final
@@ -108,7 +113,15 @@ function entryAt(r: ResolvedIndex, i: number): Result<{ readonly oid: Oid; reado
   }
 }
 
-// The temp tree for a batch: its objects by id, fanned out by the id's first two hex digits. The root tree is last.
+function treeObject(list: readonly EntryOf[]): Result<GeneratedObject, PlyError> {
+  const data = encodeEntries([...list]);
+  return data.ok ? ok({ type: OBJ_TREE, data: data.value, oid: hashObject('tree', data.value) }) : data;
+}
+
+// The temp tree for a batch: its objects by id, fanned out by the id's first two hex digits. A fan holding more than
+// TRANSFER_TREE_ENTRIES ids (only a crafted id distribution, #298-3) is split, in id order, into subtrees of at most
+// that many, named `<fan>`, `<fan>-1`, `<fan>-2`, ...; so no tree is over a host's limit, and a batch of n objects
+// adds at most floor(n / TRANSFER_TREE_ENTRIES) trees past TRANSFER_GENERATED_OBJECTS. The root tree is last.
 export function batchTrees(resolved: ResolvedIndex, entries: readonly number[]): Result<{ readonly subtrees: readonly GeneratedObject[]; readonly root: GeneratedObject }, PlyError> {
   // by fan, then by name: an id the batch holds twice (a pack may) is listed once
   const groups = new Map<string, Map<string, EntryOf>>();
@@ -124,15 +137,17 @@ export function batchTrees(resolved: ResolvedIndex, entries: readonly number[]):
   const subtrees: GeneratedObject[] = [];
   const top: EntryOf[] = [];
   for (const [fan, group] of groups) {
-    const data = encodeEntries([...group.values()]);
-    if (!data.ok) return data;
-    const oid = hashObject('tree', data.value);
-    subtrees.push({ type: OBJ_TREE, data: data.value, oid });
-    top.push({ mode: MODE_TREE, name: fan, oid });
+    const list = [...group.values()];
+    for (let c = 0; c * TRANSFER_TREE_ENTRIES < list.length; c++) {
+      const sub = treeObject(list.slice(c * TRANSFER_TREE_ENTRIES, (c + 1) * TRANSFER_TREE_ENTRIES));
+      if (!sub.ok) return sub;
+      subtrees.push(sub.value);
+      top.push({ mode: MODE_TREE, name: c === 0 ? fan : `${fan}-${c}`, oid: sub.value.oid });
+    }
   }
-  const rootData = encodeEntries(top);
-  if (!rootData.ok) return rootData;
-  return ok({ subtrees, root: { type: OBJ_TREE, data: rootData.value, oid: hashObject('tree', rootData.value) } });
+  if (top.length > TRANSFER_TREE_ENTRIES) return fail('limit_exceeded', `transfer root tree: ${top.length} entries, max ${TRANSFER_TREE_ENTRIES}`, { what: 'transfer root tree entries', got: top.length, max: TRANSFER_TREE_ENTRIES });
+  const root = treeObject(top);
+  return root.ok ? ok({ subtrees, root: root.value }) : root;
 }
 
 // A commit object, encoded and hashed.
@@ -168,8 +183,14 @@ export function rootCommit(source: Uint8Array): Result<{ readonly source: Oid; r
 }
 
 // The caller's budget with room for each batch's generated objects and the commands.
+// Trees a batch of `maxObjects` objects may add past TRANSFER_GENERATED_OBJECTS (#298-3): a fan of g ids adds
+// ceil(g / TRANSFER_TREE_ENTRIES) - 1 <= floor(g / TRANSFER_TREE_ENTRIES) trees, and the fans are disjoint.
+export function extraTrees(maxObjects: number): number {
+  return Math.floor(maxObjects / TRANSFER_TREE_ENTRIES);
+}
 function reserved(b: PushBudget): PushBudget {
-  return { ...b, reserveObjects: b.reserveObjects + TRANSFER_GENERATED_OBJECTS, reserveBytes: b.reserveBytes + b.maxObjects * GEN_BYTES_PER_OBJECT + GEN_BYTES_FIXED };
+  const extra = extraTrees(b.maxObjects);
+  return { ...b, reserveObjects: b.reserveObjects + TRANSFER_GENERATED_OBJECTS + extra, reserveBytes: b.reserveBytes + (b.maxObjects + extra) * GEN_BYTES_PER_OBJECT + GEN_BYTES_FIXED };
 }
 
 // A step as canonical JSON: the variant's tag first, an absent prev as null (never the same text as an id).
@@ -221,7 +242,9 @@ function planSteps(resolved: ResolvedIndex, planned: PackPlan, key: string): Res
 // Plan a transfer of `opts.commit`'s tree (see the top of this file). Refusals (a ref git would not push, a tree not in
 // the pack, a budget an object cannot fit, anything planPackBatches refuses) happen here, before anything is pushed.
 export function planTransfer(pack: ScannedPack, resolved: ResolvedIndex, input: TransferOpts): Result<TransferPlan, PlyError> {
-  const opts = withDefaults<TransferConfig>(input, { budget: input.budget, ref: input.ref, commit: input.commit, tempPrefix: TRANSFER_REF_PREFIX, crossBatchRef: false, atomic: true });
+  const opts = withDefaults<TransferConfig>(input, { budget: input.budget, ref: input.ref, commit: input.commit, tempPrefix: TRANSFER_REF_PREFIX, crossBatchRef: false, atomic: true, maxPackObjects: PLAN_MAX_PACK_OBJECTS });
+  const bound = packObjectsBound(pack.count, opts.maxPackObjects);
+  if (!bound.ok) return bound;
   const ref = targetRef(opts.ref);
   if (!ref.ok) return ref;
   const root = rootCommit(opts.commit);
@@ -236,7 +259,7 @@ export function planTransfer(pack: ScannedPack, resolved: ResolvedIndex, input: 
   }
   const select = treeEntries(pack, resolved);
   if (!select.ok) return select;
-  const planned = planPackBatches(pack, resolved, { budget: reserved(opts.budget), select: select.value, crossBatchRef: opts.crossBatchRef });
+  const planned = planPackBatches(pack, resolved, { budget: reserved(opts.budget), select: select.value, crossBatchRef: opts.crossBatchRef, maxPackObjects: opts.maxPackObjects });
   if (!planned.ok) return planned;
   const head = root.value.commit.oid;
   const key = sha1Hex(JSON.stringify([planned.value.hash, head, ref.value]));

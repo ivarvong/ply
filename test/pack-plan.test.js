@@ -385,6 +385,7 @@ test('a resolved base column with a cycle is refused, not walked forever', () =>
 });
 
 test('planning time and memory at 200,000 entries, REF_DELTA and OFS_DELTA packs', () => {
+  // over the 100,000 default (#298-1), so the caller raises maxPackObjects as it raised the scan's
   const N = 200_000;
   const budget = { maxRequestBytes: 64 * 1024 * 1024 - 64 * 1024, maxObjects: 50_000, maxObjectBytes: 32 * 1024 * 1024, maxCompressedObjectBytes: 32 * 1024 * 1024, reserveBytes: 64 * 1024, reserveObjects: 300 };
   const kinds = [['ref', synthetic(N)], ['ofs', synthetic(N, TYPE.OFS_DELTA)]];
@@ -402,7 +403,7 @@ test('planning time and memory at 200,000 entries, REF_DELTA and OFS_DELTA packs
       globalThis.gc?.();
       const before = process.memoryUsage().heapUsed;
       const t0 = performance.now();
-      const plan = must(planPackBatches(idx, counted, { budget, crossBatchRef: false }));
+      const plan = must(planPackBatches(idx, counted, { budget, crossBatchRef: false, maxPackObjects: N }));
       const ms = performance.now() - t0;
       const after = process.memoryUsage().heapUsed;
       assert.equal(plan.entries, N);
@@ -434,7 +435,7 @@ test('planning time and memory at 200,000 entries, REF_DELTA and OFS_DELTA packs
     const { idx, res } = Object.fromEntries(kinds)[kind];
     const blobs = [...Array(N).keys()].filter(i => res.columns.type[i] === TYPE.BLOB);
     asked = 0;
-    const plan = must(planPackBatches(idx, counting(res), { budget: two, select: blobs, crossBatchRef: true }));
+    const plan = must(planPackBatches(idx, counting(res), { budget: two, select: blobs, crossBatchRef: true, maxPackObjects: N }));
     assert.equal(plan.entries, N - N / 50, kind);
     assert.equal(plan.batches.length, (N / 50) * 29, `${kind}: pushes`);
     assert.equal(plan.batches.reduce((sum, b) => sum + b.refRewrites, 0), cuts, `${kind}: cuts`);
