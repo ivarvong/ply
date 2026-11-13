@@ -97,4 +97,4 @@ export { validateIdent, validateRef, validatePath } from './validate.js';
 export { compareVersionRefnames } from './refs.js';
 export { concat } from './bytes.js';
 export { assertNever, some, none, isSome, isNone, matchOption } from './result.js';
-export type { Option, Some, None } from './result.js';
+export type { Option, Some, None, OptionHandlers } from './result.js';
