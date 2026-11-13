@@ -59,10 +59,10 @@ export type Input<T> = { readonly [K in keyof T]?: T[K] | undefined };
 // Fill every key the caller left out (or passed as the missing value) from `defaults`. Keys outside `defaults` are not
 // read: the config's type is the schema. `defaults` is the caller's fresh record (a mutable default such as a quirks
 // object must not be shared between two calls), so it is filled in place and returned.
-// An options or spec argument: absent (undefined) or a plain object. null, a number or an array is the caller's
-// error, answered as bad_request by the entry point that names it (#296).
+// An options or spec argument after its signature default (`= {}`): a plain object. null, a number or an array is the
+// caller's error, answered as bad_request by the entry point that names it (#296). undefined never reaches it.
 export function isArgObject(value: unknown): boolean {
-  return value === undefined || (typeof value === 'object' && value !== null && !Array.isArray(value));
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function withDefaults<T extends object>(input: Input<T> | null | undefined, defaults: T): T {
