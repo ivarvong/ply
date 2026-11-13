@@ -108,7 +108,7 @@
   "test/push.test.js": 57,
   "test/ratchets.test.js": 5,
   "test/read.test.js": 17,
-  "test/readme-scanpack.test.js": 1,
+  "test/readme-scanpack.test.js": 2,
   "test/rebase.test.js": 21,
   "test/redirect.test.js": 2,
   "test/regex-linear.test.js": 4,

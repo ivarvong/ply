@@ -56,6 +56,8 @@ function asAdvertisement(span: Span): void {
   delete span.attrs['http.response.body.size'];
   span.set({ 'git.advertisement.bytes': typeof n === 'number' ? n : 0 });
 }
+// The POST-owned attributes a later GET on the same span would overwrite (advertiseAfterPost).
+const POST_OWN = ['http.request.method', 'url.full', 'server.address', 'http.response.status_code', 'git.response.bytes', 'http.response.body.size'] as const;
 // The hint is set only when fetchImpl is cachingFetch, and that wrapper strips it before the origin fetch.
 const RECORD_HEADERS_REQUEST = 'x-ply-record-headers';
 const CACHING_FETCH_BRAND = 'plyCachingFetch';
@@ -631,6 +633,20 @@ function transportOf(settings: HttpSettings): HttpTransport {
     settling = mine;
     try { return await done; } finally { if (settling === mine) settling = null; }
   }
+  // advertise as the transport offers it. A caller's GET on a span that already carries a POST (ls-refs asking why its
+  // answer was empty, a push asking whether a refusal stands) keeps the POST's own attributes on that span: its method,
+  // URL, status and body count are restored, and the GET's body count is git.advertisement.bytes (README telemetry).
+  async function advertiseAfterPost(service: string, span: Span): Promise<Result<Uint8Array, PlyError>> {
+    if (span.attrs['http.request.method'] !== 'POST') return advertise(service, span);
+    const kept: Record<string, unknown> = {};
+    for (const k of POST_OWN) if (k in span.attrs) kept[k] = span.attrs[k];
+    const ad = await advertise(service, span);
+    if (ad.ok) asAdvertisement(span);
+    const a = span.attrs;
+    delete a['http.request.method']; delete a['url.full']; delete a['server.address']; delete a['http.response.status_code']; delete a['git.response.bytes']; delete a['http.response.body.size'];
+    span.set(kept);
+    return ad;
+  }
   // The POST's answer, checked before its body is read: a redirect, a non-2xx, a foreign content type, a missing body.
   const postStream = async (res: Response, service: string, target: string, clock: ExchangeClock): Promise<Result<ReadableStream<Uint8Array>, PlyError>> => {
     if (isRedirect(res)) return err(await redirectError(res, target, service, scrub));
@@ -668,7 +684,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     if (!ad.ok) return ad;
     asAdvertisement(span);
     const again = `${base}/${service}`;
-    span.set({ 'url.full': redactUrl(again), 'server.address': hostOf(), ...redirectAttrs() });
+    span.set({ 'http.request.method': 'POST', 'url.full': redactUrl(again), 'server.address': hostOf(), ...redirectAttrs() });
     clock.feed('request_sent');
     const retried = await send(again, { method: 'POST', headers: headers(service, extra), body: bufferSource(bytes) }, sig, 'manual');
     return retried.ok ? ok({ res: retried.value, target: again }) : retried;
@@ -746,7 +762,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
       span.set(pktAttrs(st));
     },
     // GET info/refs?service=… (capability advertisements). Returns the whole body; advertisements are small.
-    advertise,
+    advertise: advertiseAfterPost,
   });
 }
 
