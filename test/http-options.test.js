@@ -38,7 +38,7 @@ test('a bad request timeout or pack cap is refused when the transport is made, b
 test('the limits come after every other refusal, as the first request used to', () => {
   const bad = withLimits({ requestTimeoutMs: NaN });
   assert.equal(createTransport('https://h/r', { followRedirects: 'always', limits: bad }).error.what, 'followRedirects');
-  assert.equal(createTransport('https://h/r', { userAgent: 'a\nb', limits: bad }).error.message.startsWith('invalid user agent'), true);
+  assert.equal(createTransport('https://h/r', { userAgent: 'a\nb', limits: bad }).error.message.startsWith('invalid userAgent'), true);
   assert.equal(createTransport('https://h/r', { recordResponseHeaders: ['a b'], limits: bad }).error.what, 'recordResponseHeaders');
   assert.equal(createTransport('not a url', { limits: bad }).error.what, 'url');
   assert.equal(createTransport('https://h/r', { auth: { user: 'u' }, limits: bad }).error.what, 'auth');

@@ -86,6 +86,7 @@ export const INVENTORY = [
   row('src/validate.ts', 'new RegExp(`^[+-][0-9]{${IDENT_TZ_DIGITS}}$`, \'u\')', 'caller', FIXED, n => `+${'1'.repeat(n)}`, { build: () => /^[+-][0-9]{4}$/u }),
   row('src/validate.ts', String.raw`/[\0\n<>]/u`, 'caller', NO_RUN, run('a', '')),
   row('src/validate.ts', String.raw`/[\0\r\n]/u`, 'caller', NO_RUN, run('a', '')),
+  row('src/validate.ts', String.raw`/[^\t\u0020-\u007E\u0080-\u00FF]|^[\t ]|[\t ]$/u`, 'caller', NO_RUN, run('a', '\u0001')),
   row('src/validate.ts', String.raw`/[\0-\u001F\u007F ~^:?*[\\]|\.\.|@\{|\/\/|\/$|\.$|\.lock(\/|$)|^\/|\/\.|^\./u`, 'remote', 'alternatives of literals and single classes: at most six characters at each start', n => rep('.loc', n).replace(/^\./u, 'a')),
   row('src/validate.ts', String.raw`/^\.gitmodules$/i`, 'stored', 'anchored at ^, a literal', n => rep('.gitmodules', n)),
   row('src/validate.ts', String.raw`/[:<>"|?*\u0001-\u001F]/u`, 'stored', NO_RUN, run('a', '')),

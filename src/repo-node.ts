@@ -78,7 +78,7 @@ import type { Span } from './otel.js';
 import { decodeBytes } from './bytes.js';
 import { configCommentStart } from './transport.js';
 import type { Input } from './absent.js';
-import { at, mapGet, readKey, withDefaults } from './absent.js';
+import { at, isArgObject, mapGet, readKey, withDefaults } from './absent.js';
 import { err, getOrElse, ok } from './result.js';
 import type { Err, Option, Result } from './result.js';
 
@@ -662,6 +662,8 @@ async function step<T>(root: Span, name: string, body: (span: Span) => Promise<R
 }
 
 export async function pushRepo(dir: string, url: string, spec: PushRepoSpec = {}, options: PushRepoOptions = {}): Promise<Result<PushRepoResult, PlyError>> {
+  if (!isArgObject(spec)) return fail('bad_request', 'pushRepo: spec must be an object', { what: 'spec' });
+  if (!isArgObject(options)) return fail('bad_request', 'pushRepo: options must be an object', { what: 'options' });
   const cfg = withDefaults<PushRepoConfig>(spec, pushRepoDefaults());
   const { refspecs } = cfg;
   if ((refspecs !== null && !(Array.isArray(refspecs) && refspecs.every(s => typeof s === 'string'))) || ![cfg.all, cfg.tags, cfg.force, cfg.dryRun, cfg.thin].every(v => isBool(v)) || (cfg.all && refspecs !== null)) {

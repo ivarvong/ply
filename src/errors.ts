@@ -215,3 +215,19 @@ const escaped = (c: string): string => { const hex = Number(c.codePointAt(0)).to
 export const remoteText = (text: string, max: number = REMOTE_TEXT_MAX, scrub: ((s: string) => string) | null = null): string =>
   (typeof scrub === 'function' ? scrub(text) : text).slice(0, max).replaceAll(UNPRINTABLE, c => (c === '\n' || c === '\t' ? c : escaped(c)));
 export const remoteQuoted = (text: string, max: number = REMOTE_TEXT_MAX): string => JSON.stringify(text.slice(0, max)).replaceAll(UNPRINTABLE, escaped);
+
+// The shape check of a public entry point's arguments (#296): a caller passing null, a number or an array where an
+// object is documented gets bad_request naming the argument, never a TypeError from the first property read.
+// An optional options argument is defaulted (`= {}`) in the signature, so undefined never reaches the check; 'bytes'
+// is a Uint8Array.
+export type ArgKind = 'object' | 'array' | 'bytes';
+const ARG_NOUN: Readonly<Record<ArgKind, string>> = { object: 'an object', array: 'an array', bytes: 'a Uint8Array' };
+const argFits = (value: unknown, kind: ArgKind): boolean => {
+  if (kind === 'array') return Array.isArray(value);
+  if (kind === 'bytes') return value instanceof Uint8Array;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+};
+export function argsError(entry: string, args: ReadonlyArray<readonly [string, unknown, ArgKind]>): Err<ErrorOf<'bad_request'>> | null {
+  for (const [what, value, kind] of args) if (!argFits(value, kind)) return fail('bad_request', `${entry}: ${what} must be ${ARG_NOUN[kind]}`, { what });
+  return null;
+}

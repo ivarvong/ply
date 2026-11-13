@@ -40,7 +40,7 @@
 // cancelled and the source's abort signal fired without waiting for either, and whatever a read answers later is
 // dropped (a range that opens late is cancelled).
 import type { PlyError } from './errors.js';
-import { fail, plyError } from './errors.js';
+import { fail, plyError, argsError } from './errors.js';
 import type { Result } from './result.js';
 import { ok } from './result.js';
 import { withDefaults, fromNullish } from './absent.js';
@@ -440,6 +440,8 @@ async function* pieces(source: RangeSource, p: Plan, halt: Halt): AsyncGenerator
 // selection, its bases or the extras are a Result before any byte is read; a range that fails or serves the wrong
 // length errors the stream before its trailer.
 export async function packSubset(source: RangeSource, pack: ScannedPack, selection: readonly number[], input: Input<PackSubsetOpts> = {}): Promise<Result<PackSubset, PlyError>> {
+  const shape = argsError('packSubset', [['source', source, 'object'], ['pack', pack, 'object'], ['selection', selection, 'array'], ['options', input, 'object']]);
+  if (shape !== null) return shape;
   const opts = withDefaults(input, defaultOpts());
   if (opts.resolved !== null && opts.resolved.count !== pack.count) return refuse('pack subset resolved', `the resolved index has ${opts.resolved.count} entries, the pack ${pack.count}`);
   if (pack.bytes > source.size) return refuse('pack subset source', `the source holds ${source.size} bytes; the indexed pack is ${pack.bytes}`);

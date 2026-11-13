@@ -19,7 +19,7 @@
 // drops gpgsig, gpgsig-sha256 and mergetag (a signature over a different object would be false). Temp commits are
 // written by `ply transfer <ply-transfer@invalid> 0 +0000`, so the same plan always gives the same ids.
 import type { PlyError } from './errors.js';
-import { fail } from './errors.js';
+import { fail, argsError } from './errors.js';
 import type { Option, Result } from './result.js';
 import { ok, some, none, getOrElse } from './result.js';
 import { parseCommit, encodeCommitOf, encodeEntries, hashObject, TYPE } from './objects.js';
@@ -221,6 +221,8 @@ function planSteps(resolved: ResolvedIndex, planned: PackPlan, key: string): Res
 // Plan a transfer of `opts.commit`'s tree (see the top of this file). Refusals (a ref git would not push, a tree not in
 // the pack, a budget an object cannot fit, anything planPackBatches refuses) happen here, before anything is pushed.
 export function planTransfer(pack: ScannedPack, resolved: ResolvedIndex, input: TransferOpts): Result<TransferPlan, PlyError> {
+  const shape = argsError('planTransfer', [['pack', pack, 'object'], ['resolved', resolved, 'object'], ['options', input, 'object']]);
+  if (shape !== null) return shape;
   const opts = withDefaults<TransferConfig>(input, { budget: input.budget, ref: input.ref, commit: input.commit, tempPrefix: TRANSFER_REF_PREFIX, crossBatchRef: false, atomic: true });
   const ref = targetRef(opts.ref);
   if (!ref.ok) return ref;
