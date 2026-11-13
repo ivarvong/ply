@@ -543,8 +543,15 @@ function transportOf(settings: HttpSettings): HttpTransport {
     return res;
   };
   const advertisementBody = async (res: Response, service: string, span: Span, clock: ExchangeClock): Promise<Result<Uint8Array, PlyError>> => {
-    if (!res.ok) return fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status, ...(res.status === 404 ? { miss: { kind: 'repository' as const } } : {}) } as Detail['http'] & Extra);
-    if (!headerText(res, 'content-type').startsWith(`application/x-${service}-advertisement`)) return fail('not_git', `unexpected content-type from ${service} advertisement`);
+    // Every early return cancels the body it will not read, so the connection is released (#300).
+    if (!res.ok) {
+      await cancelBody(res.body);
+      return fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status, ...(res.status === 404 ? { miss: { kind: 'repository' as const } } : {}) } as Detail['http'] & Extra);
+    }
+    if (!headerText(res, 'content-type').startsWith(`application/x-${service}-advertisement`)) {
+      await cancelBody(res.body);
+      return fail('not_git', `unexpected content-type from ${service} advertisement`);
+    }
     const declared = Number(res.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > maxPackBytes) {
       await cancelBody(res.body);
@@ -629,7 +636,10 @@ function transportOf(settings: HttpSettings): HttpTransport {
     // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
     if (!res.ok) return err(await statusError(res, service, scrub, clock));
     const ct = headerText(res, 'content-type');
-    if (!ct.startsWith(`application/x-${service}-result`)) return fail('not_git', `unexpected content-type ${remoteQuoted(ct)} from ${service}`);
+    if (!ct.startsWith(`application/x-${service}-result`)) {
+      await cancelBody(res.body);
+      return fail('not_git', `unexpected content-type ${remoteQuoted(ct)} from ${service}`);
+    }
     const body = bodyOf(res);
     switch (body.tag) {
       case 'missing': return fail('protocol', `${service}: HTTP ${res.status} response has no body`);

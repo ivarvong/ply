@@ -2484,3 +2484,40 @@ test('syncRef: each spec and option refusal before anything is sent, the default
   const forced = await syncRef('http://src/r.git', 'http://dst/r.git', { ref: 'refs/heads/main', force: true }, forcedPair.opts);
   assert.deepEqual([forced.value.outcome, forced.value.from, forced.value.forced], ['updated', oid(9), true]);
 });
+
+// #300-2 (triage item 11): every early return on a GET advertisement or a POST answer cancels the body it will not
+// read, so the connection is released. The cases: a GET non-2xx (401, 404, 503), a GET 200 with a foreign content type,
+// a POST 200 with a foreign content type. Expected codes are the README error table (http/auth/not_found/upstream_5xx,
+// not_git). The body is a fake that records cancel(); reading it fails the test.
+test('S2 #300-2: an advertisement non-2xx or foreign content type, and a POST foreign content type, cancel the body', async () => {
+  const recording = () => {
+    const rec = { cancelled: 0 };
+    rec.body = {
+      cancel: async () => { rec.cancelled += 1; },
+      getReader: () => { throw new Error('body should not be read'); },
+      async *[Symbol.asyncIterator]() { throw new Error('body should not be read'); },
+    };
+    return rec;
+  };
+  const transport = (status, contentType, rec) => createTransport('http://127.0.0.1:9/r.git', {
+    fetchImpl: async () => ({ ok: status >= 200 && status < 300, status, headers: { get: n => (n === 'content-type' ? contentType : null) }, body: rec.body }),
+    tracer: tracerStub,
+  });
+  const cases = [
+    [401, 'text/plain', 'auth'],
+    [404, 'text/plain', 'not_found'],
+    [503, 'text/plain', 'upstream_5xx'],
+    [200, 'text/html', 'not_git'],
+  ];
+  for (const [status, ct, code] of cases) {
+    const rec = recording();
+    const r = await transport(status, ct, rec).advertise('git-upload-pack', spanStub);
+    assert.equal(r.ok, false, `GET ${status} ${ct}`);
+    assert.equal(r.error.code, code, `GET ${status} ${ct}`);
+    assert.equal(rec.cancelled, 1, `GET ${status} ${ct}: body cancelled once`);
+  }
+  const rec = recording();
+  const e = await (async () => { for await (const frame of transport(200, 'text/html', rec).frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })().then(() => null, x => x);
+  assert.equal(e.code, 'not_git');
+  assert.equal(rec.cancelled, 1, 'POST 200 text/html: body cancelled once');
+});
