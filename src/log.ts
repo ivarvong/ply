@@ -58,16 +58,16 @@ type Parents = { readonly parents: readonly string[] };
 // { chain: [oid], truncated, cut } where `cut` says the chain stopped at a shallow commit before `limit`.
 export type LogWindow = { readonly chain: string[]; readonly truncated: boolean; readonly cut: boolean };
 export function logWindow(commits: ReadonlyMap<string, Parents>, shallow: Iterable<string>, head: string, limit: number): Result<LogWindow, PlyError> {
-  if (!commits.has(head)) return fail('pack_corrupt', `commit ${head} not in the pack that wanted it`);
+  if (!commits.has(head)) return fail('pack_corrupt', `commit ${head} not in the pack that wanted it`, { origin: 'remote' });
   // every oid in q is in `commits`: head was checked, and a parent joins only when present
   const reach = new Set([head]); const q = [head];
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
   for (const c of q) for (const p of (commits.get(c) as Parents).parents) if (commits.has(p) && !reach.has(p)) { reach.add(p); q.push(p); }
   const cut = new Set(shallow);
   for (const [oid, c] of commits) {
-    if (!reach.has(oid)) return fail('pack_corrupt', `commit ${oid} sent but not an ancestor of ${head}`);
+    if (!reach.has(oid)) return fail('pack_corrupt', `commit ${oid} sent but not an ancestor of ${head}`, { origin: 'remote' });
     const missing: Option<string> = cut.has(oid) ? none : fromNullable(c.parents.find(p => !commits.has(p)));
-    if (missing.tag === 'some') return fail('pack_corrupt', `parent ${missing.value} of ${oid} withheld and ${oid} not reported shallow`);
+    if (missing.tag === 'some') return fail('pack_corrupt', `parent ${missing.value} of ${oid} withheld and ${oid} not reported shallow`, { origin: 'remote' });
   }
   const chain: string[] = [];
   for (let c = head; ;) {

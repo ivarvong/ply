@@ -408,7 +408,7 @@ function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPoint
     const partial = (): Span => span.set({ 'git.edit.blob.base_len': sp.size, 'git.edit.blob.new_len': newLen, 'git.edit.blob.inflated': inflated, 'git.edit.blob.zlib.bytes': sp.zlibBytes, 'git.edit.blob.pack.bytes': sp.bytes, 'git.edit.blob.pack.trailer': getOrElse(fromNullish(sp.trailer), ''), 'git.edit.blob.cpu_ms': cpuMs, ...scanAttrs(scan) });
     // the hasher, once the declared size is known and checked: it has hashed the object header
     const begin = async (): Promise<Result<Hasher, PlyError>> => {
-      if (sp.type !== TYPE.BLOB) return fail('pack_corrupt', `expected blob, got type ${sp.type}`);
+      if (sp.type !== TYPE.BLOB) return fail('pack_corrupt', `expected blob, got type ${sp.type}`, { origin: 'remote' });
       if (sp.size < find.length) return fail('match_count', `blob (${sp.size} bytes) is shorter than find (${find.length} bytes): expected exactly one match, found 0`, { matches: 0 });
       newLen = sp.size - find.length + replace.length; // exactly-one-match contract
       const h = streamingSha1(); span.set({ 'git.edit.blob.hasher': h.kind });
@@ -422,11 +422,11 @@ function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPoint
         // before begin(): a stream that inflates past its declared size is the server's lie (pack_corrupt), even when the
         // declared size is shorter than find (an empty blob followed by a byte used to be reported as match_count)
         inflated += chunk.length;
-        if (inflated > sp.size) return fail('pack_corrupt', `server streamed more than the ${sp.size} bytes it declared`);
+        if (inflated > sp.size) return fail('pack_corrupt', `server streamed more than the ${sp.size} bytes it declared`, { origin: 'remote' });
         if (sha === null) {
           // Unreachable: zlib is written only after phase is body, and a header-phase size is 0, so any positive
           // chunk has already failed the declared-size check. DecompressionStream emits no empty chunk.
-          if (sp.phase !== 'body') return fail('pack_corrupt', 'inflated bytes before header');
+          if (sp.phase !== 'body') return fail('pack_corrupt', 'inflated bytes before header', { origin: 'remote' });
           const lfs = isLfsPointerPrefix(chunk); span.set({ 'git.edit.blob.lfs_pointer': lfs });
           // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the pointer's size rides as an ad-hoc field (errors.ts Extra), as fetch.ts's size does
           if (lfs && !allowLfsPointer) return fail('lfs_pointer', `${blobOid} is a Git LFS pointer (${sp.size} bytes); the file's content is in the LFS store, not in git. Pass allowLfsPointer to edit the pointer itself.`, { size: sp.size } as Extra);
@@ -446,8 +446,9 @@ function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPoint
     try { inflatedTo = await inflate(); } catch (e) {
       await pump.catch(ignore);
       partial();
-      if (isPlyError(e)) return err(e);
-      if (!isPlyThrown(e)) return fail('pack_corrupt', `blob stream: ${thrownText(e)}`, { cause: e });
+      // #300-5: every byte this stream parses came from the server (packStream over the fetch body)
+      if (isPlyError(e)) return err(e.code === 'pack_corrupt' ? Object.assign(e, { origin: 'remote' }) : e);
+      if (!isPlyThrown(e)) return fail('pack_corrupt', `blob stream: ${thrownText(e)}`, { cause: e, origin: 'remote' });
       // a coded value that is not an Error: the caller's own, passed on as thrown
       throw e;
     }
@@ -460,7 +461,7 @@ function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPoint
     } else sha = inflatedTo.value;
     const fin = scanFinish(scan); scan = fin.state; for (const p of fin.emit) await sha.update(p);
     partial();
-    if (inflated !== sp.size) return fail('pack_corrupt', `inflated ${inflated} != header size ${sp.size}`);
+    if (inflated !== sp.size) return fail('pack_corrupt', `inflated ${inflated} != header size ${sp.size}`, { origin: 'remote' });
     if (scan.count !== 1) return fail('match_count', `expected exactly one match, found ${scan.count}`, { matches: scan.count });
     if (scan.emitted !== newLen) return fail('internal', `emitted ${scan.emitted} != ${newLen}`);
     const newOid = await sha.hex();

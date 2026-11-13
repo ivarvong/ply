@@ -97,12 +97,12 @@ export function treeFiles(tree: TreeLookup, oid: string, options: TreeFilesOptio
     const names = new Set<string>();
     for (const e of listed.value) {
       if (++seen > maxEntries) return err(limitError('checkout entries', seen, maxEntries));
-      if (names.has(e.name)) return fail('pack_corrupt', `tree ${at}: duplicate entry ${JSON.stringify(e.name)} (git fsck duplicateEntries)`);
+      if (names.has(e.name)) return fail('pack_corrupt', `tree ${at}: duplicate entry ${JSON.stringify(e.name)} (git fsck duplicateEntries)`, { origin: 'remote' });
       names.add(e.name);
       const path = prefix ? `${prefix}/${e.name}` : e.name;
       if (level + 1 > maxDepth) return err(limitError('path depth', level + 1, maxDepth));
       const mode = canonMode(e.mode);
-      if (mode === null) return fail('pack_corrupt', `tree ${at}: ${path} has mode ${e.mode}, which git cannot check out`);
+      if (mode === null) return fail('pack_corrupt', `tree ${at}: ${path} has mode ${e.mode}, which git cannot check out`, { origin: 'remote' });
       if (mode !== MODE_TREE) { out.push({ path, mode, oid: e.oid }); continue; }
       const below = walk(e.oid, path, level + 1);
       if (!below.ok) return below;
@@ -145,7 +145,7 @@ async function fetchTrees(t: Transport, commit: string, limits: CheckedLimits): 
   const objects: PackObjects = r.objects === null ? new Map<string, PackObject>() : r.objects;
   const wanted = mapGet(objects, commit);
   const name = packName(r.filter);
-  if (wanted.tag === 'none') return fail('pack_corrupt', `commit ${commit} not in the ${name} pack (${objects.size} objects)`);
+  if (wanted.tag === 'none') return fail('pack_corrupt', `commit ${commit} not in the ${name} pack (${objects.size} objects)`, { origin: 'remote' });
   const c = wanted.value;
   if (c.type !== TYPE.COMMIT) {
     const found = nonCommitType(c.type);
@@ -165,7 +165,7 @@ async function fetchTrees(t: Transport, commit: string, limits: CheckedLimits): 
   }
   const tree = (oid: string): Result<readonly TreeEntry[], PlyError> => {
     const o = mapGet(objects, oid);
-    if (o.tag === 'none' || o.value.type !== TYPE.TREE) return fail('pack_corrupt', `tree ${oid} not in the ${name} pack`);
+    if (o.tag === 'none' || o.value.type !== TYPE.TREE) return fail('pack_corrupt', `tree ${oid} not in the ${name} pack`, { origin: 'remote' });
     return parseTree(o.value.data, limits);
   };
   let trees = 0; const blobs = new Map<string, Uint8Array>();
@@ -197,8 +197,8 @@ async function fetchBlobs(t: Transport, oids: readonly string[]): Promise<Result
   if (!fetched.ok) return fetched;
   const objects: PackObjects = fetched.value.objects === null ? new Map<string, PackObject>() : fetched.value.objects;
   for (const [oid, o] of objects) {
-    if (!want.has(oid)) return fail('pack_corrupt', `object ${oid} served but not wanted (${oids.length} blobs asked for)`);
-    if (o.type !== TYPE.BLOB) return fail('pack_corrupt', `expected blob ${oid}, got ${getOrElse<string | number>(fromNullish((TYPE_NAME as TypeNames)[o.type]), o.type)}`);
+    if (!want.has(oid)) return fail('pack_corrupt', `object ${oid} served but not wanted (${oids.length} blobs asked for)`, { origin: 'remote' });
+    if (o.type !== TYPE.BLOB) return fail('pack_corrupt', `expected blob ${oid}, got ${getOrElse<string | number>(fromNullish((TYPE_NAME as TypeNames)[o.type]), o.type)}`, { origin: 'remote' });
   }
   return ok(objects);
 }

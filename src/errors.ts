@@ -96,7 +96,8 @@ export type ExtraFields = {
   // when it dies on an argument it did not advertise (fetch.ts filterAdvertised).
   readonly reason: Reason;
   // pack_corrupt only (#300-5): 'remote' when the corrupt bytes were received from the server by an upload-pack fetch
-  // exchange (fetch.ts fetchExchange: fetchPack, fetchObject and every read built on them), so a retry may get good bytes.
+  // exchange (fetch.ts fetchExchange), by openBlob's stream, or by a check run on a fetched pack after the fetch returned
+  // (log.ts/merge.ts windows, checkout.ts trees and blobs, edit.ts streamBlobEdit), so a retry may get good bytes.
   // Absent: the bytes were parsed from something the caller supplied (a cache Map value, bytes, a RangeSource, a saved
   // spool or index, a pure codec), and retrying them cannot succeed.
   readonly origin: 'remote';

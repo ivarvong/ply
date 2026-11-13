@@ -34,8 +34,9 @@ import { syncRef } from '../src/sync.js';
 import { negotiate as negotiateR } from '../src/negotiate.js';
 import { fetchPack as fetchPackR } from '../src/fetchpack.js';
 import { fetchObject as fetchObjectR } from '../src/fetch.js';
-import { listTree as listTreeR } from '../src/read.js';
-import { isRetryable, retryPolicy, plyError } from '../src/errors.js';
+import { listTree as listTreeR, readBlob } from '../src/read.js';
+import { readLog } from '../src/log.js';
+import { isRetryable, retryPolicy, plyError, RETRY } from '../src/errors.js';
 import { parseOid, parseCommitId } from '../src/oid.js';
 import {
   OID_BYTES, OID_HEX_CHARS, HEX_DIGIT_MIN, HEX_DIGIT_MAX, HEX_LOWER_MIN, HEX_LOWER_MAX, PACK_SIGNATURE, PACK_HEADER_BYTES, PACK_VERSION,
@@ -2530,12 +2531,12 @@ test('S2 #300-2: an advertisement non-2xx or foreign content type, and a POST fo
 // retrying a server's transient corruption may succeed; retrying the caller's own bytes cannot). A fake smart-HTTP
 // server over fetchImpl: a v2 advertisement, ls-refs naming HEAD, and a fetch answer whose PACK is built by buildPack and
 // then has one trailer byte flipped (`flip`), so the pack fails its trailer check the way a corrupt network answer would.
-async function corruptServer({ flip }) {
+async function corruptServer({ flip, parents = [], blob = null }) {
   const author = unwrap(ident(unwrap(validateIdent({ name: 'g', email: 'g@x', time: 1700000000 }))));
   const tree = hashObject('tree', new Uint8Array(0));
-  const cdata = unwrap(encodeCommit({ tree, parents: [], author, committer: author, message: 'c\n' }));
+  const cdata = unwrap(encodeCommit({ tree, parents, author, committer: author, message: 'c\n' }));
   const commit = hashObject('commit', cdata);
-  const { pack } = await buildPack([{ type: TYPE.COMMIT, data: cdata }]);
+  const { pack } = await buildPack(blob === null ? [{ type: TYPE.COMMIT, data: cdata }] : [{ type: TYPE.BLOB, data: blob }]);
   const sent = pack.slice();
   if (flip) sent[sent.length - 1] ^= 0xff;
   const res = (ct, ...parts) => new Response(concat(parts), { status: 200, headers: { 'content-type': ct } });
@@ -2550,6 +2551,51 @@ async function corruptServer({ flip }) {
   };
   return { fetchImpl, commit, tree };
 }
+
+// #300-5 round 4: checks that run on a fetched pack after the fetch returned are still the server's bytes. readLog's
+// window check: a commit whose parent (1111…) the server withholds without a shallow line breaks the deepen contract
+// (git's shallow protocol, gitprotocol-v2 'shallow-info'); on main d0af036 this was pack_corrupt and retryable.
+test('S2 #300-5: readLog over a window that withholds a parent unreported is pack_corrupt, origin remote, retryable', async () => {
+  const { fetchImpl } = await corruptServer({ flip: false, parents: ['1'.repeat(40)] });
+  const r = await readLog('http://127.0.0.1:9/r.git', {}, { fetchImpl });
+  assert.equal(r.ok, false); assert.equal(r.error.code, 'pack_corrupt');
+  assert.equal(r.error.origin, 'remote');
+  assert.equal(isRetryable(r.error), true, 'a server that withheld a parent may answer correctly next time');
+});
+
+// openBlob/readBlob stream the server's pack (read.ts openBlob's own catch, not fetchExchange): a flipped trailer byte
+// fails the stream's trailer check, and those bytes came from the server.
+test('S2 #300-5: readBlob over a corrupt server stream is pack_corrupt, origin remote, retryable', async () => {
+  const data = te.encode('hello\n');
+  const oidBlob = hashObject('blob', data);
+  const { fetchImpl } = await corruptServer({ flip: true, blob: data });
+  const t = createTransport('http://127.0.0.1:9/r.git', { fetchImpl });
+  const r = await readBlob(t, oidBlob);
+  assert.equal(r.ok, false); assert.equal(r.error.code, 'pack_corrupt');
+  assert.equal(r.error.origin, 'remote');
+  assert.equal(isRetryable(r.error), true);
+  const good = await corruptServer({ flip: false, blob: data });
+  const g = await readBlob(createTransport('http://127.0.0.1:9/r.git', { fetchImpl: good.fetchImpl }), oidBlob);
+  assert.equal(g.ok, true, g.ok ? '' : g.error.message);
+});
+
+// Only pack_corrupt carries origin: a 5xx from fetchPack is upstream_5xx and has no origin field (README error table).
+test('S2 #300-5: a non-pack_corrupt fetchPack/fetchObject failure carries no origin', async () => {
+  const { fetchImpl: base, commit } = await corruptServer({ flip: false });
+  const fetchImpl = async (url, init) => (init !== undefined && init.method === 'POST' && td.decode(init.body).includes('command=fetch'))
+    ? new Response('boom', { status: 503 }) : base(url, init);
+  const t = createTransport('http://127.0.0.1:9/r.git', { fetchImpl, tracer: tracerStub });
+  for (const r of [await fetchPackR(t, { wants: [commit] }), await fetchObjectR(t, { oid: commit })]) {
+    assert.equal(r.ok, false); assert.equal(r.error.code, 'upstream_5xx');
+    assert.equal('origin' in r.error, false);
+  }
+});
+
+// The exported table: pack_corrupt alone needs the error itself (origin) to decide; the table's static answer is 'no'.
+test('S2 #300-5: RETRY.pack_corrupt is no; retryPolicy reads origin', () => {
+  assert.equal(RETRY.pack_corrupt, 'no');
+  assert.equal(RETRY.protocol, 'yes');
+});
 
 test('S2 #300-5: a corrupt PACK the server sent is pack_corrupt and retryable through fetchPack and fetchObject', async () => {
   const { fetchImpl, commit } = await corruptServer({ flip: true });

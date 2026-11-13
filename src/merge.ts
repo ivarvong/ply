@@ -216,7 +216,7 @@ export async function ancestors(t: Transport, head: Oid, depth: number): Promise
   const sent = new Map<string, Commit>();
   const objects = fromNullish(r.objects);
   if (objects.tag === 'some') for (const [oid, o] of objects.value) if (o.type === TYPE.COMMIT) { const c = parseCommit(o.data, t.limits); if (!c.ok) return c; sent.set(oid, c.value); }
-  if (!sent.has(head)) return fail('pack_corrupt', `commit ${head} not in the pack that wanted it`);
+  if (!sent.has(head)) return fail('pack_corrupt', `commit ${head} not in the pack that wanted it`, { origin: 'remote' });
   const commits = new Map<Oid, Commit>();
   const seen = new Set([head]);
   // seen grows while it is walked: every commit reachable from head through the pack
@@ -224,9 +224,9 @@ export async function ancestors(t: Transport, head: Oid, depth: number): Promise
   const shallow = new Set(r.shallow);
   const reached = new Set<string>(commits.keys());
   for (const [oid, c] of sent) {
-    if (!reached.has(oid)) return fail('pack_corrupt', `commit ${oid} sent but not an ancestor of ${head}`);
+    if (!reached.has(oid)) return fail('pack_corrupt', `commit ${oid} sent but not an ancestor of ${head}`, { origin: 'remote' });
     const missing = shallow.has(oid) ? none : fromNullable(c.parents.find(p => !sent.has(p)));
-    if (missing.tag === 'some') return fail('pack_corrupt', `parent ${missing.value} of ${oid} withheld and ${oid} not reported shallow`);
+    if (missing.tag === 'some') return fail('pack_corrupt', `parent ${missing.value} of ${oid} withheld and ${oid} not reported shallow`, { origin: 'remote' });
   }
   return ok(commits);
 }
