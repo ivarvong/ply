@@ -19,7 +19,7 @@ import type { PktState } from './pktline.js';
 import { bufferSource, concat, td, te } from './bytes.js';
 import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, limitExceeded, parseLimits } from './limits.js';
-import { validateWire } from './validate.js';
+import { validateFieldValue, validateWire } from './validate.js';
 import type { WireField } from './validate.js';
 import { exchangeClock, readAbortable, watchedUpload, NO_HINTS, UA, forgetRedirect, freshQuirks, quirksKeyOf, recalledRedirect, rememberRedirect, rememberedQuirks, plyMade, wrapNet } from './transport.js';
 
@@ -377,7 +377,7 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
   const { auth, tracer, parent, fetchImpl, userAgent, limits, signal, quirks: givenQuirks, recordResponseHeaders, followRedirects, allowUrl, maxRedirects } = withDefaults(options, httpDefaults());
   const checkedPolicy = redirectPolicy(followRedirects, maxRedirects);
   if (!checkedPolicy.ok) return checkedPolicy;
-  const agent = validateWire(userAgent, 'user agent');
+  const agent = validateFieldValue(userAgent, 'userAgent');
   if (!agent.ok) return agent;
   const names = recordResponseHeaderNames(recordResponseHeaders);
   if (!names.ok) return names;

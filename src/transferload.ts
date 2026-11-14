@@ -17,6 +17,7 @@
 //
 // Span: git.transfer.load (under dst's parent) with git.transfer.load.from, .refused, .saved_bytes, .entries and
 // git.pack.trailer; a scan's refusal is the span's error.
+import { argsError } from './errors.js';
 import type { PlyError } from './errors.js';
 import type { Option, Result } from './result.js';
 import { ok, err, some, none } from './result.js';
@@ -30,7 +31,7 @@ import type { RangeSource } from './rangesource.js';
 import { UNCANCELLABLE, HALTED, haltOn, cancelLate, aborted } from './rangesource.js';
 import type { TransferPack } from './transferplan.js';
 import type { SavedIndex, SavedIndexRefusal } from './packsaved.js';
-import { decodeSavedIndex, encodeSavedIndex, describeRefusal, packIdentity } from './packsaved.js';
+import { decodeSavedBytes, encodeSavedIndex, describeRefusal, packIdentity } from './packsaved.js';
 import type { Span } from './otel.js';
 import { KIND } from './otel.js';
 import type { Transport } from './transport.js';
@@ -80,6 +81,8 @@ async function fromSaved(source: RangeSource, cfg: LoadConfig, span: Span, bytes
 
 // See the top of this file.
 export async function loadTransferPack(dst: Transport, source: RangeSource, saved: Option<Uint8Array>, opts: LoadOpts = {}): Promise<Result<LoadedPack, PlyError>> {
+  const shape = argsError('loadTransferPack', [['dst', dst, 'object'], ['source', source, 'object'], ['saved', saved, 'object'], ['options', opts, 'object']]);
+  if (shape !== null) return shape;
   const input = withDefaults<LoadConfig>(opts, { scan: {}, resolve: {}, signal: UNCANCELLABLE });
   const span0 = { parent: dst.parent, kind: KIND.INTERNAL, attrs: { 'git.transfer.load.saved_in': saved.tag === 'some' ? saved.value.length : 0, 'git.transfer.spool.bytes': source.size }, scrub: dst.scrub };
   const r = await spanned(dst, 'git.transfer.load', span0, async (span: Span): Promise<Result<LoadedPack, PlyError>> => {
@@ -94,7 +97,7 @@ export async function loadTransferPack(dst: Transport, source: RangeSource, save
     const id = await packIdentity(source, cfg.signal);
     if (!id.ok) return id;
     span.set({ 'git.pack.trailer': id.value.trailer });
-    const out = saved.tag === 'none' ? await scanned(source, cfg, none) : await fromSaved(source, cfg, span, saved.value, decodeSavedIndex(saved.value, id.value, resolve.value.limits.maxDeltaChain, scanLimits.value.maxPackObjects));
+    const out = saved.tag === 'none' ? await scanned(source, cfg, none) : await fromSaved(source, cfg, span, saved.value, decodeSavedBytes(saved.value, id.value, resolve.value.limits.maxDeltaChain, scanLimits.value.maxPackObjects));
     if (out.ok) span.set({ 'git.transfer.load.from': out.value.loaded.tag, 'git.transfer.load.saved_bytes': out.value.saved.length, 'git.transfer.load.entries': out.value.from.pack.count });
     return out;
   });

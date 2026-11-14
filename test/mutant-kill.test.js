@@ -1586,7 +1586,7 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   await assert.rejects((async () => { for await (const frame of http.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), e => e.code === 'timeout');
   assert.ok(Date.now() - t0 < 2000);
 
-  assert.throws(() => createTransport('http://127.0.0.1/r.git', { userAgent: 'ply\r\nX: 1' }), e => e.code === 'bad_request' && e.what === 'user agent');
+  assert.throws(() => createTransport('http://127.0.0.1/r.git', { userAgent: 'ply\r\nX: 1' }), e => e.code === 'bad_request' && e.what === 'userAgent');
   assert.throws(() => createTransport('http://127.0.0.1/r.git', { auth: { bearer: 'tok\n' } }), e => e.code === 'bad_request' && e.what === 'bearer');
   let pulls = 0;
   const advBody = new ReadableStream({ pull(controller) { pulls++; controller.enqueue(new Uint8Array(1000)); if (pulls > 8) controller.close(); } });

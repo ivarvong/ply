@@ -22,7 +22,7 @@
 // Spans (each under the transport's parent): git.transfer.run > git.transfer.status, git.transfer.step (> the push's
 // wire spans), git.transfer.settle; git.transfer.sweep. Every one carries git.transfer.plan.hash and an outcome.
 import type { PlyError } from './errors.js';
-import { fail } from './errors.js';
+import { fail, argsError } from './errors.js';
 import type { Option, Result } from './result.js';
 import { assertNever, ok, some, none, isSome, getOrElse } from './result.js';
 import type { Input } from './absent.js';
@@ -320,6 +320,8 @@ export async function runTransfer(dst: Transport, from: TransferPack, stored: Tr
 
 // Plan and run in one call (a caller with the time to finish, or the first request of several: keep the plan it gives).
 export async function copyTree(dst: Transport, from: TransferPack, opts: TransferOpts & RunOpts): Promise<Result<{ readonly plan: TransferPlan; readonly run: TransferRun }, PlyError>> {
+  const shape = argsError('copyTree', [['dst', dst, 'object'], ['from', from, 'object'], ['options', opts, 'object']]);
+  if (shape !== null) return shape;
   const plan = planTransfer(from.pack, from.resolved, opts);
   if (!plan.ok) return plan;
   const run = await runTransfer(dst, from, plan.value, opts.commit, opts);

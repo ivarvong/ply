@@ -357,10 +357,12 @@ export async function walkCommit(t: Transport, commit: string, comps: readonly s
   return walkFromCommit(t, id.value, comps, config, null);
 }
 
-// A path as the entries take it: validated components. With `allowRoot`, a missing, null, empty or '/' path is the root.
+// A path as the entries take it: validated components. With `allowRoot` (a tree path), a missing, null, empty or '/'
+// path is the root and one trailing '/' is dropped (git: `HEAD:dir/` is the tree). Without it (a file path), a trailing
+// '/' names a directory and is refused, as git refuses `HEAD:file/` for a blob (#300-8).
 export const pathComps = (path: unknown, limits: CheckedLimits, { allowRoot }: { readonly allowRoot: boolean }): Result<string[], PlyError> => {
   if (allowRoot && (isNothing(path) || path === '' || path === '/')) return ok([]);
-  const valid = validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits);
+  const valid = validatePath(allowRoot && typeof path === 'string' ? path.replace(/\/$/, '') : path, limits);
   return valid.ok ? ok(valid.value.components) : valid;
 };
 

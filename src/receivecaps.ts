@@ -1,7 +1,7 @@
 // v0 receive-pack capability advertisement (GET info/refs). Only needed to check optional capabilities (atomic,
 // push-options) before relying on them; the v2 fetch path never needs it. Parsing the advertisement and checking a
 // push against it are pure; receiveCaps is the one effect.
-import { fail, remoteQuoted } from './errors.js';
+import { fail, remoteQuoted, argsError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { ok, assertNever, getOrElse, mapOption } from './result.js';
 import { decideObjectFormat } from './closed.js';
@@ -195,6 +195,8 @@ export async function pushPackOutcome(t: CapsTransport, options: CheckedPackPush
   return pushPackChecked(t, { ...opts, checked: checked.value });
 }
 export async function pushPack(t: CapsTransport, options: CheckedPackPushOptions): Promise<Result<PushResult, PlyError>> {
+  const shape = argsError('pushPack', [['transport', t, 'object'], ['options', options, 'object']]);
+  if (shape !== null) return shape;
   const sent = await pushPackOutcome(t, options);
   return sent.result;
 }

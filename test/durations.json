@@ -48,6 +48,7 @@
   "test/inflate-codesets.test.js": 1,
   "test/inflate-pos.test.js": 1,
   "test/inflate-zlib-git.test.js": 1,
+  "test/input-validation.test.js": 1,
   "test/linear-matchers-274.test.js": 4,
   "test/linemerge.test.js": 1,
   "test/log.test.js": 17,

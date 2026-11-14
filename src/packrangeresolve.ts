@@ -37,7 +37,7 @@
 // Held per entry only while resolving: child links (4 per entry + 4 per OFS delta), each REF delta's base id and
 // position (24), and a known flag (1).
 import type { PlyError } from './errors.js';
-import { fail, plyError } from './errors.js';
+import { fail, plyError, argsError } from './errors.js';
 import type { Option, Result } from './result.js';
 import { ok, err, some, none, assertNever } from './result.js';
 import { withDefaults, fromNullish, mapGet } from './absent.js';
@@ -614,6 +614,8 @@ export function resolveOptsOf(input: Partial<ResolveRangeOpts>): Result<CheckedO
 
 // Resolve every entry of `pack` (scanPackIndex's index of the bytes `source` serves). See the top of this file.
 export async function resolvePackRange(pack: ScannedPack, source: RangeSource, input: Partial<ResolveRangeOpts> = {}): Promise<Result<ResolvedIndex, PlyError>> {
+  const shape = argsError('resolvePackRange', [['pack', pack, 'object'], ['source', source, 'object'], ['options', input, 'object']]);
+  if (shape !== null) return shape;
   const parsed = resolveOptsOf(input);
   if (!parsed.ok) return parsed;
   const opts = parsed.value;
