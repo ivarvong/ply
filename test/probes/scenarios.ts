@@ -450,10 +450,12 @@ export const SCENARIOS: readonly Scenario[] = [
   },
   {
     id: 'interrupted.stall-timeouts#push-response-stall',
-    description: 'The server applies base->ff and its answer is held 4 s against a 1 s client timer: ply says ambiguous (typed), stock git gives up with no report; main is at ff.',
+    // stock git's timer here is http.lowSpeedTime, which a silent connection trips on some git/libcurl builds (2.47.3 with
+    // curl 8.14) and not on others (CI's 2.56.1 waits and lands), so only ply's answer is stated; both still run
+    description: 'The server applies base->ff and its answer is held 4 s against a 1 s client timer: ply says ambiguous (typed); main is at ff.',
     seed: { objects: CORE, refs: [at(MAIN, 'base')] },
     steps: [{ ...step(pushOf([upd(MAIN, o('base'), o('ff'))]), { tag: 'stall-response', ms: 4000 }), timeouts: { ms: 1000 } }],
-    expect: [{ tag: 'one', ply: one('ambiguous', 'ambiguous'), git: one('ambiguous', 'ambiguous') }],
+    expect: [{ tag: 'one', ply: one('ambiguous', 'ambiguous'), git: null }],
     final: [finalAt(MAIN, 'ff')],
     ...PLAIN,
   },
@@ -468,10 +470,11 @@ export const SCENARIOS: readonly Scenario[] = [
   },
   {
     id: 'interrupted.stall-timeouts#fetch-response-stall',
-    description: 'A fetch of main whose answer is held 4 s against a 1 s client timer: each client fails with a timeout, nothing is half-written.',
+    // as push-response-stall: stock git's lowSpeedTime on a silent connection depends on the build, so only ply's is stated
+    description: 'A fetch of main whose answer is held 4 s against a 1 s client timer: ply fails with a typed timeout, nothing is half-written.',
     seed: { objects: [...CORE, MID], refs: [at(MAIN, 'mid')] },
     steps: [fetchStep('mid', { tag: 'stall-response', ms: 4000 }, { ms: 1000 })],
-    expect: [{ tag: 'one', ply: one('rejected', 'timeout'), git: one('rejected', 'timeout') }],
+    expect: [{ tag: 'one', ply: one('rejected', 'timeout'), git: null }],
     final: [finalAt(MAIN, 'mid')],
     ...PLAIN,
   },
