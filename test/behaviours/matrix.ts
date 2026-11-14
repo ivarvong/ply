@@ -90,6 +90,8 @@ const PARITY_LSREFS = 'ls-refs == git ls-remote (prefixes, symrefs, peeled tags,
 const MATRIX = 'exhaustive fetch matrix: wants × haves × deepen × filter × server';
 const CLONE_SHAPES = 'clone --depth N / --filter / --shallow-since / --shallow-exclude: same invocation, same shallow set, same objects';
 const ADV_PUSH = 'push: request × advertised atomic × advertised push-options × object-format, judged by git push';
+const BAND3_NO_REPORT = 'push outcome (SAFETY.md I36): the exact report shapes, the decision, and the fields the enumerator does not compare';
+
 const PROBES = 'probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository';
 const ADV_REAL = 'real git http-backend configurations advertise exactly what the renderer writes for their cell';
 
@@ -673,11 +675,11 @@ const CONCURRENCY: readonly BehaviourIn<'concurrency'>[] = [
   }),
   b({
     id: 'concurrency.empty-report-under-contention', area: 'concurrency',
-    description: 'A receive-pack 200 with no unpack or ref lines (seen on Artifacts under same-repo concurrency) is ambiguous, never landed.',
+    description: 'A receive-pack 200 that carries no report (no unpack or ref lines), whether an empty body or only a band-3 fatal such as the busy refusal Artifacts sends to concurrent same-repo pushes, is ambiguous, never landed; the server applied nothing for it.',
     ops: [PUSH, CLASSIFY_REPORT],
-    tests: [t('test/push-unpack-host.test.js', 'an empty receive-pack report stays ambiguous (concurrent same-repo 200 with no unpack/ref lines)'), t('test/probes/probes.test.js', PROBES)],
+    tests: [t('test/push-unpack-host.test.js', 'an empty receive-pack report stays ambiguous (concurrent same-repo 200 with no unpack/ref lines)'), t('test/mutant-kill.test.js', BAND3_NO_REPORT), t('test/probes/probes.test.js', PROBES)],
     status: verified(git('test/probes/probes.test.js', PROBES), probePly('concurrency.empty-report-under-contention#distinct-refs/art-ply'), probePly('concurrency.empty-report-under-contention#same-ref/art-ply'), probeGit('concurrency.empty-report-under-contention#distinct-refs/art-git'), probeGit('concurrency.empty-report-under-contention#same-ref/art-git')),
-    notes: ['Probed with 8 concurrent pushes to one repository (8 distinct refs; one ref from 8 contenders); every push a client called landed is checked against the refs stock git reads back. Per-check outcomes are in the private run record.'],
+    notes: ['Probed with 8 concurrent pushes to one repository (8 distinct refs; one ref from 8 contenders); every push a client called landed is checked against the refs stock git reads back. Per-check outcomes are in the private run record.', 'Observed shape on Artifacts (probes run probes-20261114t1745-5jxl): HTTP 200 whose body is a single band-3 fatal (busy) and no report-status, for distinct refs as well as one ref; the refs read back show none of those pushes applied. Stock git reports it as the remote hanging up (exit 128).'],
   }),
   b({
     id: 'concurrency.two-transfer-runners', area: 'concurrency',
