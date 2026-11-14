@@ -1,9 +1,10 @@
 // The differential probe scenarios, keyed by matrix behaviour (`<behaviour>#<variant>`), in priority order: the hard
 // state transitions first (stale old ids, lost answers, contention, atomicity, refs moved under a push, size caps,
 // non-fast-forward), then the plain transitions the hard ones are read against. Each is a pure plan; the runner
-// (test/probes/runner.mjs) seeds a fresh repository per target, runs the steps, and stock git judges the result.
-import { ABSENT } from './types.js';
-import type { CommitSpec, Damage, Expectation, Fault, Timeouts, FileSpec, FinalRef, Move, NonEmpty, ObjRef, ObjectSpec, OidExpr, Outcome, Push, RefAt, Scenario, StepExpect, TagSpec, Update } from './types.js';
+// (test/probes/runner.mjs here, ply-web's workbench in a Worker) seeds a fresh repository per target, runs the steps,
+// and a judge reads the result back.
+import { ABSENT } from './probe-types.js';
+import type { CommitSpec, Damage, Expectation, Fault, Timeouts, FileSpec, FinalRef, Move, NonEmpty, ObjRef, ObjectSpec, OidExpr, Outcome, Push, RefAt, Scenario, StepExpect, TagSpec, Update } from './probe-types.js';
 
 const text = (path: string, s: string): FileSpec => ({ path, content: { tag: 'text', text: s } });
 const noise = (path: string, seed: string, bytes: number): FileSpec => ({ path, content: { tag: 'noise', seed, bytes } });
@@ -36,15 +37,12 @@ const SAME = { tag: 'same' } as const;
 const NO_FAULT = { tag: 'none' } as const;
 const FULL = { tag: 'full' } as const;
 const step = (push: Push, fault: Fault = NO_FAULT) => ({ tag: 'push', push, fault, git: SAME, ply: SAME, from: FULL, timeouts: null }) as const;
-const nonEmpty = <T>(xs: readonly T[]): NonEmpty<T> => {
-  const [first, ...rest] = xs;
-  if (first === undefined) throw new Error('nonEmpty: empty list');
-  return [first, ...rest];
-};
+const mapNonEmpty = <T, U>(xs: NonEmpty<T>, f: (x: T) => U): NonEmpty<U> => [f(xs[0]), ...xs.slice(1).map(x => f(x))];
 
-const CONTENDERS = 8;
-const contenders = Array.from({ length: CONTENDERS }, (_, i) => commit(`c${i}`, ['base'], [text(`c${i}.txt`, `contender ${i}\n`)]));
-const contenderNames = nonEmpty(contenders.map(c => c.name));
+const CONTENDER_INDEXES: NonEmpty<number> = [0, 1, 2, 3, 4, 5, 6, 7];
+const CONTENDERS = CONTENDER_INDEXES.length;
+const contenders: NonEmpty<CommitSpec> = mapNonEmpty(CONTENDER_INDEXES, i => commit(`c${i}`, ['base'], [text(`c${i}.txt`, `contender ${i}\n`)]));
+const contenderNames = mapNonEmpty(contenders, c => c.name);
 
 // 66 MiB of incompressible content in three 22 MiB blobs: over a 64 MiB pack cap, each blob under a 32 MiB object cap.
 const MIB = 1024 * 1024;
@@ -71,6 +69,22 @@ const MID = commit('mid', ['base'], [noise('mid.bin', 'mid', 2 * MIB)]);
 const fetchStep = (want: string, fault: Fault, timeouts: Timeouts = null) => ({ tag: 'fetch', ref: MAIN, want, fault, git: SAME, timeouts }) as const;
 const STALL_MS = 20_000;
 const REFUSED_PACK = { tag: 'one', ply: one('rejected', 'push_rejected'), git: null } as const;
+
+type Corruption = Exclude<Damage, 'none'>;
+const DAMAGE_TEXT: Readonly<Record<Corruption, string>> = {
+  'bad-trailer': 'a wrong trailing SHA-1',
+  'bad-zlib': 'an object whose zlib stream fails its Adler-32 check (trailer recomputed)',
+  truncated: 'only its first half',
+};
+const corrupt = (damage: Corruption): Scenario => ({
+  id: `pack.push-corrupt-pack-refused#${damage}`,
+  description: `ply pushes base->ff in a pack with ${DAMAGE_TEXT[damage]}: refused, main unchanged.`,
+  seed: { objects: CORE, refs: [at(MAIN, 'base')] },
+  steps: [handStep(hand(pushOf([upd(MAIN, o('base'), o('ff'))]), null, 'literal', damage))],
+  expect: [REFUSED_PACK],
+  final: [finalAt(MAIN, 'base')],
+  ...PLAIN,
+});
 
 export const SCENARIOS: readonly Scenario[] = [
   {
@@ -107,7 +121,7 @@ export const SCENARIOS: readonly Scenario[] = [
     id: 'concurrency.empty-report-under-contention#distinct-refs',
     description: `${CONTENDERS} pushes at once to one repository, each creating its own branch: every one lands, or is reported ambiguous (never landed when it did not).`,
     seed: { objects: [...CORE, ...contenders], refs: [at(MAIN, 'base')] },
-    steps: [{ tag: 'concurrent', pushes: nonEmpty(contenders.map(c => pushOf([upd(`refs/heads/p-${c.name}`, ZERO, o(c.name))]))), git: SAME }],
+    steps: [{ tag: 'concurrent', pushes: mapNonEmpty(contenders, c => pushOf([upd(`refs/heads/p-${c.name}`, ZERO, o(c.name))])), git: SAME }],
     expect: [{ tag: 'many', ply: contenders.map(() => 'landed' as const), git: contenders.map(() => 'landed' as const) }],
     final: contenders.map(c => finalAt(`refs/heads/p-${c.name}`, c.name)),
     ...PLAIN,
@@ -116,7 +130,7 @@ export const SCENARIOS: readonly Scenario[] = [
     id: 'concurrency.empty-report-under-contention#same-ref',
     description: `${CONTENDERS} pushes at once moving main from base to ${CONTENDERS} different commits: exactly one lands, the rest are refused as conflicts.`,
     seed: { objects: [...CORE, ...contenders], refs: [at(MAIN, 'base')] },
-    steps: [{ tag: 'concurrent', pushes: nonEmpty(contenders.map(c => pushOf([upd(MAIN, o('base'), o(c.name))]))), git: SAME }],
+    steps: [{ tag: 'concurrent', pushes: mapNonEmpty(contenders, c => pushOf([upd(MAIN, o('base'), o(c.name))])), git: SAME }],
     expect: [{ tag: 'many', ply: ['landed', ...contenders.slice(1).map(() => 'conflict' as const)], git: ['landed', ...contenders.slice(1).map(() => 'conflict' as const)] }],
     final: [{ tag: 'one-of', ref: MAIN, names: contenderNames }],
     referenceConfig: [],
@@ -274,7 +288,7 @@ export const SCENARIOS: readonly Scenario[] = [
     id: 'push.many-ref-updates#fifty-creates',
     description: `One push creating ${MANY} branches at ff.`,
     seed: { objects: CORE, refs: [at(MAIN, 'base')] },
-    steps: [step(pushOf(nonEmpty(Array.from({ length: MANY }, (_, i) => upd(`refs/heads/many/${String(i).padStart(2, '0')}`, ZERO, o('ff'))))))],
+    steps: [step(pushOf(mapNonEmpty([0, ...Array.from({ length: MANY - 1 }, (_, i) => i + 1)], i => upd(`refs/heads/many/${String(i).padStart(2, '0')}`, ZERO, o('ff')))))],
     expect: [LANDED],
     final: [finalAt(MAIN, 'base'), ...Array.from({ length: MANY }, (_, i) => finalAt(`refs/heads/many/${String(i).padStart(2, '0')}`, 'ff'))],
     ...PLAIN,
@@ -314,7 +328,7 @@ export const SCENARIOS: readonly Scenario[] = [
     description: `${CONTENDERS} pushes at once, each creating its own branch; then every push that did not land is sent again, one at a time: each retry lands (a create of a ref the first attempt had made would be refused), so nothing reported unknown was applied.`,
     seed: { objects: [...CORE, ...contenders], refs: [at(MAIN, 'base')] },
     steps: [
-      { tag: 'concurrent', pushes: nonEmpty(contenders.map(c => pushOf([upd(`refs/heads/p-${c.name}`, ZERO, o(c.name))]))), git: SAME },
+      { tag: 'concurrent', pushes: mapNonEmpty(contenders, c => pushOf([upd(`refs/heads/p-${c.name}`, ZERO, o(c.name))])), git: SAME },
       { tag: 'retry-unlanded', of: 0, git: SAME },
     ],
     expect: [
@@ -361,15 +375,9 @@ export const SCENARIOS: readonly Scenario[] = [
     final: [finalAt(MAIN, 'base')],
     ...PLAIN,
   },
-  ...(['bad-trailer', 'bad-zlib', 'truncated'] as const).map((damage): Scenario => ({
-    id: `pack.push-corrupt-pack-refused#${damage}`,
-    description: `ply pushes base->ff in a pack with ${damage === 'bad-trailer' ? 'a wrong trailing SHA-1' : damage === 'bad-zlib' ? 'an object whose zlib stream fails its Adler-32 check (trailer recomputed)' : 'only its first half'}: refused, main unchanged.`,
-    seed: { objects: CORE, refs: [at(MAIN, 'base')] },
-    steps: [handStep(hand(pushOf([upd(MAIN, o('base'), o('ff'))]), null, 'literal', damage))],
-    expect: [REFUSED_PACK],
-    final: [finalAt(MAIN, 'base')],
-    ...PLAIN,
-  })),
+  corrupt('bad-trailer'),
+  corrupt('bad-zlib'),
+  corrupt('truncated'),
   {
     id: 'push.from-shallow-clone#boundary-held',
     description: 'main at ff; stock git pushes x (a child of ff) from a depth-2 shallow fetch of x (boundary ff, which the server holds): lands.',

@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **822** (733 fail sites, 20 produced codes, 3 untyped throws, 38 exported parse/decode/classify/decide functions). Covered by a merged space 747, by a pending PR 0, excluded 49, unregistered 26. Fail sites no cell reaches: 30 of 733. Of the registered points, 223 are claimed by an enumerated space, 9 only by a random one and 515 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **823** (733 fail sites, 20 produced codes, 3 untyped throws, 39 exported parse/decode/classify/decide functions). Covered by a merged space 747, by a pending PR 0, excluded 50, unregistered 26. Fail sites no cell reaches: 30 of 733. Of the registered points, 223 are claimed by an enumerated space, 9 only by a random one and 515 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 

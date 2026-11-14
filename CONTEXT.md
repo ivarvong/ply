@@ -248,15 +248,16 @@ ply, stock git or hand-built wire probes against Artifacts in a recorded run lis
 the types make a verified row without evidence impossible. A change that adds or retires a behaviour, a test, or a
 run updates the matrix and regenerates COVERAGE.md in the same commit.
 
-Differential probes (`test/probes/`) turn matrix behaviours into scenarios: a pure typed plan per `<behaviour>#<variant>`
+Differential probes turn matrix behaviours into scenarios (plans, types and the pure evaluator in `src/probe-*.ts`,
+exported as `ply/probes` so ply-web's workbench runs the same plans from a Worker; the runner in `test/probes/`): a pure typed plan per `<behaviour>#<variant>`
 (a seed of deterministic objects, so every target holds the same ids; pushes or concurrent pushes; an optional fault:
 hold the receive-pack request while another writer moves refs, or cut the server's answer) and the outcome git
 http-backend is expected to give. Each scenario runs by ply and by stock git against git http-backend configured to
 Artifacts' known policy (`test/probes/probes.test.js`, in CI) and, opt-in and private, against Artifacts
 (`npm run probes -- --artifacts --out <dir outside the repo>`). Stock git judges every run (ls-remote, mirror clone,
-fsck --strict, rev-list --parents, merge-base) and `test/probes/evaluate.ts` compares runs on meaning: outcome and
+fsck --strict, rev-list --parents, merge-base) and `src/probe-evaluate.ts` compares runs on meaning: outcome and
 error class, refs and HEAD, reachable objects, trees, ancestry, and whether a push a client called landed is in the
-refs. Expected differences live in `test/probes/allow.ts`, each with its reason; anything else is a finding,
+refs. Expected differences live in `src/probe-allow.ts`, each with its reason; anything else is a finding,
 classified by triangulation (a server bug only when ply is right on the reference and stock git reproduces it on the
 server), and an unused allow entry fails the run. The repository keeps run ids and check names (runs.ts), never
 verdicts.

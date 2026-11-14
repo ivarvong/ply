@@ -5,11 +5,12 @@
 // a behaviour ply cannot exercise names no ply operation, and one it can names at least one.
 import type { RunRefFor } from './runs.js';
 
-export type NonEmpty<T> = readonly [T, ...T[]];
+import type { Area, BehaviourId, NonEmpty } from '../../src/probe-types.ts';
 
-// The areas of server behaviour, in the order COVERAGE.md lists them.
-export const AREAS = ['refs', 'caps', 'fetch', 'pack', 'push', 'concurrency', 'tags', 'ancestry', 'errors', 'interrupted', 'http'] as const;
-export type Area = (typeof AREAS)[number];
+// The areas of server behaviour, in the order COVERAGE.md lists them, and behaviour ids, live beside the probe plans
+// that cite them (src/probe-types.ts, exported as `ply/probes`).
+export { AREAS } from '../../src/probe-types.ts';
+export type { Area, BehaviourId, NonEmpty } from '../../src/probe-types.ts';
 
 export const AREA_TITLES: { readonly [A in Area]: string } = {
   refs: 'Ref advertisement and ls-refs',
@@ -25,8 +26,6 @@ export const AREA_TITLES: { readonly [A in Area]: string } = {
   http: 'HTTP transport (smart HTTP, sideband, keepalive, large bodies)',
 };
 
-// A behaviour id is `<area>.<slug>`: the area is part of the id, so an id filed under the wrong area does not type.
-export type BehaviourId<A extends Area> = `${A}.${string}`;
 
 // A ply operation: an exported function of a src/ module. test/behaviours/matrix.test.js greps the module for the export.
 export type PlyOp = { readonly module: `src/${string}.ts`; readonly symbol: string };

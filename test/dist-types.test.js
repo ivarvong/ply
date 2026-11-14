@@ -15,9 +15,9 @@ let consumer;
 before(() => { consumer = buildConsumer(); }, 300_000);
 after(() => { if (consumer) consumer.cleanup(); });
 
-test('package.json exports the root and 18 subpaths, three of them Node only', () => {
+test('package.json exports the root and 19 subpaths, three of them Node only', () => {
   // counted by hand from package.json "exports"; a new subpath must be added here on purpose
-  assert.equal(SUBPATHS.length, 19);
+  assert.equal(SUBPATHS.length, 20);
   assert.deepEqual(SUBPATHS.filter(name => name.endsWith('-node')), ['ply/tree-node', 'ply/checkout-node', 'ply/repo-node']);
 });
 
@@ -26,11 +26,11 @@ test('package.json exports the root and 18 subpaths, three of them Node only', (
 // against the version of the package the compile really ran against, so an alias pointing at the wrong major, or a
 // variant dropped from the script, fails here.
 const EXPECTED = [
-  { name: 'node20', types: '@types/node', major: 20, subpaths: 19 },
-  { name: 'node22', types: '@types/node', major: 22, subpaths: 19 },
-  { name: 'node24', types: '@types/node', major: 24, subpaths: 19 },
-  { name: 'dom', types: '', major: 0, subpaths: 16 },
-  { name: 'workers', types: '@cloudflare/workers-types', major: 5, subpaths: 16 },
+  { name: 'node20', types: '@types/node', major: 20, subpaths: 20 },
+  { name: 'node22', types: '@types/node', major: 22, subpaths: 20 },
+  { name: 'node24', types: '@types/node', major: 24, subpaths: 20 },
+  { name: 'dom', types: '', major: 0, subpaths: 17 },
+  { name: 'workers', types: '@cloudflare/workers-types', major: 5, subpaths: 17 },
 ];
 
 test('the variants are Node on @types/node 20, 22 and 24, DOM and Workers', () => {

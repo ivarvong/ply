@@ -81,6 +81,10 @@
     "./otel": {
       "types": "./dist/otel.d.ts",
       "default": "./dist/otel.js"
+    },
+    "./probes": {
+      "types": "./dist/probes.d.ts",
+      "default": "./dist/probes.js"
     }
   },
   "sideEffects": false,

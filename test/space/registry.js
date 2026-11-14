@@ -232,6 +232,7 @@ export const DECISIONS = [
   { match: 'src/edit.ts#resolve:bad_request:<s.ref>, <b.oid>, <tip.value>', space: 'commit-changes', axisTag: 'op' },
   { match: 'src/edit.ts#streamBlobEdit:internal:*', excluded: INTERNAL },
   { match: 'src/rebase.ts#linearChain:internal:*', excluded: INTERNAL },
+  { match: 'src/probe-evaluate.ts#classify:export', excluded: 'probe harness, not a wire decision: names the finding class (client bug, server bug, unresolved) of a difference between probe runs; every branch is asserted by test/probes/probes.test.js on synthetic observations' },
   { match: 'src/result.ts#assertNever:untyped:unreachable: *', excluded: 'exhaustiveness: the type checker proves the call unreachable (a value of type never); reaching it is a bug, never an outcome' },
   { match: 'src/linemerge.ts#broken:internal:*', excluded: 'an internal invariant of the diff compaction (code internal since #96: a bug, not an outcome); the linemerge and diffscript fuzzers against git hold it' },
   { match: 'src/http.ts#httpCode:*', space: 'hostile-server', axisTag: 'case' },

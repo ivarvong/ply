@@ -560,7 +560,7 @@ const PUSHES: readonly BehaviourIn<'push'>[] = [
     ops: [PUSH],
     tests: [t('test/push.test.js', "assert.equal(err.code, 'push_partial'"), t('test/probes/probes.test.js', PROBES)],
     status: verified(git('test/push.test.js', "assert.equal(err.code, 'push_partial'"), git('test/probes/probes.test.js', PROBES), probePly('push.non-atomic-partial#one-stale/art-ply'), probeGit('push.non-atomic-partial#one-stale/art-git')),
-    notes: ['Probed by a two-ref push while another writer moves one ref (test/probes/scenarios.ts). Per-check outcomes are in the private run record.'],
+    notes: ['Probed by a two-ref push while another writer moves one ref (src/probe-scenarios.ts). Per-check outcomes are in the private run record.'],
   }),
   b({
     id: 'push.report-status', area: 'push',
@@ -616,7 +616,7 @@ const PUSHES: readonly BehaviourIn<'push'>[] = [
     ops: [PUSH, PUSH_PACK],
     tests: [t('test/push-unpack-host.test.js', 'Artifacts 64 MiB cap is limit_exceeded with got/max in bytes, not push_rejected or ambiguous'), t('test/probes/probes.test.js', PROBES)],
     status: verified(phase2Git('blob_push_ceiling'), compat('large_blob_push_24m/scratch/v2'), hostileWrite('pack/zlib_bomb_40m'), git('test/probes/probes.test.js', PROBES), probePly('push.size-limits#pack-over-cap/art-ply'), probeGit('push.size-limits#pack-over-cap/art-git')),
-    notes: ['A 66 MiB pack against a 64 MiB cap. ply classifies the server\'s stated cap as limit_exceeded; git http-backend (receive.maxInputSize) refuses with `unpacker error`, its reason on band 2 only, which ply reports as push_rejected: an expected difference, test/probes/allow.ts.'],
+    notes: ['A 66 MiB pack against a 64 MiB cap. ply classifies the server\'s stated cap as limit_exceeded; git http-backend (receive.maxInputSize) refuses with `unpacker error`, its reason on band 2 only, which ply reports as push_rejected: an expected difference, src/probe-allow.ts.'],
   }),
   b({
     id: 'push.many-ref-updates', area: 'push',
@@ -883,7 +883,7 @@ const INTERRUPTED: readonly BehaviourIn<'interrupted'>[] = [
     ops: [PUSH, RUN_TRANSFER, EDIT_FILE],
     tests: [t('test/adversarial.test.js', 'ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct'), t('test/transfer-outcomes.test.js', 'a push applied whose response is dropped: the refs show it, the run goes on to done'), t('test/probes/probes.test.js', PROBES)],
     status: verified(git('test/adversarial.test.js', 'ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct'), git('test/transfer-outcomes.test.js', 'a push applied whose response is dropped: the refs show it, the run goes on to done'), git('test/probes/probes.test.js', PROBES), probePly('interrupted.push-response-lost#cut/art-ply'), probeGit('interrupted.push-response-lost#cut/art-git')),
-    notes: ['Probe: the recording proxy reads the server\'s whole answer, then cuts the connection. Stock git (libcurl) re-sends a POST whose reused connection closed with no answer; on git http-backend the replay is refused by compare-and-swap and git then finds the ref up to date (test/probes/scenarios.ts).'],
+    notes: ['Probe: the recording proxy reads the server\'s whole answer, then cuts the connection. Stock git (libcurl) re-sends a POST whose reused connection closed with no answer; on git http-backend the replay is refused by compare-and-swap and git then finds the ref up to date (src/probe-scenarios.ts).'],
   }),
   b({
     id: 'interrupted.push-body-cut', area: 'interrupted',

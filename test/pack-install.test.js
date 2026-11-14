@@ -1,6 +1,6 @@
 // What a consumer gets from the packed tarball with lifecycle scripts off, and what README.md says about it.
 // The judges are npm and Node, not ply: `npm install --ignore-scripts <tarball>` into an empty project must leave
-// exactly one package, Node must import the root and all 18 subpaths (19, counted by hand from package.json
+// exactly one package, Node must import the root and all 19 subpaths (20, counted by hand from package.json
 // "exports"), and `require('ply')` must do what README Install states for the running Node. The expected require()
 // outcomes were measured with Node binaries on the development machine (the REQUIRE_MEASURED table below). The
 // boundary on the 20 line is 20.19.0 (Node's CHANGELOG_V20.md, 20.19.0: "require(esm) is now enabled by default";
@@ -29,7 +29,7 @@ after(() => {
 test('the tarball installs with --ignore-scripts as one package and every subpath imports', () => {
   assert.deepEqual(consumer.packages, ['ply']);
   const imported = importAll(consumer.dir);
-  assert.equal(Object.keys(imported).length, 19);
+  assert.equal(Object.keys(imported).length, 20);
   for (const [name, count] of Object.entries(imported)) assert.ok(count > 0, `${name} exports nothing`);
 });
 

@@ -1,18 +1,19 @@
 // Differential probes, reference target only (CI): every scenario run by ply and by stock git against git http-backend
 // configured to Artifacts' known policy, judged by stock git (ls-remote, a mirror clone, fsck --strict, rev-list,
-// merge-base), compared by test/probes/evaluate.ts. The Artifacts runs are opt-in and private (scripts/probes.mjs
+// merge-base), compared by src/probe-evaluate.ts. The Artifacts runs are opt-in and private (scripts/probes.mjs
 // --artifacts); this file never reaches the network beyond 127.0.0.1.
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SCENARIOS } from './scenarios.ts';
-import { ALLOW } from './allow.ts';
-import { compareScenario, evaluablePairs, judge, gitOutcome, plyOutcome, classify, runsFor } from './evaluate.ts';
+import { SCENARIOS } from '../../src/probe-scenarios.ts';
+import { ALLOW } from '../../src/probe-allow.ts';
+import { compareScenario, evaluablePairs, judge, plyOutcome, classify, runsFor, soloDiffs } from '../../src/probe-evaluate.ts';
+import { gitOutcome } from './git-outcome.ts';
 import { startReference, runScenario, newTracer } from './runner.mjs';
 import { BEHAVIOURS } from '../behaviours/matrix.ts';
-import { ABSENT } from './types.ts';
+import { ABSENT } from '../../src/probe-types.ts';
 
 test('every scenario probes a matrix behaviour, ids are unique, plans are closed', () => {
   const ids = SCENARIOS.map(s => s.id);
@@ -110,6 +111,33 @@ test('claims: a client that says landed when the refs do not show it is a findin
   assert.equal(c.left, 'push 0 landed: refs/heads/main=base');
   assert.equal(classify(S0, c, d).class, 'server-bug');
   assert.deepEqual(compareScenario(S0, { 'ref-ply': good }, names).filter(x => x.field === 'claims'), []);
+});
+
+test('solo (one corner, the workbench): ply against the server read against the stated expectation', () => {
+  const good = obs('landed', null, { 'refs/heads/main': 'b' });
+  assert.deepEqual(soloDiffs(S0, good, names), [], 'a run that meets the expectation has no difference');
+  const bad = obs('rejected', 'push_rejected', { 'refs/heads/main': 'a' });
+  const d = soloDiffs(S0, bad, names);
+  assert.deepEqual(d.map(x => `${x.pair} ${x.field} ${x.left} | ${x.right}`), [
+    'art-ply~expect outcome s0=rejected | s0=landed',
+    'art-ply~expect error s0=push_rejected | s0=null',
+    'art-ply~expect expectation refs/heads/main=base | refs/heads/main=ff',
+  ]);
+  // a solo difference reads as the art-ply~ref-ply difference a full run records, so it is classified (unresolved:
+  // stock git did not run) and the same allow entries cover it
+  const full = compareScenario(S0, { 'ref-ply': good, 'art-ply': bad }, names).filter(x => x.pair === 'art-ply~ref-ply' && (x.field === 'outcome' || x.field === 'error'));
+  assert.deepEqual(full.map(x => [x.field, x.left, x.right]), d.slice(0, 2).map(x => [x.field, x.left, x.right]));
+  assert.equal(classify(S0, d[0], d).class, 'unresolved');
+  const entry = { scenario: S0.id, pair: 'art-ply~ref-ply', field: 'error', left: 's0=push_rejected', right: 's0=null', reason: 'synthetic: an entry written for a full run' };
+  const v = judge(SCENARIOS, d, [entry], [{ scenario: S0.id, pairs: ['art-ply~expect', 'art-ply~claims'] }]);
+  assert.equal(v.expected.length, 1);
+  assert.equal(v.findings.length, 2);
+  const lied = soloDiffs(S0, obs('landed', null, { 'refs/heads/main': 'a' }), names);
+  assert.ok(lied.some(x => x.pair === 'art-ply~claims' && x.left === 'push 0 landed: refs/heads/main=base'));
+  // the stated expectation of the size probe meets the allow entry ply already keeps for it
+  const size = SCENARIOS.find(s => s.id === 'push.size-limits#pack-over-cap');
+  const sd = soloDiffs(size, { steps: [{ outcomes: [{ outcome: 'rejected', error: 'limit_exceeded', detail: '' }] }], end: end({ 'refs/heads/main': 'a' }) }, names);
+  assert.equal(judge(SCENARIOS, sd, ALLOW, [{ scenario: size.id, pairs: ['art-ply~expect'] }]).findings.length, 0);
 });
 
 let ref;

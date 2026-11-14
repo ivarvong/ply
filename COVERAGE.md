@@ -1171,7 +1171,7 @@ Evidence:
 - ply↔Artifacts: probes-20261114t1745-5jxl: `push.non-atomic-partial#one-stale/art-ply`
 - git↔Artifacts: probes-20261114t1745-5jxl: `push.non-atomic-partial#one-stale/art-git`
 
-> Probed by a two-ref push while another writer moves one ref (test/probes/scenarios.ts). Per-check outcomes are in the private run record.
+> Probed by a two-ref push while another writer moves one ref (src/probe-scenarios.ts). Per-check outcomes are in the private run record.
 
 #### `push.report-status`
 
@@ -1292,7 +1292,7 @@ Evidence:
 - ply↔Artifacts: probes-20261114t1745-5jxl: `push.size-limits#pack-over-cap/art-ply`
 - git↔Artifacts: probes-20261114t1745-5jxl: `push.size-limits#pack-over-cap/art-git`
 
-> A 66 MiB pack against a 64 MiB cap. ply classifies the server's stated cap as limit_exceeded; git http-backend (receive.maxInputSize) refuses with `unpacker error`, its reason on band 2 only, which ply reports as push_rejected: an expected difference, test/probes/allow.ts.
+> A 66 MiB pack against a 64 MiB cap. ply classifies the server's stated cap as limit_exceeded; git http-backend (receive.maxInputSize) refuses with `unpacker error`, its reason on band 2 only, which ply reports as push_rejected: an expected difference, src/probe-allow.ts.
 
 #### `push.many-ref-updates`
 
@@ -1908,7 +1908,7 @@ Evidence:
 - ply↔Artifacts: probes-20261114t1745-5jxl: `interrupted.push-response-lost#cut/art-ply`
 - git↔Artifacts: probes-20261114t1745-5jxl: `interrupted.push-response-lost#cut/art-git`
 
-> Probe: the recording proxy reads the server's whole answer, then cuts the connection. Stock git (libcurl) re-sends a POST whose reused connection closed with no answer; on git http-backend the replay is refused by compare-and-swap and git then finds the ref up to date (test/probes/scenarios.ts).
+> Probe: the recording proxy reads the server's whole answer, then cuts the connection. Stock git (libcurl) re-sends a POST whose reused connection closed with no answer; on git http-backend the replay is refused by compare-and-swap and git then finds the ref up to date (src/probe-scenarios.ts).
 
 #### `interrupted.push-body-cut`
 

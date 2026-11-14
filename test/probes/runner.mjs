@@ -1,6 +1,6 @@
-// The probe runner: executes test/probes/scenarios.ts plans against a target and records what stock git, the judge,
+// The probe runner: executes src/probe-scenarios.ts plans against a target and records what stock git, the judge,
 // sees afterwards. Impure on purpose (processes, sockets, temp dirs); every decision about what a result means is in
-// test/probes/evaluate.ts.
+// src/probe-evaluate.ts (stock git's answers: git-outcome.ts).
 //
 // A target is a smart-HTTP base URL behind a recording proxy this process runs. The proxy forwards each request to the
 // upstream, records method, path, status, duration, sizes and the upstream's cf-ray, applies the step's fault on the
@@ -20,7 +20,8 @@ import { startGitServer, fsckProblems, NO_MAINTENANCE } from '../server.js';
 import { GitHttp } from '../../src/client.js';
 import { TYPE_ID } from '../../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
-import { gitOutcome, gitFetchOutcome, plyOutcome } from './evaluate.ts';
+import { gitOutcome, gitFetchOutcome } from './git-outcome.ts';
+import { plyOutcome } from '../../src/probe-evaluate.ts';
 
 const ZERO = '0'.repeat(40);
 // Artifacts' known policy, applied to every reference repository (lab notes 2026-10-23..25, matrix runs): wants of

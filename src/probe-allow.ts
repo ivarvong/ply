@@ -1,7 +1,7 @@
 // Expected differences between runs, each with its reason. A difference not listed here is a finding; an entry that no
 // difference used, in a run that evaluated its scenario and pair, fails that run (an entry may not outlive its cause).
-// Entries name exact rendered values (evaluate.ts), so a changed behaviour is a new finding, not a silent match.
-import type { Allow } from './types.js';
+// Entries name exact rendered values (probe-evaluate.ts), so a changed behaviour is a new finding, not a silent match.
+import type { Allow } from './probe-types.js';
 
 export const ALLOW: readonly Allow[] = [
   {

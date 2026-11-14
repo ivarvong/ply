@@ -1,14 +1,21 @@
-// Differential probes: one scenario, run by ply and by stock git against git http-backend (the reference, configured to
-// the server-under-test's known policy) and against the server under test, judged by stock git and compared on meaning
-// (refs, HEAD, reachable objects, trees, ancestry, fsck, outcome class, error class), never on wire bytes.
+// Differential probes (t229u): one scenario, run by ply and by stock git against git http-backend (the reference,
+// configured to the server-under-test's known policy) and against the server under test, judged by stock git and
+// compared on meaning (refs, HEAD, reachable objects, trees, ancestry, fsck, outcome class, error class), never on wire
+// bytes. Exported as `ply/probes` so a probe runner outside this repository (ply-web's workbench) runs the same plans
+// and classifies its answers with the same types.
 //
 // A scenario is a pure plan: a seed repository made of deterministic objects (fixed identities and dates, so every
-// target holds the same object ids), steps (pushes, concurrent pushes) with an optional fault (hold the receive-pack
-// request while another writer moves refs, or let the server answer and cut the answer), and the outcome git
-// http-backend is expected to give. test/probes/runner.mjs executes plans; test/probes/evaluate.ts compares results.
-import type { Area, BehaviourId, NonEmpty } from '../behaviours/types.js';
+// target holds the same object ids), steps (pushes, fetches, concurrent pushes) with an optional fault, and the outcome
+// git http-backend is expected to give. test/probes/runner.mjs executes plans in this repository; probe-evaluate.ts
+// compares results.
 
-export type { NonEmpty };
+export type NonEmpty<T> = readonly [T, ...T[]];
+
+// The areas of server behaviour, in the order COVERAGE.md lists them (test/behaviours/types.ts titles them).
+export const AREAS = ['refs', 'caps', 'fetch', 'pack', 'push', 'concurrency', 'tags', 'ancestry', 'errors', 'interrupted', 'http'] as const;
+export type Area = (typeof AREAS)[number];
+// A behaviour id is `<area>.<slug>`: the area is part of the id, so an id filed under the wrong area does not type.
+export type BehaviourId<A extends Area> = `${A}.${string}`;
 
 // A scenario is keyed by the behaviour it probes: `<behaviour id>#<variant>`. probes.test.js checks the behaviour is in
 // the matrix, so a probe cannot cite a behaviour that does not exist.
@@ -114,7 +121,7 @@ export type Step =
 export const OUTCOMES = ['landed', 'partial', 'conflict', 'rejected', 'ambiguous'] as const;
 export type Outcome = (typeof OUTCOMES)[number];
 
-// The error class: ply's PlyError code, or stock git's refusal mapped onto the same names (evaluate.ts gitErrorClass),
+// The error class: ply's PlyError code, or stock git's refusal mapped onto the same names (test/probes/git-outcome.ts),
 // so wording differences between servers are normalized before comparison. null when the step landed.
 export type ErrorClass = string | null;
 
@@ -143,12 +150,12 @@ export type Scenario = {
   readonly seed: Seed;
   // the first ref the target is created with is its default branch; `main` everywhere
   readonly steps: NonEmpty<Step>;
-  // per step, in order (a tuple the length of steps is checked at run time by probes.test.js)
+  // per step, in order (a tuple the length of steps; test/probes/probes.test.js checks it)
   readonly expect: NonEmpty<Expectation>;
   readonly final: readonly FinalRef[];
   readonly compare: Compare;
   // the reference repository's receive-pack settings beyond the Artifacts policy (none by default)
-  readonly referenceConfig: readonly (readonly [string, string])[];
+  readonly referenceConfig: ReadonlyArray<readonly [string, string]>;
 };
 
 // ---- targets ----
@@ -162,7 +169,7 @@ export type Target = (typeof TARGETS)[number];
 export type Client = 'ply' | 'git';
 export const clientOf = (t: Target): Client => (t.endsWith('-ply') ? 'ply' : 'git');
 
-// ---- observations (what a run records; the runner fills them, evaluate.ts compares them) ----
+// ---- observations (what a run records; the runner fills them, probe-evaluate.ts compares them) ----
 export type StepObservation = { readonly outcomes: NonEmpty<{ readonly outcome: Outcome; readonly error: ErrorClass; readonly detail: string }> };
 export type EndState = {
   readonly head: string | null; // HEAD's symref target, or null when the server names none
@@ -182,7 +189,9 @@ export type Field = (typeof FIELDS)[number];
 // (ply and git may phrase one refusal differently, but must leave the same repository); `expect` is a run against the
 // scenario's stated reference outcome. `~claims` is a run against itself: every push of the last step a client called
 // landed must show in the refs the judge read (a client that says landed when nothing landed is the worst answer).
-export const PAIRS = ['art-ply~ref-ply', 'art-git~ref-git', 'ref-ply~ref-git', 'art-ply~art-git', 'ref-ply~expect', 'ref-git~expect', 'ref-ply~claims', 'ref-git~claims', 'art-ply~claims', 'art-git~claims'] as const;
+// `art-ply~expect` is ply's run against the server alone, read against the stated expectation (probe-evaluate.ts
+// soloDiffs): the one corner a runner without stock git or the reference (a Worker) can record.
+export const PAIRS = ['art-ply~ref-ply', 'art-git~ref-git', 'ref-ply~ref-git', 'art-ply~art-git', 'ref-ply~expect', 'ref-git~expect', 'art-ply~expect', 'ref-ply~claims', 'ref-git~claims', 'art-ply~claims', 'art-git~claims'] as const;
 export type Pair = (typeof PAIRS)[number];
 
 export type Difference = { readonly scenario: ScenarioId; readonly pair: Pair; readonly field: Field; readonly left: string; readonly right: string };

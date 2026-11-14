@@ -1,6 +1,6 @@
-// Differential probes (t229u days 3-4): every scenario in test/probes/scenarios.ts against the reference (git
+// Differential probes (t229u days 3-4): every scenario in src/probe-scenarios.ts against the reference (git
 // http-backend with Artifacts' known policy) by ply and by stock git, and with --artifacts against Cloudflare Artifacts
-// too; compared by test/probes/evaluate.ts; expected differences from test/probes/allow.ts.
+// too; compared by src/probe-evaluate.ts; expected differences from src/probe-allow.ts.
 //
 //   node --import ./test/ts-resolve.mjs scripts/probes.mjs [--only <substring>[,...]]               reference only
 //   PLY_PROBES_CF=<cf binary> PLY_PROBES_CF_CWD=<dir> \
@@ -16,9 +16,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve, relative } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SCENARIOS } from '../test/probes/scenarios.ts';
-import { ALLOW } from '../test/probes/allow.ts';
-import { compareScenario, evaluablePairs, judge, runsFor } from '../test/probes/evaluate.ts';
+import { SCENARIOS } from '../src/probe-scenarios.ts';
+import { ALLOW } from '../src/probe-allow.ts';
+import { compareScenario, evaluablePairs, judge, runsFor } from '../src/probe-evaluate.ts';
 import { startReference, runScenario, newTracer } from '../test/probes/runner.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -32,7 +32,7 @@ const runId = arg('--run-id') ?? `${stamp}-${Math.random().toString(36).slice(2,
 const plyCommit = (() => { try { return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim(); } catch { return null; } })();
 const gitVersion = execFileSync('git', ['--version'], { encoding: 'utf8' }).trim();
 // The probe code that ran, as one hash (the run may be made before the commit that cites it).
-const SOURCES = ['test/probes/types.ts', 'test/probes/scenarios.ts', 'test/probes/evaluate.ts', 'test/probes/allow.ts', 'test/probes/runner.mjs', 'test/probes/artifacts.mjs', 'scripts/probes.mjs'];
+const SOURCES = ['src/probe-types.ts', 'src/probe-scenarios.ts', 'src/probe-evaluate.ts', 'src/probe-allow.ts', 'test/probes/git-outcome.ts', 'test/probes/runner.mjs', 'test/probes/artifacts.mjs', 'scripts/probes.mjs'];
 const sourceHash = createHash('sha256').update(SOURCES.map(f => readFileSync(join(ROOT, f))).reduce((a, b) => Buffer.concat([a, b]), Buffer.alloc(0))).digest('hex').slice(0, 16);
 
 const audit = [];
