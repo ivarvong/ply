@@ -1026,6 +1026,8 @@ Evidence:
 - ply↔git: `test/probes/probes.test.js`
 - ply↔Artifacts: probes-20261114t1745-5jxl: `push.create-ref#plain/art-ply`
 - git↔Artifacts: probes-20261114t1745-5jxl: `push.create-ref#plain/art-git`
+- ply↔Artifacts: probes-20261114t1837-53b4: `push.create-ref#already-exists/art-ply`
+- git↔Artifacts: probes-20261114t1837-53b4: `push.create-ref#already-exists/art-git`
 
 #### `push.first-commit-empty-repo`
 
@@ -1309,7 +1311,7 @@ Observed:
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
 | `concurrency.stale-old-oid` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `pushPack`, `editFile` | 4 |
-| `concurrency.concurrent-writers` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `editFile`, `push` | 2 |
+| `concurrency.concurrent-writers` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `editFile`, `push` | 3 |
 | `concurrency.ref-created-between-read-and-push` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `createBranch`, `createTag`, `commitChanges` | 3 |
 | `concurrency.ref-deleted-between-read-and-push` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `commitChanges` | 2 |
 | `concurrency.read-after-write` | verified | ply↔Artifacts, git↔Artifacts | `lsRefs`, `readFile`, `readCommit` | 1 |
@@ -1338,6 +1340,8 @@ Evidence:
 - ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.stale-old-oid#race/art-ply`
 - ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.stale-old-oid#direct/art-ply`
 - git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.stale-old-oid#race/art-git`
+- ply↔Artifacts: probes-20261114t1837-53b4: `concurrency.stale-old-oid#delete-vs-update/art-ply`
+- git↔Artifacts: probes-20261114t1837-53b4: `concurrency.stale-old-oid#delete-vs-update/art-git`
 
 > The validate CAS checks (stale head, stale delete) are refused by ply-web from ls-refs, before any push. The probe run sends the stale old id to Artifacts itself: directly from ply, and from a race (another writer moves the ref while the receive-pack request is held) from ply and stock git.
 
@@ -1349,16 +1353,22 @@ Ops: `src/edit.ts` `editFile`, `src/push.ts` `push`.
 
 Tests:
 
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 - `test/concurrency.test.js`: concurrent CAS writers converge; conflicts are observed and retried, never lost
 - `test/edit-race-f34.test.js`: same-file edit race ×1000 attempts: only ok and cas_conflict
 
 Evidence:
 
+- ply↔git: `test/probes/probes.test.js`
 - ply↔git: `test/concurrency.test.js`
 - ply↔git: `test/edit-race-f34.test.js`
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `edit/race_same_file`
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `edit/race_diff_files`
 - git↔Artifacts: loadgen-phase2-20261025: `fetch_push_race`
+- ply↔Artifacts: probes-20261114t1837-53b4: `concurrency.concurrent-writers#create-vs-create/art-ply`
+- git↔Artifacts: probes-20261114t1837-53b4: `concurrency.concurrent-writers#create-vs-create/art-git`
+- ply↔Artifacts: probes-20261114t1837-53b4: `concurrency.concurrent-writers#delete-vs-update/art-ply`
+- git↔Artifacts: probes-20261114t1837-53b4: `concurrency.concurrent-writers#delete-vs-update/art-git`
 
 #### `concurrency.ref-created-between-read-and-push`
 
@@ -1437,10 +1447,14 @@ Evidence:
 - ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.empty-report-under-contention#same-ref/art-ply`
 - git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.empty-report-under-contention#distinct-refs/art-git`
 - git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.empty-report-under-contention#same-ref/art-git`
+- ply↔Artifacts: probes-20261114t1837-53b4: `concurrency.empty-report-under-contention#retry-after-busy/art-ply`
+- git↔Artifacts: probes-20261114t1837-53b4: `concurrency.empty-report-under-contention#retry-after-busy/art-git`
 
 > Probed with 8 concurrent pushes to one repository (8 distinct refs; one ref from 8 contenders); every push a client called landed is checked against the refs stock git reads back. Per-check outcomes are in the private run record.
 
 > Observed shape on Artifacts (probes run probes-20261114t1745-5jxl): HTTP 200 whose body is a single band-3 fatal (busy) and no report-status, for distinct refs as well as one ref; the refs read back show none of those pushes applied. Stock git reports it as the remote hanging up (exit 128).
+
+> Retry probe (run probes-20261114t1837-53b4): each push that did not land is sent again alone with the same zero old id, which the server would refuse had the first attempt been applied; per-check outcomes are in the private run record.
 
 #### `concurrency.two-transfer-runners`
 
@@ -2094,4 +2108,5 @@ Observed:
 | `loadgen-phase5-delta-20261025` | 2026-10-25 | git↔Artifacts, wire↔Artifacts | 21 | ply-artifacts-loadgen phase 5: delta capabilities, hand-built OFS/REF/thin packs pushed to Artifacts, clones read back with stock git and git verify-pack. |
 | `loadgen-phase6-plyw-20261025` | 2026-10-25 | ply↔Artifacts | 39 | ply-artifacts-loadgen phase 6: the deployed ply Worker (ply-web) against Artifacts: reads, edits, CAS, races, merges, errors; stock git judges. |
 | `probes-20261114t1745-5jxl` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 42 | ply differential probes (scripts/probes.mjs --artifacts; plans in test/probes/scenarios.ts, probe code d18a262915bc7c56): each scenario seeded with identical objects into a fresh Artifacts repository per client (namespace ply-loadgen) and into git http-backend with Artifacts' known policy; ply and stock git 2.47.3 run the same plan; a recording proxy injects the fault (held receive-pack while another writer moves refs, or a cut answer) and keeps the cf-ray of every request; stock git judges (ls-remote --symref, mirror clone, fsck --strict, rev-list --parents, merge-base); test/probes/evaluate.ts compares. |
+| `probes-20261114t1837-53b4` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 10 | ply differential probes, days 5-6 batch A (scripts/probes.mjs --artifacts, probe code b55fa846fcd21188 on ply 06042f8): race shapes (delete against an update, create against a create, delete against an update at once), a create of a ref that exists, and a retry of every push that did not land under contention; same harness as probes-20261114t1745-5jxl, with the proxy also keeping the commands of each receive-pack request and the refs of each advertisement; stock git 2.47.3. |
 

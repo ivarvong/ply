@@ -499,6 +499,23 @@ export const RUNS = {
       "push.many-ref-updates#fifty-creates/art-git",
     ],
   },
+  "probes-20261114t1837-53b4": {
+    date: "2026-11-14",
+    harness: "ply differential probes, days 5-6 batch A (scripts/probes.mjs --artifacts, probe code b55fa846fcd21188 on ply 06042f8): race shapes (delete against an update, create against a create, delete against an update at once), a create of a ref that exists, and a retry of every push that did not land under contention; same harness as probes-20261114t1745-5jxl, with the proxy also keeping the commands of each receive-pack request and the refs of each advertisement; stock git 2.47.3.",
+    kinds: ["ply_vs_artifacts", "native_git_vs_artifacts"],
+    checks: [
+      "push.create-ref#already-exists/art-ply",
+      "push.create-ref#already-exists/art-git",
+      "concurrency.stale-old-oid#delete-vs-update/art-ply",
+      "concurrency.stale-old-oid#delete-vs-update/art-git",
+      "concurrency.concurrent-writers#create-vs-create/art-ply",
+      "concurrency.concurrent-writers#create-vs-create/art-git",
+      "concurrency.concurrent-writers#delete-vs-update/art-ply",
+      "concurrency.concurrent-writers#delete-vs-update/art-git",
+      "concurrency.empty-report-under-contention#retry-after-busy/art-ply",
+      "concurrency.empty-report-under-contention#retry-after-busy/art-git",
+    ],
+  },
 } as const satisfies Readonly<Record<string, RunInfo>>;
 
 export type Runs = typeof RUNS;

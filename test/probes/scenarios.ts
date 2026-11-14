@@ -2,6 +2,7 @@
 // state transitions first (stale old ids, lost answers, contention, atomicity, refs moved under a push, size caps,
 // non-fast-forward), then the plain transitions the hard ones are read against. Each is a pure plan; the runner
 // (test/probes/runner.mjs) seeds a fresh repository per target, runs the steps, and stock git judges the result.
+import { ABSENT } from './types.js';
 import type { CommitSpec, Expectation, Fault, FileSpec, FinalRef, Move, NonEmpty, ObjectSpec, OidExpr, Outcome, Push, RefAt, Scenario, StepExpect, TagSpec, Update } from './types.js';
 
 const text = (path: string, s: string): FileSpec => ({ path, content: { tag: 'text', text: s } });
@@ -183,6 +184,17 @@ export const SCENARIOS: readonly Scenario[] = [
     ...PLAIN,
   },
   {
+    id: 'push.create-ref#already-exists',
+    // pins the git form of a create: with a lease or force git would overwrite the ref (git 2.47 ignores an empty or zero
+    // lease on a create); as a plain push it refuses client side, and ply's zero old id is refused by the server
+    description: 'A create (zero old id) of refs/heads/new at ff when new already exists at diverged: refused, new unchanged.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base'), at('refs/heads/new', 'diverged')] },
+    steps: [step(pushOf([upd('refs/heads/new', ZERO, o('ff'))]))],
+    expect: [both(one('conflict', 'cas_conflict'))],
+    final: [finalAt(MAIN, 'base'), finalAt('refs/heads/new', 'diverged')],
+    ...PLAIN,
+  },
+  {
     id: 'push.delete-ref#plain',
     description: 'A delete (zero new id) of side lands.',
     seed: { objects: CORE, refs: [at(MAIN, 'base'), at(SIDE, 'base')] },
@@ -243,6 +255,51 @@ export const SCENARIOS: readonly Scenario[] = [
     steps: [step(pushOf(nonEmpty(Array.from({ length: MANY }, (_, i) => upd(`refs/heads/many/${String(i).padStart(2, '0')}`, ZERO, o('ff'))))))],
     expect: [LANDED],
     final: [finalAt(MAIN, 'base'), ...Array.from({ length: MANY }, (_, i) => finalAt(`refs/heads/many/${String(i).padStart(2, '0')}`, 'ff'))],
+    ...PLAIN,
+  },
+  // ---- days 5-6: more race shapes, retry after a refusal under contention ----
+  {
+    id: 'concurrency.stale-old-oid#delete-vs-update',
+    description: 'Both clients read side at base and delete it; another writer moves side to diverged while the request is held: the delete must be refused and side stay at diverged.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base'), at(SIDE, 'base')] },
+    steps: [step(pushOf([upd(SIDE, o('base'), ZERO)]), { tag: 'race', moves: [move(SIDE, o('diverged'))] })],
+    expect: [both(one('conflict', 'cas_conflict'))],
+    final: [finalAt(MAIN, 'base'), finalAt(SIDE, 'diverged')],
+    ...PLAIN,
+  },
+  {
+    id: 'concurrency.concurrent-writers#create-vs-create',
+    description: 'Two pushes at once create refs/heads/new, one at ff and one at diverged: exactly one lands, the other is refused as a conflict.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base')] },
+    steps: [{ tag: 'concurrent', pushes: [pushOf([upd('refs/heads/new', ZERO, o('ff'))]), pushOf([upd('refs/heads/new', ZERO, o('diverged'))])], git: SAME }],
+    expect: [{ tag: 'many', ply: ['landed', 'conflict'], git: ['landed', 'conflict'] }],
+    final: [finalAt(MAIN, 'base'), { tag: 'one-of', ref: 'refs/heads/new', names: ['ff', 'diverged'] }],
+    referenceConfig: [],
+    compare: { tag: 'winner-of', why: 'the winner of a create race is not fixed; objects, trees and ancestry follow it' },
+  },
+  {
+    id: 'concurrency.concurrent-writers#delete-vs-update',
+    description: 'Two pushes at once on side (at base): one deletes it, one moves it to ff: exactly one lands, the other is refused as a conflict.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base'), at(SIDE, 'base')] },
+    steps: [{ tag: 'concurrent', pushes: [pushOf([upd(SIDE, o('base'), ZERO)]), pushOf([upd(SIDE, o('base'), o('ff'))])], git: SAME }],
+    expect: [{ tag: 'many', ply: ['landed', 'conflict'], git: ['landed', 'conflict'] }],
+    final: [finalAt(MAIN, 'base'), { tag: 'one-of', ref: SIDE, names: ['ff', ABSENT] }],
+    referenceConfig: [],
+    compare: { tag: 'winner-of', why: 'the winner of a delete/update race is not fixed; objects, trees and ancestry follow it' },
+  },
+  {
+    id: 'concurrency.empty-report-under-contention#retry-after-busy',
+    description: `${CONTENDERS} pushes at once, each creating its own branch; then every push that did not land is sent again, one at a time: each retry lands (a create of a ref the first attempt had made would be refused), so nothing reported unknown was applied.`,
+    seed: { objects: [...CORE, ...contenders], refs: [at(MAIN, 'base')] },
+    steps: [
+      { tag: 'concurrent', pushes: nonEmpty(contenders.map(c => pushOf([upd(`refs/heads/p-${c.name}`, ZERO, o(c.name))]))), git: SAME },
+      { tag: 'retry-unlanded', of: 0, git: SAME },
+    ],
+    expect: [
+      { tag: 'many', ply: contenders.map(() => 'landed' as const), git: contenders.map(() => 'landed' as const) },
+      { tag: 'many', ply: contenders.map(() => 'landed' as const), git: contenders.map(() => 'landed' as const) },
+    ],
+    final: contenders.map(c => finalAt(`refs/heads/p-${c.name}`, c.name)),
     ...PLAIN,
   },
 ];

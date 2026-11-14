@@ -32,9 +32,10 @@ export type Seed = { readonly objects: readonly ObjectSpec[]; readonly refs: rea
 // An object id in a plan: the zero id (create / delete) or a named seed object.
 export type OidExpr = { readonly tag: 'zero' } | { readonly tag: 'obj'; readonly name: string };
 // One ref update as ply sends it (old id, new id, ref). Stock git sends the same command from
-// `--force-with-lease=<ref>:<old> +<new>:<ref>` (an empty lease for a create, `:<ref>` for a delete): git checks the
-// lease against its own advertisement and sends that advertised id as the old id, so on the wire both clients send
-// the plan's old id unless a fault moves the ref after git has read it, which is what a race fault is for.
+// `--force-with-lease=<ref>:<old> +<new>:<ref>` (`:<ref>` for a delete; a create is a plain `<new>:<ref>`, because git
+// does not hold a create to an empty or zero lease): git checks the lease against its own advertisement and sends that
+// advertised id as the old id, so on the wire both clients send the plan's old id unless a fault moves the ref after
+// git has read it, which is what a race fault is for.
 export type Update = { readonly ref: string; readonly old: OidExpr; readonly new: OidExpr };
 // Another writer's move, applied through a separate channel while the step's receive-pack request is held.
 export type Move = { readonly ref: string; readonly to: OidExpr };
@@ -58,7 +59,11 @@ export type Push = { readonly updates: NonEmpty<Update>; readonly atomic: boolea
 export type Step =
   | { readonly tag: 'push'; readonly push: Push; readonly fault: Fault; readonly git: GitForm }
   // every push starts at once (Promise.all for ply; concurrent processes for git); each on its own connection
-  | { readonly tag: 'concurrent'; readonly pushes: NonEmpty<Push>; readonly git: GitForm };
+  | { readonly tag: 'concurrent'; readonly pushes: NonEmpty<Push>; readonly git: GitForm }
+  // once step `of` (a concurrent step) is over, every push of it that did not land is sent again, one at a time, with
+  // the same commands; a push that landed the first time is carried as landed. A retry that lands shows the first
+  // attempt was not applied (a create or a compare-and-swap would be refused if it had been).
+  | { readonly tag: 'retry-unlanded'; readonly of: number; readonly git: GitForm };
 
 // ---- outcomes, classified the same way for both clients ----
 // landed     every command applied
@@ -83,8 +88,9 @@ export type Expectation =
 export type FinalRef =
   | { readonly tag: 'at'; readonly ref: string; readonly at: string }
   | { readonly tag: 'absent'; readonly ref: string }
-  // a race with no fixed winner: the ref holds one of these objects
+  // a race with no fixed winner: the ref holds one of these objects (ABSENT: or the winner deleted it)
   | { readonly tag: 'one-of'; readonly ref: string; readonly names: NonEmpty<string> };
+export const ABSENT = '(absent)';
 
 // exact        every target's end state must be identical (refs, objects, trees, ancestry, merge bases, fsck)
 // winner-of    a concurrent step has no fixed winner: refs and fsck are compared with the winner replaced by its name;

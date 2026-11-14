@@ -112,6 +112,23 @@ async function objectsFor(seed, scenario, push) {
 
 // ---- the recording proxy ----
 const HOP = new Set(['host', 'connection', 'keep-alive', 'content-length', 'transfer-encoding', 'accept-encoding', 'authorization', 'expect', 'te', 'upgrade', 'proxy-connection']);
+// The leading pkt-lines of a body up to the first flush (or the pack signature), as text: the commands of a receive-pack
+// request ("<old> <new> <ref>", capabilities cut), or the refs of an advertisement ("<oid> <ref>"). Object ids and ref
+// names only; no credential is ever in either.
+export function pktLines(buf, limit = 200) {
+  const out = [];
+  for (let o = 0; o + 4 <= buf.length && out.length < limit;) {
+    const h = buf.subarray(o, o + 4).toString('latin1');
+    if (!/^[0-9a-f]{4}$/.test(h)) break;
+    const n = parseInt(h, 16);
+    if (n === 0) { if (out.length > 0 && !out[out.length - 1].startsWith('# service=')) break; o += 4; continue; }
+    if (n < 4 || o + n > buf.length) break;
+    out.push(buf.subarray(o + 4, o + n).toString('latin1').split('\0')[0].replace(/\n$/, ''));
+    o += n;
+  }
+  return out;
+}
+const OID_LINE = /^[0-9a-f]{40} /;
 const filterOf = body => /(?:^|\n|[0-9a-f]{4})filter ([^\n]+)\n/.exec(body.toString('latin1'))?.[1] ?? null;
 export function startRecordingProxy({ upstream, authorization = null, filterPolicy = false }) {
   const base = new URL(upstream);
@@ -145,6 +162,8 @@ export function startRecordingProxy({ upstream, authorization = null, filterPoli
         const up = await fetch(new URL(base.pathname.replace(/\/$/, '') + rec.path, base.origin), { method: req.method, headers, body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body, redirect: 'manual' });
         const buf = Buffer.from(await up.arrayBuffer());
         rec.status = up.status; rec.resBytes = buf.length; rec.cfRay = up.headers.get('cf-ray');
+        if (isReceive) { const plain = req.headers['content-encoding'] === 'gzip' ? gunzipSync(body) : body; rec.commands = pktLines(plain, 400).filter(l => OID_LINE.test(l)); }
+        if (req.method === 'GET' && /service=git-receive-pack/.test(rec.path) && up.status === 200) rec.advertised = pktLines(buf, 400).filter(l => OID_LINE.test(l)).map(l => l.replace(/^([0-9a-f]{40}) (\S+).*$/, '$1 $2'));
         rec.ms = +(performance.now() - t0).toFixed(1);
         if (fault?.tag === 'cut') { req.socket.destroy(); return; }
         const out = { 'content-length': String(buf.length) };
@@ -166,11 +185,15 @@ export function startRecordingProxy({ upstream, authorization = null, filterPoli
 }
 
 // ---- clients ----
+// A create is a plain push (no lease, no force): git 2.47 does not protect a create with --force-with-lease=<ref>: or
+// <ref>:<zero id> (it force-updates a ref that exists), so a lease there would turn a lost create race into a silent
+// overwrite. Without force, git refuses client side when its advertisement already has the ref ("fetch first") and
+// otherwise sends the zero old id for the server to check. An update or delete carries a lease on the plan's old id.
 const gitArgs = (seed, push) => [
   ...(push.atomic ? ['--atomic'] : []),
-  ...push.updates.map(u => `--force-with-lease=${u.ref}:${u.old.tag === 'zero' ? '' : oidOf(seed, u.old)}`),
+  ...push.updates.filter(u => u.old.tag !== 'zero').map(u => `--force-with-lease=${u.ref}:${oidOf(seed, u.old)}`),
 ];
-const gitSpecs = (seed, push) => push.updates.map(u => (u.new.tag === 'zero' ? `:${u.ref}` : `+${oidOf(seed, u.new)}:${u.ref}`));
+const gitSpecs = (seed, push) => push.updates.map(u => (u.new.tag === 'zero' ? `:${u.ref}` : `${u.old.tag === 'zero' ? '' : '+'}${oidOf(seed, u.new)}:${u.ref}`));
 
 async function plyPush(url, seed, scenario, push, tracer, parent) {
   const client = GitHttp.create(url, { tracer, parent, recordResponseHeaders: ['cf-ray'], quirks: {} });
@@ -182,7 +205,7 @@ async function plyPush(url, seed, scenario, push, tracer, parent) {
 }
 async function gitPush(url, seed, push) {
   const r = await run('git', ['push', '--porcelain', ...gitArgs(seed, push), url, ...gitSpecs(seed, push)], { cwd: seed.dir, env: seed.env });
-  return { ...gitOutcome(r.status, r.stdout, r.stderr), exit: r.status };
+  return { ...gitOutcome(r.status, r.stdout, r.stderr, new Set(push.updates.filter(u => u.old.tag === 'zero').map(u => u.ref))), exit: r.status };
 }
 async function forcePush(url, seed, moves) {
   const specs = moves.map(mv => (mv.to.tag === 'zero' ? `:${mv.ref}` : `+${oidOf(seed, mv.to)}:${mv.ref}`));
@@ -246,6 +269,16 @@ export async function runScenario(scenario, target, { tracer, root }) {
         const unfired = target.proxy.armedLeft();
         target.proxy.disarm();
         outcomes = [{ outcome: r.outcome, error: r.error, detail: unfired ? `fault ${st.fault.tag} never fired; ${r.detail}` : r.detail }];
+      } else if (st.tag === 'retry-unlanded') {
+        const prev = scenario.steps[st.of], seen = steps[st.of];
+        const pushes = prev?.tag === 'concurrent' ? prev.pushes : prev?.tag === 'push' ? [prev.push] : [];
+        outcomes = [];
+        for (const [k, p] of pushes.entries()) {
+          const first = seen?.outcomes[k];
+          if (first?.outcome === 'landed') { outcomes.push({ outcome: 'landed', error: null, detail: 'landed the first time' }); continue; }
+          const r = target.client === 'ply' ? await plyPush(url('main'), seed, scenario, p, tracer, span) : await gitPush(url('main'), seed, p);
+          outcomes.push({ outcome: r.outcome, error: r.error, detail: `retry after ${first?.outcome ?? '?'}: ${r.detail}` });
+        }
       } else {
         const rs = await Promise.all(st.pushes.map(p => (target.client === 'ply' ? plyPush(url('main'), seed, scenario, p, tracer, span) : gitPush(url('main'), seed, p))));
         outcomes = rs.map(r => ({ outcome: r.outcome, error: r.error, detail: r.detail }));

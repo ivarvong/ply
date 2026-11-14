@@ -2,8 +2,8 @@
 // field by field, apply the allow-list, and classify what is left by triangulation (t229u): a difference between ply
 // against the server and ply against the reference is a server bug only when ply meets the reference expectation and
 // stock git against the server reproduces it.
-import { TARGETS, clientOf } from './types.js';
-import type { Allow, Client, Difference, EndState, ErrorClass, Expectation, Field, Finding, FindingClass, Observation, Outcome, Pair, Scenario, StepObservation, Target } from './types.js';
+import { ABSENT, TARGETS, clientOf } from './types.js';
+import type { Allow, Client, Difference, Push, EndState, ErrorClass, Expectation, Field, Finding, FindingClass, Observation, Outcome, Pair, Scenario, Step, StepObservation, Target } from './types.js';
 
 // ---- one answer, one class ----
 export type Classified = { readonly outcome: Outcome; readonly error: ErrorClass; readonly detail: string };
@@ -22,10 +22,13 @@ export function plyOutcome(r: { readonly ok: true } | { readonly ok: false; read
 
 // A refusal reason stock git printed for one ref, as the error class ply would give it. Wording differs between servers
 // ("failed to update ref", "stale ref", "incorrect old value provided"); the class is what is compared.
+// A refusal git makes itself because its advertisement already shows another writer's value ("stale info" for a lease,
+// "fetch first" for a create or update without force) is the same conflict the server's compare-and-swap reports when
+// git read the advertisement a moment earlier: which one a racing client sees is timing, so both are cas_conflict.
 export function gitReasonClass(reason: string, stderr: string): string {
-  if (/stale info/.test(reason)) return 'stale_info';
+  if (/stale info|fetch first/.test(reason)) return 'cas_conflict';
   if (/atomic push failure|atomic transaction failed/.test(reason)) return 'atomic_sibling';
-  if (/non-fast-forward|fetch first/.test(reason)) return 'not_fast_forward';
+  if (/non-fast-forward/.test(reason)) return 'not_fast_forward';
   if (/failed to update ref|failed to lock|cannot lock|incorrect old value|stale ref|already exists|does not exist|bad ref|reference/.test(reason)) return 'cas_conflict';
   if (/exceeds maximum|too large|limit is|maximum allowed/i.test(`${reason}\n${stderr}`)) return 'limit_exceeded';
   return 'push_rejected';
@@ -34,10 +37,13 @@ export function gitReasonClass(reason: string, stderr: string): string {
 const OK_FLAGS = new Set([' ', '+', '-', '*', '=']);
 // `git push --porcelain`: a `<flag>\t<src>:<dst>\t<summary>` line per ref (git-push(1) OUTPUT). No ref line and a
 // non-zero exit is a push whose answer git never read: ambiguous.
-export function gitOutcome(status: number | null, stdout: string, stderr: string): Classified {
+// `creates`: the refs the plan creates (zero old id). git refuses a create of a ref its advertisement already shows as
+// "non-fast-forward" (or "fetch first"): for a create that is the conflict, not a history rule.
+export function gitOutcome(status: number | null, stdout: string, stderr: string, creates: ReadonlySet<string> = new Set()): Classified {
   const refs = stdout.split('\n').filter(l => /^[ +\-*=!]\t[^\t]*:[^\t]*\t/.test(l)).map(l => {
-    const [flag = '!', , summary = ''] = l.split('\t');
-    return { ok: OK_FLAGS.has(flag), reason: /\(([^)]*)\)\s*$/.exec(summary)?.[1] ?? summary };
+    const [flag = '!', spec = '', summary = ''] = l.split('\t');
+    const reason = /\(([^)]*)\)\s*$/.exec(summary)?.[1] ?? summary;
+    return { ok: OK_FLAGS.has(flag), reason: creates.has(spec.slice(spec.indexOf(':') + 1)) && reason === 'non-fast-forward' ? 'fetch first' : reason };
   });
   const tail = stderr.trim().split('\n').slice(-3).join(' | ').slice(0, 300);
   if (refs.length === 0) return status === 0 ? { outcome: 'landed', error: null, detail: 'no ref lines' } : { outcome: 'ambiguous', error: 'ambiguous', detail: tail };
@@ -47,7 +53,7 @@ export function gitOutcome(status: number | null, stdout: string, stderr: string
   if (bad.length < refs.length) return { outcome: 'partial', error: 'push_partial', detail: bad.map(b => b.reason).join('; ') };
   const classes = bad.map(b => gitReasonClass(b.reason, stderr));
   const error = classes.find(c => c !== 'atomic_sibling') ?? 'cas_conflict';
-  const outcome: Outcome = error === 'cas_conflict' || error === 'stale_info' ? 'conflict' : 'rejected';
+  const outcome: Outcome = error === 'cas_conflict' ? 'conflict' : 'rejected';
   return { outcome, error, detail: bad.map(b => b.reason).join('; ') };
 }
 
@@ -70,7 +76,12 @@ function renderEnd(s: Scenario, names: Names, end: EndState, field: Exclude<Fiel
   if (s.compare.tag === 'winner-of' && (field === 'objects' || field === 'trees' || field === 'ancestry' || field === 'merge-bases')) return null;
   switch (field) {
     case 'head': return String(end.head);
-    case 'refs': return sortedJson(Object.fromEntries(Object.entries(end.refs).map(([r, oid]) => [r, refName(oid)])));
+    case 'refs': {
+      const shown: Record<string, string> = Object.fromEntries(Object.entries(end.refs).map(([r, oid]) => [r, refName(oid)]));
+      // a winner that deleted the ref is still the winner
+      if (s.compare.tag === 'winner-of') for (const f of s.final) if (f.tag === 'one-of' && f.names.includes(ABSENT) && shown[f.ref] === undefined) shown[f.ref] = '<winner>';
+      return sortedJson(shown);
+    }
     case 'objects': return `${end.objects.length}:${end.objects.join(',')}`;
     case 'trees': return sortedJson(end.trees);
     case 'ancestry': return end.ancestry.join('|');
@@ -102,7 +113,7 @@ export function expectationDiffs(s: Scenario, target: 'ref-ply' | 'ref-git', obs
   const byName = Object.fromEntries(Object.entries(names).map(([oid, n]) => [n, oid]));
   for (const f of s.final) {
     const got = obs.end.refs[f.ref];
-    const gotName = got === undefined ? 'absent' : named(names, got);
+    const gotName = got === undefined ? (f.tag === 'one-of' ? ABSENT : 'absent') : named(names, got);
     const ok = f.tag === 'absent' ? got === undefined : f.tag === 'at' ? got !== undefined && got === byName[f.at] : f.names.includes(gotName);
     if (!ok) out.push({ scenario: s.id, pair, field: 'expectation', left: `${f.ref}=${gotName}`, right: `${f.ref}=${f.tag === 'at' ? f.at : f.tag === 'absent' ? 'absent' : f.names.join('|')}` });
   }
@@ -116,7 +127,8 @@ export function claimDiffs(s: Scenario, target: Target, obs: Observation, names:
   const last = s.steps.length - 1;
   const step = s.steps[last], seen = obs.steps[last];
   if (step === undefined || seen === undefined || (clientOf(target) === 'git' && step.git.tag === 'none')) return [];
-  const pushes = step.tag === 'push' ? [step.push] : step.pushes;
+  const pushesOf = (st: Step): readonly Push[] => (st.tag === 'push' ? [st.push] : st.tag === 'concurrent' ? st.pushes : (() => { const of = s.steps[st.of]; return of === undefined || of.tag === 'retry-unlanded' ? [] : pushesOf(of); })());
+  const pushes = pushesOf(step);
   const byName = Object.fromEntries(Object.entries(names).map(([oid, n]) => [n, oid]));
   const out: Difference[] = [];
   seen.outcomes.forEach((o, i) => {

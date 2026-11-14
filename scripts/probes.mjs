@@ -2,7 +2,7 @@
 // http-backend with Artifacts' known policy) by ply and by stock git, and with --artifacts against Cloudflare Artifacts
 // too; compared by test/probes/evaluate.ts; expected differences from test/probes/allow.ts.
 //
-//   node --import ./test/ts-resolve.mjs scripts/probes.mjs [--only <substring>]                     reference only
+//   node --import ./test/ts-resolve.mjs scripts/probes.mjs [--only <substring>[,...]]               reference only
 //   PLY_PROBES_CF=<cf binary> PLY_PROBES_CF_CWD=<dir> \
 //   node --import ./test/ts-resolve.mjs scripts/probes.mjs --artifacts --out <private dir> [--only <substring>]
 //
@@ -46,7 +46,7 @@ if (artifacts) {
   art = mod.artifactsTarget({ cli: { bin, cwd, env }, runId, log: r => audit.push(r) });
 }
 
-const scenarios = SCENARIOS.filter(s => only === null || s.id.includes(only));
+const scenarios = SCENARIOS.filter(s => only === null || only.split(',').some(o => s.id.includes(o)));
 const targets = artifacts ? ['ref-ply', 'ref-git', 'art-ply', 'art-git'] : ['ref-ply', 'ref-git'];
 const ref = await startReference();
 const results = [], diffs = [], evaluated = [], errors = [];

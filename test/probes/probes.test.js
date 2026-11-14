@@ -12,6 +12,7 @@ import { ALLOW } from './allow.ts';
 import { compareScenario, evaluablePairs, judge, gitOutcome, plyOutcome, classify } from './evaluate.ts';
 import { startReference, runScenario, newTracer } from './runner.mjs';
 import { BEHAVIOURS } from '../behaviours/matrix.ts';
+import { ABSENT } from './types.ts';
 
 test('every scenario probes a matrix behaviour, ids are unique, plans are closed', () => {
   const ids = SCENARIOS.map(s => s.id);
@@ -26,13 +27,14 @@ test('every scenario probes a matrix behaviour, ids are unique, plans are closed
     const refs = [
       ...s.seed.refs.map(r => r.at),
       ...s.seed.objects.flatMap(o => (o.tag === 'commit' ? o.parents : [o.target])),
-      ...s.steps.flatMap(st => (st.tag === 'push' ? [st.push] : st.pushes).flatMap(p => p.updates.flatMap(u => [u.old, u.new]))).filter(e => e.tag === 'obj').map(e => e.name),
+      ...s.steps.flatMap(st => (st.tag === 'push' ? [st.push] : st.tag === 'concurrent' ? st.pushes : []).flatMap(p => p.updates.flatMap(u => [u.old, u.new]))).filter(e => e.tag === 'obj').map(e => e.name),
       ...s.steps.flatMap(st => (st.tag === 'push' && st.fault.tag === 'race' ? st.fault.moves.map(m => m.to) : [])).filter(e => e.tag === 'obj').map(e => e.name),
-      ...s.final.flatMap(f => (f.tag === 'at' ? [f.at] : f.tag === 'one-of' ? f.names : [])),
+      ...s.final.flatMap(f => (f.tag === 'at' ? [f.at] : f.tag === 'one-of' ? f.names.filter(n => n !== ABSENT) : [])),
     ];
     for (const n of refs) assert.ok(defined.has(n), `${s.id}: ${n} is not a seed object`);
     s.seed.objects.forEach((o, i) => { if (o.tag === 'commit') for (const p of o.parents) assert.ok(s.seed.objects.slice(0, i).some(x => x.name === p), `${s.id}: ${o.name}'s parent ${p} must come first`); });
-    s.expect.forEach((e, i) => assert.equal(e.tag === 'many', s.steps[i].tag === 'concurrent', `${s.id}: step ${i}: a concurrent step takes a multiset expectation`));
+    s.expect.forEach((e, i) => assert.equal(e.tag === 'many', s.steps[i].tag !== 'push', `${s.id}: step ${i}: a concurrent or retry step takes a multiset expectation`));
+    s.steps.forEach((st, i) => { if (st.tag === 'retry-unlanded') assert.ok(st.of < i && s.steps[st.of].tag === 'concurrent', `${s.id}: step ${i} retries an earlier concurrent step`); });
   }
   // and the other way: a matrix behaviour that cites this file has a scenario here
   const probed = new Set(SCENARIOS.map(s => s.id.split('#')[0]));
@@ -52,7 +54,9 @@ test('stock git porcelain is classified like ply: landed, partial, conflict, rej
   assert.deepEqual(gitOutcome(1, `To x\n${line(' ', R, 'a..b')}\n${line('!', S, '[remote rejected] (failed to update ref)')}\nDone\n`, ''), { outcome: 'partial', error: 'push_partial', detail: 'failed to update ref' });
   assert.equal(gitOutcome(1, `${line('!', R, '[remote rejected] (stale ref)')}\n`, '').error, 'cas_conflict', 'Artifacts wording');
   assert.equal(gitOutcome(1, `${line('!', R, '[remote rejected] (incorrect old value provided)')}\n`, '').error, 'cas_conflict');
-  assert.equal(gitOutcome(1, `${line('!', R, '[rejected] (stale info)')}\n`, '').error, 'stale_info');
+  assert.deepEqual(gitOutcome(1, `${line('!', R, '[rejected] (stale info)')}\n`, ''), { outcome: 'conflict', error: 'cas_conflict', detail: 'stale info' }, 'git saw the other writer first');
+  assert.equal(gitOutcome(1, `${line('!', R, '[rejected] (fetch first)')}\n`, '').error, 'cas_conflict');
+  assert.equal(gitOutcome(1, `${line('!', R, '[rejected] (non-fast-forward)')}\n`, '', new Set([R])).error, 'cas_conflict', 'a create of a ref that exists');
   assert.deepEqual(gitOutcome(1, `${line('!', R, '[remote rejected] (atomic push failure)')}\n${line('!', S, '[remote rejected] (failed to update ref)')}\n`, '').error, 'cas_conflict');
   assert.equal(gitOutcome(1, `${line('!', R, '[remote rejected] (unpacker error)')}\n`, 'remote: fatal: pack exceeds maximum allowed size\n').error, 'limit_exceeded');
   assert.equal(gitOutcome(1, `${line('!', R, '[remote rejected] (unpacker error)')}\n`, '').outcome, 'rejected');

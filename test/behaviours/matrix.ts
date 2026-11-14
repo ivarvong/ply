@@ -35,6 +35,8 @@ const deltaWire = (check: CheckOf<'loadgen-phase5-delta-20261025'>): OtherEviden
 // for ply against Artifacts, `<scenario>/art-git` for stock git against it; the same plans run in CI against the reference.
 const probePly = (check: CheckOf<'probes-20261114t1745-5jxl'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1745-5jxl', check } });
 const probeGit = (check: CheckOf<'probes-20261114t1745-5jxl'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1745-5jxl', check } });
+const probeAPly = (check: CheckOf<'probes-20261114t1837-53b4'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1837-53b4', check } });
+const probeAGit = (check: CheckOf<'probes-20261114t1837-53b4'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1837-53b4', check } });
 
 const verified = (...evidence: NonEmpty<Evidence>): Extract<Status, { readonly tag: 'verified' }> => ({ tag: 'verified', evidence });
 const IMPLEMENTED: Extract<Status, { readonly tag: 'implemented' }> = { tag: 'implemented' };
@@ -507,7 +509,7 @@ const PUSHES: readonly BehaviourIn<'push'>[] = [
     description: 'A command with the zero old id creates a ref.',
     ops: [PUSH, CREATE_BRANCH],
     tests: [t('test/push.test.js', "'create': t =>"), t('test/e2e-customer.test.js', 'createBranch from a branch name, a short name, a peeled annotated tag'), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/push.test.js', "'create': t =>"), validatePly('branch create (feat from c0)'), plyWorker('branch/create'), phase2Git('new_branch'), git('test/probes/probes.test.js', PROBES), probePly('push.create-ref#plain/art-ply'), probeGit('push.create-ref#plain/art-git')),
+    status: verified(git('test/push.test.js', "'create': t =>"), validatePly('branch create (feat from c0)'), plyWorker('branch/create'), phase2Git('new_branch'), git('test/probes/probes.test.js', PROBES), probePly('push.create-ref#plain/art-ply'), probeGit('push.create-ref#plain/art-git'), probeAPly('push.create-ref#already-exists/art-ply'), probeAGit('push.create-ref#already-exists/art-git')),
     notes: [],
   }),
   b({
@@ -638,15 +640,15 @@ const CONCURRENCY: readonly BehaviourIn<'concurrency'>[] = [
     description: 'A push whose old id is no longer the ref\'s value is refused (compare-and-swap) and the ref is unchanged.',
     ops: [PUSH, PUSH_PACK, EDIT_FILE],
     tests: [t('test/push.test.js', "'stale-old': t =>"), t('test/push-pack.test.js', 'a stale old oid is cas_conflict, as push reports it'), t('test/custom-exchange.test.js', 'receive-pack refuses a command (stale old id)'), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/push.test.js', "'stale-old': t =>"), git('test/push-pack.test.js', 'a stale old oid is cas_conflict, as push reports it'), phase2Git('force_with_lease_stale'), git('test/probes/probes.test.js', PROBES), probePly('concurrency.stale-old-oid#race/art-ply'), probePly('concurrency.stale-old-oid#direct/art-ply'), probeGit('concurrency.stale-old-oid#race/art-git')),
+    status: verified(git('test/push.test.js', "'stale-old': t =>"), git('test/push-pack.test.js', 'a stale old oid is cas_conflict, as push reports it'), phase2Git('force_with_lease_stale'), git('test/probes/probes.test.js', PROBES), probePly('concurrency.stale-old-oid#race/art-ply'), probePly('concurrency.stale-old-oid#direct/art-ply'), probeGit('concurrency.stale-old-oid#race/art-git'), probeAPly('concurrency.stale-old-oid#delete-vs-update/art-ply'), probeAGit('concurrency.stale-old-oid#delete-vs-update/art-git')),
     notes: ['The validate CAS checks (stale head, stale delete) are refused by ply-web from ls-refs, before any push. The probe run sends the stale old id to Artifacts itself: directly from ply, and from a race (another writer moves the ref while the receive-pack request is held) from ply and stock git.'],
   }),
   b({
     id: 'concurrency.concurrent-writers', area: 'concurrency',
     description: 'Concurrent writers on one ref: one wins each round, the rest are refused as stale and retry; nothing is lost.',
     ops: [EDIT_FILE, PUSH],
-    tests: [t('test/concurrency.test.js', 'concurrent CAS writers converge; conflicts are observed and retried, never lost'), t('test/edit-race-f34.test.js', 'same-file edit race ×1000 attempts: only ok and cas_conflict')],
-    status: verified(git('test/concurrency.test.js', 'concurrent CAS writers converge; conflicts are observed and retried, never lost'), git('test/edit-race-f34.test.js', 'same-file edit race ×1000 attempts: only ok and cas_conflict'), plyWorker('edit/race_same_file'), plyWorker('edit/race_diff_files'), phase2Git('fetch_push_race')),
+    tests: [t('test/probes/probes.test.js', PROBES), t('test/concurrency.test.js', 'concurrent CAS writers converge; conflicts are observed and retried, never lost'), t('test/edit-race-f34.test.js', 'same-file edit race ×1000 attempts: only ok and cas_conflict')],
+    status: verified(git('test/probes/probes.test.js', PROBES), git('test/concurrency.test.js', 'concurrent CAS writers converge; conflicts are observed and retried, never lost'), git('test/edit-race-f34.test.js', 'same-file edit race ×1000 attempts: only ok and cas_conflict'), plyWorker('edit/race_same_file'), plyWorker('edit/race_diff_files'), phase2Git('fetch_push_race'), probeAPly('concurrency.concurrent-writers#create-vs-create/art-ply'), probeAGit('concurrency.concurrent-writers#create-vs-create/art-git'), probeAPly('concurrency.concurrent-writers#delete-vs-update/art-ply'), probeAGit('concurrency.concurrent-writers#delete-vs-update/art-git')),
     notes: [],
   }),
   b({
@@ -678,8 +680,8 @@ const CONCURRENCY: readonly BehaviourIn<'concurrency'>[] = [
     description: 'A receive-pack 200 that carries no report (no unpack or ref lines), whether an empty body or only a band-3 fatal such as the busy refusal Artifacts sends to concurrent same-repo pushes, is ambiguous, never landed; the server applied nothing for it.',
     ops: [PUSH, CLASSIFY_REPORT],
     tests: [t('test/push-unpack-host.test.js', 'an empty receive-pack report stays ambiguous (concurrent same-repo 200 with no unpack/ref lines)'), t('test/mutant-kill.test.js', BAND3_NO_REPORT), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES), probePly('concurrency.empty-report-under-contention#distinct-refs/art-ply'), probePly('concurrency.empty-report-under-contention#same-ref/art-ply'), probeGit('concurrency.empty-report-under-contention#distinct-refs/art-git'), probeGit('concurrency.empty-report-under-contention#same-ref/art-git')),
-    notes: ['Probed with 8 concurrent pushes to one repository (8 distinct refs; one ref from 8 contenders); every push a client called landed is checked against the refs stock git reads back. Per-check outcomes are in the private run record.', 'Observed shape on Artifacts (probes run probes-20261114t1745-5jxl): HTTP 200 whose body is a single band-3 fatal (busy) and no report-status, for distinct refs as well as one ref; the refs read back show none of those pushes applied. Stock git reports it as the remote hanging up (exit 128).'],
+    status: verified(git('test/probes/probes.test.js', PROBES), probePly('concurrency.empty-report-under-contention#distinct-refs/art-ply'), probePly('concurrency.empty-report-under-contention#same-ref/art-ply'), probeGit('concurrency.empty-report-under-contention#distinct-refs/art-git'), probeGit('concurrency.empty-report-under-contention#same-ref/art-git'), probeAPly('concurrency.empty-report-under-contention#retry-after-busy/art-ply'), probeAGit('concurrency.empty-report-under-contention#retry-after-busy/art-git')),
+    notes: ['Probed with 8 concurrent pushes to one repository (8 distinct refs; one ref from 8 contenders); every push a client called landed is checked against the refs stock git reads back. Per-check outcomes are in the private run record.', 'Observed shape on Artifacts (probes run probes-20261114t1745-5jxl): HTTP 200 whose body is a single band-3 fatal (busy) and no report-status, for distinct refs as well as one ref; the refs read back show none of those pushes applied. Stock git reports it as the remote hanging up (exit 128).', 'Retry probe (run probes-20261114t1837-53b4): each push that did not land is sent again alone with the same zero old id, which the server would refuse had the first attempt been applied; per-check outcomes are in the private run record.'],
   }),
   b({
     id: 'concurrency.two-transfer-runners', area: 'concurrency',
