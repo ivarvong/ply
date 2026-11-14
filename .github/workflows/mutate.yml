@@ -29,7 +29,8 @@ jobs:
   # The 36 appears here four times (job name, matrix, --shard, --shards); the merge refuses a missing or extra shard, so
   # changing one and not the others fails the gate. 36, not 20 (#313): scripts/mutate.mjs --budget (ci.yml) requires the
   # heaviest planned shard to finish within 60 of the 90 minutes on a runner twice as slow as the reference one (shard
-  # 9 of 43273467698 dry-ran at 1.99x and took 79 min 17 s). Planned max 25.1 min at the reference, 50.2 at 2x.
+  # 9 of 43273467698 dry-ran at 1.99x and took 79 min 17 s). Planned max 25.4 min at the reference, 50.8 at 2x (with
+  # weights for the ply/probes files, measured on 43639075968).
   mutate-shard:
     name: mutate-shard (${{ matrix.shard }}/36)
     runs-on: ubuntu-latest

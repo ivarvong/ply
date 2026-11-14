@@ -304,6 +304,12 @@ const plannedMinutes = seconds => WALL_SETUP_MIN + seconds / WALL_PARALLEL / 60;
 // RUNNER_WORST is the slowest runner seen: shard 9 of 43273467698 dry-ran in 99.3 s (1.99x the reference) and took
 // 79 min 17 s; 94.0 s on 43232620788. The whole planned time scales (setup included), which over-counts npm ci and
 // checkout: the margin is on the safe side. The remaining third of the limit is for weights gone stale.
+// Since then one runner has been far slower than RUNNER_WORST: shard 14 of 43639075968 (a78ed24) dry-ran in
+// 242.2 s, 4.84x the reference; the other 35 shards ran 32.7-91.4 s. It held 25.5 planned minutes, one of 36 near-equal
+// shards, and hit the 90-minute limit at 412 of 499 mutants. No plan within this rule absorbs such a runner (at 4.84x a
+// shard must plan under 18.6 min); the rule is unchanged and a rerun of that shard is the remedy.
+// An all-NoCoverage file costs about 0 s: the ply/probes files (src/probe-*.ts, 1,727 mutants, none reached by the
+// mutation suite) measured 0 s on that run, against 7,533 s planned at the median rate before they had weights.
 const RUNNER_WORST = 2;
 const BUDGET_SHARE = 2 / 3;
 const WEIGHTS = 'scripts/mutate-weights.json';
