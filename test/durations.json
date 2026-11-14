@@ -14,6 +14,7 @@
   "test/compliance.test.js": 26,
   "test/concurrency.test.js": 4,
   "test/config-comment.test.js": 1,
+  "test/behaviours/matrix.test.js": 1,
   "test/custom-exchange.test.js": 2,
   "test/deadline-scenarios.test.js": 1,
   "test/deadline.test.js": 4,

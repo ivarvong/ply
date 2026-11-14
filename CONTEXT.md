@@ -240,6 +240,14 @@ commit's and fails without that line; a squash merge must keep the line in its m
 `npm run spaces -- --ratchet --init --reason "<why>"`, which prints that line; with no reason it exits 1, lists the
 holes it would add and writes nothing.
 
+The Git behaviour coverage matrix (`test/behaviours/matrix.ts`, rendered to `COVERAGE.md` by
+`npm run coverage-matrix -- --md`) counts server behaviours, not git commands: each has an area, the ply ops and
+tests that exercise it (grepped by `test/behaviours/matrix.test.js`, never asserted from memory), and a status of
+unsupported, implemented or verified. Verified carries evidence by kind (ply against git http-backend in this suite,
+ply, stock git or hand-built wire probes against Artifacts in a recorded run listed in `test/behaviours/runs.ts`);
+the types make a verified row without evidence impossible. A change that adds or retires a behaviour, a test, or a
+run updates the matrix and regenerates COVERAGE.md in the same commit.
+
 ```sh
 npm ci
 npm test                  # 113 deterministic tests + 16 fuzz stages (≈29 min)
