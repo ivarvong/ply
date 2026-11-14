@@ -19,7 +19,7 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 
 ## Summary
 
-**107** behaviours: **90** verified, **7** implemented, **10** unsupported. Of the verified, **64** carry some Artifacts evidence and **34** carry evidence of ply itself against Artifacts.
+**107** behaviours: **91** verified, **6** implemented, **10** unsupported. Of the verified, **69** carry some Artifacts evidence and **44** carry evidence of ply itself against Artifacts.
 
 | area | behaviours | verified | implemented | unsupported |
 |---|---:|---:|---:|---:|
@@ -28,30 +28,29 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 | fetch | 20 | 19 | 0 | 1 |
 | pack | 12 | 12 | 0 | 0 |
 | push | 16 | 15 | 0 | 1 |
-| concurrency | 7 | 6 | 1 | 0 |
+| concurrency | 7 | 7 | 0 | 0 |
 | tags | 5 | 5 | 0 | 0 |
 | ancestry | 7 | 6 | 1 | 0 |
 | errors | 7 | 3 | 3 | 1 |
 | interrupted | 6 | 5 | 1 | 0 |
 | http | 10 | 6 | 1 | 3 |
-| **all** | **107** | **90** | **7** | **10** |
+| **all** | **107** | **91** | **6** | **10** |
 
 Verified behaviours by evidence kind (a behaviour counts once under each kind it has):
 
 | evidence kind | verified behaviours |
 |---|---:|
-| `ply_vs_reference_git` | 82 |
-| `ply_vs_artifacts` | 34 |
-| `native_git_vs_artifacts` | 36 |
+| `ply_vs_reference_git` | 85 |
+| `ply_vs_artifacts` | 44 |
+| `native_git_vs_artifacts` | 44 |
 | `wire_probe_vs_artifacts` | 18 |
 
 ## Gaps
 
 Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed under the first of these classes that holds:
 
-### Exercised by ply, judged by nothing independent (7)
+### Exercised by ply, judged by nothing independent (6)
 
-- `concurrency.empty-report-under-contention`: A receive-pack 200 with no unpack or ref lines (seen on Artifacts under same-repo concurrency) is ambiguous, never landed.
 - `ancestry.cut-graph`: A server that withholds ancestors without saying shallow: ply fails closed, nothing pushed.
 - `errors.http-status-classes`: Statuses 4xx/5xx/429 at each stage map to ply's typed classes, and a refused optional feature is not retried for them.
 - `errors.err-pkt-line`: An ERR pkt-line anywhere in a response is a typed remote error carrying the scrubbed message.
@@ -59,7 +58,7 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `interrupted.stall-timeouts`: A server that stalls before the first byte or mid-body is ended by the first-byte or idle timer, typed timeout.
 - `http.sideband-keepalive`: Empty band-1 keepalives while a hook runs do not end the push read.
 
-### Verified against git http-backend only: no evidence of any kind from Artifacts (26)
+### Verified against git http-backend only: no evidence of any kind from Artifacts (22)
 
 - `refs.advertisement-shapes`: Unusual but legal listings (duplicate names, ordering, raw bytes in names) are read as git reads them.
 - `caps.required-capabilities`: A server missing a capability ply needs (ls-refs, fetch) is refused as unsupported before any operation.
@@ -75,20 +74,16 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `pack.corrupt-served-pack`: A served pack with a corrupt header field, zlib member, delta or checksum is refused exactly where git index-pack --strict refuses it.
 - `pack.served-pack-limits`: Hostile sizes in a served pack (object size, delta result, chain depth, inflated total) are refused before allocation.
 - `pack.push-duplicate-object`: A pushed pack never names one object twice (a strict receiver refuses it).
-- `push.non-atomic-partial`: A non-atomic multi-ref push the server applies in part is push_partial, naming what landed.
 - `push.report-status-v2`: report-status-v2: option lines after ok.
 - `push.sideband-hook-output`: side-band-64k on receive-pack: the report on band 1, hook output on band 2.
 - `push.hook-rejection`: A pre-receive or update hook that declines: ng with the hook's reason, ref unchanged.
-- `concurrency.ref-created-between-read-and-push`: Another writer creates the target ref between ply's ls-refs and its receive-pack: the create is refused, naming the winner.
-- `concurrency.ref-deleted-between-read-and-push`: Another writer deletes the target ref between ply's read and its push.
 - `concurrency.two-transfer-runners`: Two resumable transfers of one plan at once both finish with the planned head; each refused step is settled by reading refs.
-- `interrupted.push-response-lost`: The server applies a push but the response is lost: ply reports ambiguous, the refs show the push, a retry is safe.
 - `interrupted.fetch-dropped-mid-response`: A fetch or advertisement response dropped or cut mid-body is a typed network error or pack_corrupt, never a partial result.
 - `interrupted.abort-during-push`: An external AbortSignal during a push: aborted if the body was never pulled, ambiguous once sent; git decides what landed.
 - `interrupted.resumable-transfer`: A multi-step transfer paused or interrupted is resumed from refs, not from local state, and ends at the planned head.
 - `http.redirects`: A 3xx on the advertisement is followed as git follows it (within policy); a 3xx on a POST is never followed.
 
-### Artifacts observed by stock git or wire probes, never by ply (30)
+### Artifacts observed by stock git or wire probes, never by ply (25)
 
 - `caps.receive-pack-capabilities`: receive-pack capabilities (report-status, report-status-v2, side-band-64k, atomic, push-options, delete-refs, ofs-delta, object-format) are read and checked before the POST.
 - `fetch.want-tip-full-pack`: want of a tip with done and no filter: the pack holds exactly what pack-objects sends.
@@ -108,13 +103,8 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `pack.push-thin-missing-base`: receive-pack refuses a thin pushed pack whose base it does not hold, and moves no ref.
 - `pack.push-corrupt-pack-refused`: receive-pack refuses a corrupt pushed pack (unpack error, ng for every ref) and moves no ref.
 - `pack.push-malformed-object-refused`: receive-pack refuses a well-framed pack that holds a malformed object or a delta with no base.
-- `push.non-fast-forward`: A non-fast-forward update: refused under receive.denyNonFastForwards, accepted as a forced update otherwise.
-- `push.atomic`: atomic: several ref updates land together or not at all.
 - `push.push-options`: push-options: sent only when advertised; they reach the hook.
 - `push.ref-name-rules`: receive-pack's ref-name rules ("funny refname"): ply refuses before the wire exactly what receive-pack refuses.
-- `push.size-limits`: A push over the server's object or pack size cap is refused with a report ply classifies as limit_exceeded.
-- `push.many-ref-updates`: One push carrying many ref updates.
-- `concurrency.stale-old-oid`: A push whose old id is no longer the ref's value is refused (compare-and-swap) and the ref is unchanged.
 - `tags.many-tags`: A repository with many tags: listing, include-tag and fetch stay correct.
 - `interrupted.push-body-cut`: A push request body that fails midway: nothing lands; failure before the first body pull is definite, after it ambiguous.
 - `http.credential-forms`: Bearer, Basic and URL-userinfo credentials produce the Authorization header git sends for the same input.
@@ -998,21 +988,21 @@ Evidence:
 
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
-| `push.create-ref` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `createBranch` | 2 |
-| `push.first-commit-empty-repo` | verified | ply↔git, ply↔Artifacts | `commitChanges`, `push` | 1 |
-| `push.fast-forward-update` | verified | ply↔git, ply↔Artifacts | `push`, `editFile` | 1 |
-| `push.non-fast-forward` | verified | ply↔git, git↔Artifacts | `push` | 2 |
-| `push.delete-ref` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `deleteBranch` | 2 |
-| `push.atomic` | verified | ply↔git, git↔Artifacts | `push`, `pushPack`, `runTransfer` | 2 |
-| `push.non-atomic-partial` | verified | ply↔git | `push` | 1 |
+| `push.create-ref` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `createBranch` | 3 |
+| `push.first-commit-empty-repo` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `commitChanges`, `push` | 2 |
+| `push.fast-forward-update` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `editFile` | 2 |
+| `push.non-fast-forward` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push` | 3 |
+| `push.delete-ref` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `deleteBranch` | 3 |
+| `push.atomic` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `pushPack`, `runTransfer` | 3 |
+| `push.non-atomic-partial` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push` | 2 |
 | `push.report-status` | verified | ply↔git, ply↔Artifacts | `push`, `classifyReport` | 3 |
 | `push.report-status-v2` | verified | ply↔git | `push` | 1 |
 | `push.sideband-hook-output` | verified | ply↔git | `push` | 1 |
 | `push.push-options` | verified | ply↔git, git↔Artifacts | `push`, `pushPack` | 2 |
 | `push.hook-rejection` | verified | ply↔git | `push` | 1 |
 | `push.ref-name-rules` | verified | ply↔git, git↔Artifacts, wire↔Artifacts | `push` | 1 |
-| `push.size-limits` | verified | git↔Artifacts, wire↔Artifacts | `push`, `pushPack` | 1 |
-| `push.many-ref-updates` | verified | git↔Artifacts, wire↔Artifacts | `push` | 0 |
+| `push.size-limits` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push`, `pushPack` | 2 |
+| `push.many-ref-updates` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push` | 1 |
 | `push.signed-push` | unsupported (observed) | git↔Artifacts | — | 0 |
 
 #### `push.create-ref`
@@ -1025,6 +1015,7 @@ Tests:
 
 - `test/push.test.js`: 'create': t =>
 - `test/e2e-customer.test.js`: createBranch from a branch name, a short name, a peeled annotated tag
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
@@ -1032,6 +1023,9 @@ Evidence:
 - ply↔Artifacts: validate-7b0c310f: `branch create (feat from c0)`
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `branch/create`
 - git↔Artifacts: loadgen-phase2-20261025: `new_branch`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `push.create-ref#plain/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `push.create-ref#plain/art-git`
 
 #### `push.first-commit-empty-repo`
 
@@ -1042,11 +1036,15 @@ Ops: `src/changes.ts` `commitChanges`, `src/push.ts` `push`.
 Tests:
 
 - `test/changes.test.js`: commitChanges: start × place × op against git cat-file and fsck --strict
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/changes.test.js`
 - ply↔Artifacts: validate-7b0c310f: `write: root commit (edit changes)`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `push.first-commit-empty-repo#root/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `push.first-commit-empty-repo#root/art-git`
 
 #### `push.fast-forward-update`
 
@@ -1057,12 +1055,16 @@ Ops: `src/push.ts` `push`, `src/edit.ts` `editFile`.
 Tests:
 
 - `test/push.test.js`: push matrix: configs × hooks × commands × caps, parity with git push
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/push.test.js`
 - ply↔Artifacts: validate-7b0c310f: `write: edit README find/replace (c1)`
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `edit/ok`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `push.fast-forward-update#plain/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `push.fast-forward-update#plain/art-git`
 
 #### `push.non-fast-forward`
 
@@ -1074,14 +1076,16 @@ Tests:
 
 - `test/push.test.js`: 'nonff-update': t =>
 - `test/push.test.js`: 'deny-nonff': { 'receive.denyNonFastForwards': 'true' }
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/push.test.js`
 - git↔Artifacts: loadgen-phase2-20261025: `non_ff_reject`
 - git↔Artifacts: loadgen-compat-20261024: `force_push/scratch/v2`
-
-> No ply probe has pushed a non-fast-forward to Artifacts.
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `push.non-fast-forward#with-old-id/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `push.non-fast-forward#with-old-id/art-git`
 
 #### `push.delete-ref`
 
@@ -1093,6 +1097,7 @@ Tests:
 
 - `test/push.test.js`: 'delete': t =>
 - `test/push.test.js`: 'deny-deletes': { 'receive.denyDeletes': 'true' }
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
@@ -1100,6 +1105,9 @@ Evidence:
 - ply↔Artifacts: validate-7b0c310f: `branch delete (CAS ok)`
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `branch/delete`
 - git↔Artifacts: loadgen-compat-20261024: `tag_push_delete/scratch/v2`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `push.delete-ref#plain/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `push.delete-ref#plain/art-git`
 
 #### `push.atomic`
 
@@ -1111,13 +1119,19 @@ Tests:
 
 - `test/push.test.js`: 'multi-atomic': t =>
 - `test/push-pack.test.js`: atomic: checked against the advertisement, then sent; two refs land together
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/push-pack.test.js`
 - git↔Artifacts: loadgen-compat-20261024: `atomic_push_multi_ref/scratch/v2`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `push.atomic#all-land/art-ply`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `push.atomic#one-stale/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `push.atomic#all-land/art-git`
+- git↔Artifacts: probes-20261114t1745-5jxl: `push.atomic#one-stale/art-git`
 
-> No ply probe has sent an atomic push to Artifacts, and none has made one of its commands fail there.
+> The one-stale variant makes one command fail at the server: another writer moves its ref while the request is held.
 
 #### `push.non-atomic-partial`
 
@@ -1128,12 +1142,16 @@ Ops: `src/push.ts` `push`.
 Tests:
 
 - `test/push.test.js`: assert.equal(err.code, 'push_partial'
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/push.test.js`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `push.non-atomic-partial#one-stale/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `push.non-atomic-partial#one-stale/art-git`
 
-> No Artifacts evidence of any kind for a partly applied push.
+> Probed by a two-ref push while another writer moves one ref (test/probes/scenarios.ts). Per-check outcomes are in the private run record.
 
 #### `push.report-status`
 
@@ -1243,14 +1261,18 @@ Ops: `src/push.ts` `push`, `src/receivecaps.ts` `pushPack`.
 Tests:
 
 - `test/push-unpack-host.test.js`: Artifacts 64 MiB cap is limit_exceeded with got/max in bytes, not push_rejected or ambiguous
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - git↔Artifacts: loadgen-phase2-20261025: `blob_push_ceiling`
 - git↔Artifacts: loadgen-compat-20261024: `large_blob_push_24m/scratch/v2`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `pack/zlib_bomb_40m`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `push.size-limits#pack-over-cap/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `push.size-limits#pack-over-cap/art-git`
 
-> ply's classification is tested only on report bytes copied into a fake. Neither git (receive.maxInputSize) nor Artifacts has refused a ply push for size in a recorded run.
+> A 66 MiB pack against a 64 MiB cap. ply classifies the server's stated cap as limit_exceeded; git http-backend (receive.maxInputSize) refuses with `unpacker error`, its reason on band 2 only, which ply reports as push_rejected: an expected difference, test/probes/allow.ts.
 
 #### `push.many-ref-updates`
 
@@ -1258,12 +1280,19 @@ One push carrying many ref updates.
 
 Ops: `src/push.ts` `push`.
 
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
 Evidence:
 
 - git↔Artifacts: loadgen-phase2-20261025: `many_refs_5000`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `ref/fifty_updates`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `push.many-ref-updates#fifty-creates/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `push.many-ref-updates#fifty-creates/art-git`
 
-> ply can send any number of commands; no test sends more than a few.
+> The probe sends 50 creates in one push; no other test sends more than a few.
 
 #### `push.signed-push`
 
@@ -1279,12 +1308,12 @@ Observed:
 
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
-| `concurrency.stale-old-oid` | verified | ply↔git, git↔Artifacts | `push`, `pushPack`, `editFile` | 3 |
+| `concurrency.stale-old-oid` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `pushPack`, `editFile` | 4 |
 | `concurrency.concurrent-writers` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `editFile`, `push` | 2 |
-| `concurrency.ref-created-between-read-and-push` | verified | ply↔git | `createBranch`, `createTag`, `commitChanges` | 2 |
-| `concurrency.ref-deleted-between-read-and-push` | verified | ply↔git | `commitChanges` | 1 |
+| `concurrency.ref-created-between-read-and-push` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `createBranch`, `createTag`, `commitChanges` | 3 |
+| `concurrency.ref-deleted-between-read-and-push` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `commitChanges` | 2 |
 | `concurrency.read-after-write` | verified | ply↔Artifacts, git↔Artifacts | `lsRefs`, `readFile`, `readCommit` | 1 |
-| `concurrency.empty-report-under-contention` | implemented | — | `push`, `classifyReport` | 1 |
+| `concurrency.empty-report-under-contention` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `classifyReport` | 2 |
 | `concurrency.two-transfer-runners` | verified | ply↔git | `runTransfer` | 1 |
 
 #### `concurrency.stale-old-oid`
@@ -1298,14 +1327,19 @@ Tests:
 - `test/push.test.js`: 'stale-old': t =>
 - `test/push-pack.test.js`: a stale old oid is cas_conflict, as push reports it
 - `test/custom-exchange.test.js`: receive-pack refuses a command (stale old id)
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/push.test.js`
 - ply↔git: `test/push-pack.test.js`
 - git↔Artifacts: loadgen-phase2-20261025: `force_with_lease_stale`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.stale-old-oid#race/art-ply`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.stale-old-oid#direct/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.stale-old-oid#race/art-git`
 
-> The validate CAS checks (stale head, stale delete) are refused by ply-web from ls-refs, before any push: Artifacts refusing a stale ply push has no recorded run. artifacts-compat.test.js emulates its reason with a proxy.
+> The validate CAS checks (stale head, stale delete) are refused by ply-web from ls-refs, before any push. The probe run sends the stale old id to Artifacts itself: directly from ply, and from a race (another writer moves the ref while the receive-pack request is held) from ply and stock git.
 
 #### `concurrency.concurrent-writers`
 
@@ -1330,34 +1364,40 @@ Evidence:
 
 Another writer creates the target ref between ply's ls-refs and its receive-pack: the create is refused, naming the winner.
 
-Ops: `src/refops.ts` `createBranch`, `src/refops.ts` `createTag`, `src/changes.ts` `commitChanges`.
+Ops: `src/push.ts` `push`, `src/refops.ts` `createBranch`, `src/refops.ts` `createTag`, `src/changes.ts` `commitChanges`.
 
 Tests:
 
 - `test/e2e-customer.test.js`: createBranch and createTag lose a race to a ref made between ls-refs and receive-pack: cas_conflict naming the winner
 - `test/changes-create-race.test.js`: commitChanges creating a ref from a base
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/e2e-customer.test.js`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.ref-created-between-read-and-push#race/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.ref-created-between-read-and-push#race/art-git`
 
-> No Artifacts evidence: validate's duplicate-branch check is refused by ply-web from ls-refs, before receive-pack.
+> validate's duplicate-branch check is refused by ply-web from ls-refs, before receive-pack; the probe run's race reaches receive-pack.
 
 #### `concurrency.ref-deleted-between-read-and-push`
 
 Another writer deletes the target ref between ply's read and its push.
 
-Ops: `src/changes.ts` `commitChanges`.
+Ops: `src/push.ts` `push`, `src/changes.ts` `commitChanges`.
 
 Tests:
 
 - `test/changes-delete-race.test.js`: head pinned to the base: a target deleted mid-call is cas_conflict and stays deleted
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/changes-delete-race.test.js`
-
-> No Artifacts evidence.
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.ref-deleted-between-read-and-push#race/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.ref-deleted-between-read-and-push#race/art-git`
 
 #### `concurrency.read-after-write`
 
@@ -1387,8 +1427,17 @@ Ops: `src/push.ts` `push`, `src/push.ts` `classifyReport`.
 Tests:
 
 - `test/push-unpack-host.test.js`: an empty receive-pack report stays ambiguous (concurrent same-repo 200 with no unpack/ref lines)
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
-> Tested on recorded bytes only; no recorded run reproduces the empty report.
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.empty-report-under-contention#distinct-refs/art-ply`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.empty-report-under-contention#same-ref/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.empty-report-under-contention#distinct-refs/art-git`
+- git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.empty-report-under-contention#same-ref/art-git`
+
+> Probed with 8 concurrent pushes to one repository (8 distinct refs; one ref from 8 contenders); every push a client called landed is checked against the refs stock git reads back. Per-check outcomes are in the private run record.
 
 #### `concurrency.two-transfer-runners`
 
@@ -1410,9 +1459,9 @@ Evidence:
 
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
-| `tags.lightweight-create` | verified | ply↔git, ply↔Artifacts | `createTag` | 1 |
-| `tags.annotated-create` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `createTag` | 1 |
-| `tags.delete` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `deleteTag` | 1 |
+| `tags.lightweight-create` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `createTag` | 2 |
+| `tags.annotated-create` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `createTag` | 2 |
+| `tags.delete` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `deleteTag` | 2 |
 | `tags.peel-chain` | verified | ply↔git, ply↔Artifacts | `readFile`, `createBranch` | 2 |
 | `tags.many-tags` | verified | git↔Artifacts | `lsRefs` | 0 |
 
@@ -1420,48 +1469,60 @@ Evidence:
 
 A lightweight tag is a ref create under refs/tags pointing at a commit.
 
-Ops: `src/refops.ts` `createTag`.
+Ops: `src/push.ts` `push`, `src/refops.ts` `createTag`.
 
 Tests:
 
 - `test/e2e-customer.test.js`: createTag: lightweight and annotated (as git tag -a writes it), refusals
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/e2e-customer.test.js`
 - ply↔Artifacts: validate-7b0c310f: `tag lightweight`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `tags.lightweight-create#plain/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `tags.lightweight-create#plain/art-git`
 
 #### `tags.annotated-create`
 
 An annotated tag pushes a tag object with its ref, byte-equal to git tag -a.
 
-Ops: `src/refops.ts` `createTag`.
+Ops: `src/push.ts` `push`, `src/refops.ts` `createTag`.
 
 Tests:
 
 - `test/e2e-customer.test.js`: createTag: lightweight and annotated (as git tag -a writes it), refusals
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/e2e-customer.test.js`
 - ply↔Artifacts: validate-7b0c310f: `tag annotated`
 - git↔Artifacts: validate-7b0c310f: `git judge: fsck --strict, refs, history`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `tags.annotated-create#plain/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `tags.annotated-create#plain/art-git`
 
 #### `tags.delete`
 
 A tag delete with the expected old id; a stale expected id is refused.
 
-Ops: `src/refops.ts` `deleteTag`.
+Ops: `src/push.ts` `push`, `src/refops.ts` `deleteTag`.
 
 Tests:
 
 - `test/e2e-customer.test.js`: deleteTag
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/e2e-customer.test.js`
 - ply↔Artifacts: validate-7b0c310f: `tag delete (CAS) + stale delete -> 409`
 - git↔Artifacts: loadgen-compat-20261024: `tag_push_delete/scratch/v2`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `tags.delete#plain/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `tags.delete#plain/art-git`
 
 > The stale half of the validate check is refused by ply-web from ls-refs, not by Artifacts.
 
@@ -1498,7 +1559,7 @@ Evidence:
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
 | `ancestry.merge-base-search` | verified | ply↔git, ply↔Artifacts | `mergeBase` | 2 |
-| `ancestry.merge-commit-push` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `mergeBranch` | 1 |
+| `ancestry.merge-commit-push` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `mergeBranch` | 2 |
 | `ancestry.fast-forward-and-up-to-date` | verified | ply↔git, ply↔Artifacts | `mergeBranch` | 1 |
 | `ancestry.rebase-chain` | verified | ply↔git, ply↔Artifacts | `rebaseBranch` | 1 |
 | `ancestry.cherry-pick-revert` | verified | ply↔git, ply↔Artifacts | `cherryPick`, `revertCommit` | 2 |
@@ -1526,11 +1587,12 @@ Evidence:
 
 A two-parent merge commit pushed as a fast-forward of the target; history visible to git as a merge.
 
-Ops: `src/merge.ts` `mergeBranch`.
+Ops: `src/push.ts` `push`, `src/merge.ts` `mergeBranch`.
 
 Tests:
 
 - `test/merge.test.js`: outcomes: up-to-date, fast-forward, ff-only refusal, no-ff merge commit, clean merge, conflict
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
@@ -1539,6 +1601,9 @@ Evidence:
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `merge/true`
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `merge/verify`
 - git↔Artifacts: loadgen-phase2-20261025: `shape/merges`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `ancestry.merge-commit-push#two-parents/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `ancestry.merge-commit-push#two-parents/art-git`
 
 #### `ancestry.fast-forward-and-up-to-date`
 
@@ -1741,7 +1806,7 @@ Observed:
 
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
-| `interrupted.push-response-lost` | verified | ply↔git | `push`, `runTransfer`, `editFile` | 2 |
+| `interrupted.push-response-lost` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `runTransfer`, `editFile` | 3 |
 | `interrupted.push-body-cut` | verified | ply↔git, wire↔Artifacts | `push`, `pushPack` | 2 |
 | `interrupted.fetch-dropped-mid-response` | verified | ply↔git | `fetchPack`, `readFile` | 2 |
 | `interrupted.stall-timeouts` | implemented | — | `exchangeClock`, `createTransport` | 2 |
@@ -1758,13 +1823,17 @@ Tests:
 
 - `test/adversarial.test.js`: ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct
 - `test/transfer-outcomes.test.js`: a push applied whose response is dropped: the refs show it, the run goes on to done
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/adversarial.test.js`
 - ply↔git: `test/transfer-outcomes.test.js`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1745-5jxl: `interrupted.push-response-lost#cut/art-ply`
+- git↔Artifacts: probes-20261114t1745-5jxl: `interrupted.push-response-lost#cut/art-git`
 
-> No Artifacts evidence: no run has cut a push response from Artifacts.
+> Probe: the recording proxy reads the server's whole answer, then cuts the connection. Stock git (libcurl) re-sends a POST whose reused connection closed with no answer; on git http-backend the replay is refused by compare-and-swap and git then finds the ref up to date (test/probes/scenarios.ts).
 
 #### `interrupted.push-body-cut`
 
@@ -2021,4 +2090,5 @@ Observed:
 | `loadgen-phase4-hostile-write-20261025` | 2026-10-25 | wire↔Artifacts | 23 | ply-artifacts-loadgen phase 4, write side: malformed packs and ref names pushed to Artifacts receive-pack with a write token, beside a git http-backend baseline. |
 | `loadgen-phase5-delta-20261025` | 2026-10-25 | git↔Artifacts, wire↔Artifacts | 21 | ply-artifacts-loadgen phase 5: delta capabilities, hand-built OFS/REF/thin packs pushed to Artifacts, clones read back with stock git and git verify-pack. |
 | `loadgen-phase6-plyw-20261025` | 2026-10-25 | ply↔Artifacts | 39 | ply-artifacts-loadgen phase 6: the deployed ply Worker (ply-web) against Artifacts: reads, edits, CAS, races, merges, errors; stock git judges. |
+| `probes-20261114t1745-5jxl` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 42 | ply differential probes (scripts/probes.mjs --artifacts; plans in test/probes/scenarios.ts, probe code d18a262915bc7c56): each scenario seeded with identical objects into a fresh Artifacts repository per client (namespace ply-loadgen) and into git http-backend with Artifacts' known policy; ply and stock git 2.47.3 run the same plan; a recording proxy injects the fault (held receive-pack while another writer moves refs, or a cut answer) and keeps the cf-ray of every request; stock git judges (ls-remote --symref, mirror clone, fsck --strict, rev-list --parents, merge-base); test/probes/evaluate.ts compares. |
 

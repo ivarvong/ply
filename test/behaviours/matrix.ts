@@ -31,6 +31,10 @@ const hostile = (check: CheckOf<'loadgen-phase4-hostile-20261025'>): OtherEviden
 const hostileWrite = (check: CheckOf<'loadgen-phase4-hostile-write-20261025'>): OtherEvidence => ({ kind: 'wire_probe_vs_artifacts', ref: { tag: 'run', run: 'loadgen-phase4-hostile-write-20261025', check } });
 const deltaGit = (check: CheckOf<'loadgen-phase5-delta-20261025'>): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'loadgen-phase5-delta-20261025', check } });
 const deltaWire = (check: CheckOf<'loadgen-phase5-delta-20261025'>): OtherEvidence => ({ kind: 'wire_probe_vs_artifacts', ref: { tag: 'run', run: 'loadgen-phase5-delta-20261025', check } });
+// The differential probe run (test/probes, scripts/probes.mjs --artifacts): one scenario per check, `<scenario>/art-ply`
+// for ply against Artifacts, `<scenario>/art-git` for stock git against it; the same plans run in CI against the reference.
+const probePly = (check: CheckOf<'probes-20261114t1745-5jxl'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1745-5jxl', check } });
+const probeGit = (check: CheckOf<'probes-20261114t1745-5jxl'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1745-5jxl', check } });
 
 const verified = (...evidence: NonEmpty<Evidence>): Extract<Status, { readonly tag: 'verified' }> => ({ tag: 'verified', evidence });
 const IMPLEMENTED: Extract<Status, { readonly tag: 'implemented' }> = { tag: 'implemented' };
@@ -86,6 +90,7 @@ const PARITY_LSREFS = 'ls-refs == git ls-remote (prefixes, symrefs, peeled tags,
 const MATRIX = 'exhaustive fetch matrix: wants × haves × deepen × filter × server';
 const CLONE_SHAPES = 'clone --depth N / --filter / --shallow-since / --shallow-exclude: same invocation, same shallow set, same objects';
 const ADV_PUSH = 'push: request × advertised atomic × advertised push-options × object-format, judged by git push';
+const PROBES = 'probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository';
 const ADV_REAL = 'real git http-backend configurations advertise exactly what the renderer writes for their cell';
 
 const REFS: readonly BehaviourIn<'refs'>[] = [
@@ -499,57 +504,57 @@ const PUSHES: readonly BehaviourIn<'push'>[] = [
     id: 'push.create-ref', area: 'push',
     description: 'A command with the zero old id creates a ref.',
     ops: [PUSH, CREATE_BRANCH],
-    tests: [t('test/push.test.js', "'create': t =>"), t('test/e2e-customer.test.js', 'createBranch from a branch name, a short name, a peeled annotated tag')],
-    status: verified(git('test/push.test.js', "'create': t =>"), validatePly('branch create (feat from c0)'), plyWorker('branch/create'), phase2Git('new_branch')),
+    tests: [t('test/push.test.js', "'create': t =>"), t('test/e2e-customer.test.js', 'createBranch from a branch name, a short name, a peeled annotated tag'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/push.test.js', "'create': t =>"), validatePly('branch create (feat from c0)'), plyWorker('branch/create'), phase2Git('new_branch'), git('test/probes/probes.test.js', PROBES), probePly('push.create-ref#plain/art-ply'), probeGit('push.create-ref#plain/art-git')),
     notes: [],
   }),
   b({
     id: 'push.first-commit-empty-repo', area: 'push',
     description: 'The first push to an empty repository creates the default branch from a root commit.',
     ops: [COMMIT_CHANGES, PUSH],
-    tests: [t('test/changes.test.js', 'commitChanges: start × place × op against git cat-file and fsck --strict')],
-    status: verified(git('test/changes.test.js', 'commitChanges: start × place × op against git cat-file and fsck --strict'), validatePly('write: root commit (edit changes)')),
+    tests: [t('test/changes.test.js', 'commitChanges: start × place × op against git cat-file and fsck --strict'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/changes.test.js', 'commitChanges: start × place × op against git cat-file and fsck --strict'), validatePly('write: root commit (edit changes)'), git('test/probes/probes.test.js', PROBES), probePly('push.first-commit-empty-repo#root/art-ply'), probeGit('push.first-commit-empty-repo#root/art-git')),
     notes: [],
   }),
   b({
     id: 'push.fast-forward-update', area: 'push',
     description: 'A fast-forward update with the current old id lands.',
     ops: [PUSH, EDIT_FILE],
-    tests: [t('test/push.test.js', PUSH_MATRIX)],
-    status: verified(git('test/push.test.js', PUSH_MATRIX), validatePly('write: edit README find/replace (c1)'), plyWorker('edit/ok')),
+    tests: [t('test/push.test.js', PUSH_MATRIX), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/push.test.js', PUSH_MATRIX), validatePly('write: edit README find/replace (c1)'), plyWorker('edit/ok'), git('test/probes/probes.test.js', PROBES), probePly('push.fast-forward-update#plain/art-ply'), probeGit('push.fast-forward-update#plain/art-git')),
     notes: [],
   }),
   b({
     id: 'push.non-fast-forward', area: 'push',
     description: 'A non-fast-forward update: refused under receive.denyNonFastForwards, accepted as a forced update otherwise.',
     ops: [PUSH],
-    tests: [t('test/push.test.js', "'nonff-update': t =>"), t('test/push.test.js', "'deny-nonff': { 'receive.denyNonFastForwards': 'true' }")],
-    status: verified(git('test/push.test.js', "'nonff-update': t =>"), phase2Git('non_ff_reject'), compat('force_push/scratch/v2')),
-    notes: ['No ply probe has pushed a non-fast-forward to Artifacts.'],
+    tests: [t('test/push.test.js', "'nonff-update': t =>"), t('test/push.test.js', "'deny-nonff': { 'receive.denyNonFastForwards': 'true' }"), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/push.test.js', "'nonff-update': t =>"), phase2Git('non_ff_reject'), compat('force_push/scratch/v2'), git('test/probes/probes.test.js', PROBES), probePly('push.non-fast-forward#with-old-id/art-ply'), probeGit('push.non-fast-forward#with-old-id/art-git')),
+    notes: [],
   }),
   b({
     id: 'push.delete-ref', area: 'push',
     description: 'A command with the zero new id deletes a ref (delete-refs); refused under receive.denyDeletes.',
     ops: [PUSH, DELETE_BRANCH],
-    tests: [t('test/push.test.js', "'delete': t =>"), t('test/push.test.js', "'deny-deletes': { 'receive.denyDeletes': 'true' }")],
-    status: verified(git('test/push.test.js', "'delete': t =>"), validatePly('branch delete (CAS ok)'), plyWorker('branch/delete'), compat('tag_push_delete/scratch/v2')),
+    tests: [t('test/push.test.js', "'delete': t =>"), t('test/push.test.js', "'deny-deletes': { 'receive.denyDeletes': 'true' }"), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/push.test.js', "'delete': t =>"), validatePly('branch delete (CAS ok)'), plyWorker('branch/delete'), compat('tag_push_delete/scratch/v2'), git('test/probes/probes.test.js', PROBES), probePly('push.delete-ref#plain/art-ply'), probeGit('push.delete-ref#plain/art-git')),
     notes: [],
   }),
   b({
     id: 'push.atomic', area: 'push',
     description: 'atomic: several ref updates land together or not at all.',
     ops: [PUSH, PUSH_PACK, RUN_TRANSFER],
-    tests: [t('test/push.test.js', "'multi-atomic': t =>"), t('test/push-pack.test.js', 'atomic: checked against the advertisement, then sent; two refs land together')],
-    status: verified(git('test/push-pack.test.js', 'atomic: checked against the advertisement, then sent; two refs land together'), compat('atomic_push_multi_ref/scratch/v2')),
-    notes: ['No ply probe has sent an atomic push to Artifacts, and none has made one of its commands fail there.'],
+    tests: [t('test/push.test.js', "'multi-atomic': t =>"), t('test/push-pack.test.js', 'atomic: checked against the advertisement, then sent; two refs land together'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/push-pack.test.js', 'atomic: checked against the advertisement, then sent; two refs land together'), compat('atomic_push_multi_ref/scratch/v2'), git('test/probes/probes.test.js', PROBES), probePly('push.atomic#all-land/art-ply'), probePly('push.atomic#one-stale/art-ply'), probeGit('push.atomic#all-land/art-git'), probeGit('push.atomic#one-stale/art-git')),
+    notes: ['The one-stale variant makes one command fail at the server: another writer moves its ref while the request is held.'],
   }),
   b({
     id: 'push.non-atomic-partial', area: 'push',
     description: 'A non-atomic multi-ref push the server applies in part is push_partial, naming what landed.',
     ops: [PUSH],
-    tests: [t('test/push.test.js', "assert.equal(err.code, 'push_partial'")],
-    status: verified(git('test/push.test.js', "assert.equal(err.code, 'push_partial'")),
-    notes: ['No Artifacts evidence of any kind for a partly applied push.'],
+    tests: [t('test/push.test.js', "assert.equal(err.code, 'push_partial'"), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/push.test.js', "assert.equal(err.code, 'push_partial'"), git('test/probes/probes.test.js', PROBES), probePly('push.non-atomic-partial#one-stale/art-ply'), probeGit('push.non-atomic-partial#one-stale/art-git')),
+    notes: ['Probed by a two-ref push while another writer moves one ref (test/probes/scenarios.ts). Per-check outcomes are in the private run record.'],
   }),
   b({
     id: 'push.report-status', area: 'push',
@@ -603,17 +608,17 @@ const PUSHES: readonly BehaviourIn<'push'>[] = [
     id: 'push.size-limits', area: 'push',
     description: 'A push over the server\'s object or pack size cap is refused with a report ply classifies as limit_exceeded.',
     ops: [PUSH, PUSH_PACK],
-    tests: [t('test/push-unpack-host.test.js', 'Artifacts 64 MiB cap is limit_exceeded with got/max in bytes, not push_rejected or ambiguous')],
-    status: verified(phase2Git('blob_push_ceiling'), compat('large_blob_push_24m/scratch/v2'), hostileWrite('pack/zlib_bomb_40m')),
-    notes: ['ply\'s classification is tested only on report bytes copied into a fake. Neither git (receive.maxInputSize) nor Artifacts has refused a ply push for size in a recorded run.'],
+    tests: [t('test/push-unpack-host.test.js', 'Artifacts 64 MiB cap is limit_exceeded with got/max in bytes, not push_rejected or ambiguous'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(phase2Git('blob_push_ceiling'), compat('large_blob_push_24m/scratch/v2'), hostileWrite('pack/zlib_bomb_40m'), git('test/probes/probes.test.js', PROBES), probePly('push.size-limits#pack-over-cap/art-ply'), probeGit('push.size-limits#pack-over-cap/art-git')),
+    notes: ['A 66 MiB pack against a 64 MiB cap. ply classifies the server\'s stated cap as limit_exceeded; git http-backend (receive.maxInputSize) refuses with `unpacker error`, its reason on band 2 only, which ply reports as push_rejected: an expected difference, test/probes/allow.ts.'],
   }),
   b({
     id: 'push.many-ref-updates', area: 'push',
     description: 'One push carrying many ref updates.',
     ops: [PUSH],
-    tests: [],
-    status: verified(phase2Git('many_refs_5000'), hostileWrite('ref/fifty_updates')),
-    notes: ['ply can send any number of commands; no test sends more than a few.'],
+    tests: [t('test/probes/probes.test.js', PROBES)],
+    status: verified(phase2Git('many_refs_5000'), hostileWrite('ref/fifty_updates'), git('test/probes/probes.test.js', PROBES), probePly('push.many-ref-updates#fifty-creates/art-ply'), probeGit('push.many-ref-updates#fifty-creates/art-git')),
+    notes: ['The probe sends 50 creates in one push; no other test sends more than a few.'],
   }),
   b({
     id: 'push.signed-push', area: 'push',
@@ -630,9 +635,9 @@ const CONCURRENCY: readonly BehaviourIn<'concurrency'>[] = [
     id: 'concurrency.stale-old-oid', area: 'concurrency',
     description: 'A push whose old id is no longer the ref\'s value is refused (compare-and-swap) and the ref is unchanged.',
     ops: [PUSH, PUSH_PACK, EDIT_FILE],
-    tests: [t('test/push.test.js', "'stale-old': t =>"), t('test/push-pack.test.js', 'a stale old oid is cas_conflict, as push reports it'), t('test/custom-exchange.test.js', 'receive-pack refuses a command (stale old id)')],
-    status: verified(git('test/push.test.js', "'stale-old': t =>"), git('test/push-pack.test.js', 'a stale old oid is cas_conflict, as push reports it'), phase2Git('force_with_lease_stale')),
-    notes: ['The validate CAS checks (stale head, stale delete) are refused by ply-web from ls-refs, before any push: Artifacts refusing a stale ply push has no recorded run. artifacts-compat.test.js emulates its reason with a proxy.'],
+    tests: [t('test/push.test.js', "'stale-old': t =>"), t('test/push-pack.test.js', 'a stale old oid is cas_conflict, as push reports it'), t('test/custom-exchange.test.js', 'receive-pack refuses a command (stale old id)'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/push.test.js', "'stale-old': t =>"), git('test/push-pack.test.js', 'a stale old oid is cas_conflict, as push reports it'), phase2Git('force_with_lease_stale'), git('test/probes/probes.test.js', PROBES), probePly('concurrency.stale-old-oid#race/art-ply'), probePly('concurrency.stale-old-oid#direct/art-ply'), probeGit('concurrency.stale-old-oid#race/art-git')),
+    notes: ['The validate CAS checks (stale head, stale delete) are refused by ply-web from ls-refs, before any push. The probe run sends the stale old id to Artifacts itself: directly from ply, and from a race (another writer moves the ref while the receive-pack request is held) from ply and stock git.'],
   }),
   b({
     id: 'concurrency.concurrent-writers', area: 'concurrency',
@@ -645,18 +650,18 @@ const CONCURRENCY: readonly BehaviourIn<'concurrency'>[] = [
   b({
     id: 'concurrency.ref-created-between-read-and-push', area: 'concurrency',
     description: 'Another writer creates the target ref between ply\'s ls-refs and its receive-pack: the create is refused, naming the winner.',
-    ops: [CREATE_BRANCH, CREATE_TAG, COMMIT_CHANGES],
-    tests: [t('test/e2e-customer.test.js', 'createBranch and createTag lose a race to a ref made between ls-refs and receive-pack: cas_conflict naming the winner'), t('test/changes-create-race.test.js', 'commitChanges creating a ref from a base')],
-    status: verified(git('test/e2e-customer.test.js', 'createBranch and createTag lose a race to a ref made between ls-refs and receive-pack: cas_conflict naming the winner')),
-    notes: ['No Artifacts evidence: validate\'s duplicate-branch check is refused by ply-web from ls-refs, before receive-pack.'],
+    ops: [PUSH, CREATE_BRANCH, CREATE_TAG, COMMIT_CHANGES],
+    tests: [t('test/e2e-customer.test.js', 'createBranch and createTag lose a race to a ref made between ls-refs and receive-pack: cas_conflict naming the winner'), t('test/changes-create-race.test.js', 'commitChanges creating a ref from a base'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/e2e-customer.test.js', 'createBranch and createTag lose a race to a ref made between ls-refs and receive-pack: cas_conflict naming the winner'), git('test/probes/probes.test.js', PROBES), probePly('concurrency.ref-created-between-read-and-push#race/art-ply'), probeGit('concurrency.ref-created-between-read-and-push#race/art-git')),
+    notes: ['validate\'s duplicate-branch check is refused by ply-web from ls-refs, before receive-pack; the probe run\'s race reaches receive-pack.'],
   }),
   b({
     id: 'concurrency.ref-deleted-between-read-and-push', area: 'concurrency',
     description: 'Another writer deletes the target ref between ply\'s read and its push.',
-    ops: [COMMIT_CHANGES],
-    tests: [t('test/changes-delete-race.test.js', 'head pinned to the base: a target deleted mid-call is cas_conflict and stays deleted')],
-    status: verified(git('test/changes-delete-race.test.js', 'head pinned to the base: a target deleted mid-call is cas_conflict and stays deleted')),
-    notes: ['No Artifacts evidence.'],
+    ops: [PUSH, COMMIT_CHANGES],
+    tests: [t('test/changes-delete-race.test.js', 'head pinned to the base: a target deleted mid-call is cas_conflict and stays deleted'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/changes-delete-race.test.js', 'head pinned to the base: a target deleted mid-call is cas_conflict and stays deleted'), git('test/probes/probes.test.js', PROBES), probePly('concurrency.ref-deleted-between-read-and-push#race/art-ply'), probeGit('concurrency.ref-deleted-between-read-and-push#race/art-git')),
+    notes: [],
   }),
   b({
     id: 'concurrency.read-after-write', area: 'concurrency',
@@ -670,9 +675,9 @@ const CONCURRENCY: readonly BehaviourIn<'concurrency'>[] = [
     id: 'concurrency.empty-report-under-contention', area: 'concurrency',
     description: 'A receive-pack 200 with no unpack or ref lines (seen on Artifacts under same-repo concurrency) is ambiguous, never landed.',
     ops: [PUSH, CLASSIFY_REPORT],
-    tests: [t('test/push-unpack-host.test.js', 'an empty receive-pack report stays ambiguous (concurrent same-repo 200 with no unpack/ref lines)')],
-    status: IMPLEMENTED,
-    notes: ['Tested on recorded bytes only; no recorded run reproduces the empty report.'],
+    tests: [t('test/push-unpack-host.test.js', 'an empty receive-pack report stays ambiguous (concurrent same-repo 200 with no unpack/ref lines)'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/probes/probes.test.js', PROBES), probePly('concurrency.empty-report-under-contention#distinct-refs/art-ply'), probePly('concurrency.empty-report-under-contention#same-ref/art-ply'), probeGit('concurrency.empty-report-under-contention#distinct-refs/art-git'), probeGit('concurrency.empty-report-under-contention#same-ref/art-git')),
+    notes: ['Probed with 8 concurrent pushes to one repository (8 distinct refs; one ref from 8 contenders); every push a client called landed is checked against the refs stock git reads back. Per-check outcomes are in the private run record.'],
   }),
   b({
     id: 'concurrency.two-transfer-runners', area: 'concurrency',
@@ -690,25 +695,25 @@ const TAGS: readonly BehaviourIn<'tags'>[] = [
   b({
     id: 'tags.lightweight-create', area: 'tags',
     description: 'A lightweight tag is a ref create under refs/tags pointing at a commit.',
-    ops: [CREATE_TAG],
-    tests: [t('test/e2e-customer.test.js', TAG_TEST)],
-    status: verified(git('test/e2e-customer.test.js', TAG_TEST), validatePly('tag lightweight')),
+    ops: [PUSH, CREATE_TAG],
+    tests: [t('test/e2e-customer.test.js', TAG_TEST), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/e2e-customer.test.js', TAG_TEST), validatePly('tag lightweight'), git('test/probes/probes.test.js', PROBES), probePly('tags.lightweight-create#plain/art-ply'), probeGit('tags.lightweight-create#plain/art-git')),
     notes: [],
   }),
   b({
     id: 'tags.annotated-create', area: 'tags',
     description: 'An annotated tag pushes a tag object with its ref, byte-equal to git tag -a.',
-    ops: [CREATE_TAG],
-    tests: [t('test/e2e-customer.test.js', TAG_TEST)],
-    status: verified(git('test/e2e-customer.test.js', TAG_TEST), validatePly('tag annotated'), validateGit('git judge: fsck --strict, refs, history')),
+    ops: [PUSH, CREATE_TAG],
+    tests: [t('test/e2e-customer.test.js', TAG_TEST), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/e2e-customer.test.js', TAG_TEST), validatePly('tag annotated'), validateGit('git judge: fsck --strict, refs, history'), git('test/probes/probes.test.js', PROBES), probePly('tags.annotated-create#plain/art-ply'), probeGit('tags.annotated-create#plain/art-git')),
     notes: [],
   }),
   b({
     id: 'tags.delete', area: 'tags',
     description: 'A tag delete with the expected old id; a stale expected id is refused.',
-    ops: [DELETE_TAG],
-    tests: [t('test/e2e-customer.test.js', 'deleteTag')],
-    status: verified(git('test/e2e-customer.test.js', 'deleteTag'), validatePly('tag delete (CAS) + stale delete -> 409'), compat('tag_push_delete/scratch/v2')),
+    ops: [PUSH, DELETE_TAG],
+    tests: [t('test/e2e-customer.test.js', 'deleteTag'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/e2e-customer.test.js', 'deleteTag'), validatePly('tag delete (CAS) + stale delete -> 409'), compat('tag_push_delete/scratch/v2'), git('test/probes/probes.test.js', PROBES), probePly('tags.delete#plain/art-ply'), probeGit('tags.delete#plain/art-git')),
     notes: ['The stale half of the validate check is refused by ply-web from ls-refs, not by Artifacts.'],
   }),
   b({
@@ -743,9 +748,9 @@ const ANCESTRY: readonly BehaviourIn<'ancestry'>[] = [
   b({
     id: 'ancestry.merge-commit-push', area: 'ancestry',
     description: 'A two-parent merge commit pushed as a fast-forward of the target; history visible to git as a merge.',
-    ops: [MERGE_BRANCH],
-    tests: [t('test/merge.test.js', 'outcomes: up-to-date, fast-forward, ff-only refusal, no-ff merge commit, clean merge, conflict')],
-    status: verified(git('test/merge.test.js', 'outcomes: up-to-date, fast-forward, ff-only refusal, no-ff merge commit, clean merge, conflict'), validatePly('merge feat into main (true merge)'), plyWorker('merge/true'), plyWorker('merge/verify'), phase2Git('shape/merges')),
+    ops: [PUSH, MERGE_BRANCH],
+    tests: [t('test/merge.test.js', 'outcomes: up-to-date, fast-forward, ff-only refusal, no-ff merge commit, clean merge, conflict'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/merge.test.js', 'outcomes: up-to-date, fast-forward, ff-only refusal, no-ff merge commit, clean merge, conflict'), validatePly('merge feat into main (true merge)'), plyWorker('merge/true'), plyWorker('merge/verify'), phase2Git('shape/merges'), git('test/probes/probes.test.js', PROBES), probePly('ancestry.merge-commit-push#two-parents/art-ply'), probeGit('ancestry.merge-commit-push#two-parents/art-git')),
     notes: [],
   }),
   b({
@@ -854,9 +859,9 @@ const INTERRUPTED: readonly BehaviourIn<'interrupted'>[] = [
     id: 'interrupted.push-response-lost', area: 'interrupted',
     description: 'The server applies a push but the response is lost: ply reports ambiguous, the refs show the push, a retry is safe.',
     ops: [PUSH, RUN_TRANSFER, EDIT_FILE],
-    tests: [t('test/adversarial.test.js', 'ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct'), t('test/transfer-outcomes.test.js', 'a push applied whose response is dropped: the refs show it, the run goes on to done')],
-    status: verified(git('test/adversarial.test.js', 'ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct'), git('test/transfer-outcomes.test.js', 'a push applied whose response is dropped: the refs show it, the run goes on to done')),
-    notes: ['No Artifacts evidence: no run has cut a push response from Artifacts.'],
+    tests: [t('test/adversarial.test.js', 'ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct'), t('test/transfer-outcomes.test.js', 'a push applied whose response is dropped: the refs show it, the run goes on to done'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/adversarial.test.js', 'ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct'), git('test/transfer-outcomes.test.js', 'a push applied whose response is dropped: the refs show it, the run goes on to done'), git('test/probes/probes.test.js', PROBES), probePly('interrupted.push-response-lost#cut/art-ply'), probeGit('interrupted.push-response-lost#cut/art-git')),
+    notes: ['Probe: the recording proxy reads the server\'s whole answer, then cuts the connection. Stock git (libcurl) re-sends a POST whose reused connection closed with no answer; on git http-backend the replay is refused by compare-and-swap and git then finds the ref up to date (test/probes/scenarios.ts).'],
   }),
   b({
     id: 'interrupted.push-body-cut', area: 'interrupted',

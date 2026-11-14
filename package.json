@@ -144,6 +144,7 @@
     "test:spaces": "vitest run test/space/registry.test.js",
     "spaces": "node --import ./test/ts-resolve.mjs scripts/spaces.mjs",
     "coverage-matrix": "node --import ./test/ts-resolve.mjs scripts/coverage-matrix.mjs",
+    "probes": "node --import ./test/ts-resolve.mjs scripts/probes.mjs",
     "sweep": "node --import ./test/ts-resolve.mjs test/sweep/run.mjs"
   },
   "license": "MIT",
