@@ -18,7 +18,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { SCENARIOS } from '../test/probes/scenarios.ts';
 import { ALLOW } from '../test/probes/allow.ts';
-import { compareScenario, evaluablePairs, judge } from '../test/probes/evaluate.ts';
+import { compareScenario, evaluablePairs, judge, runsFor } from '../test/probes/evaluate.ts';
 import { startReference, runScenario, newTracer } from '../test/probes/runner.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -50,17 +50,21 @@ const scenarios = SCENARIOS.filter(s => only === null || only.split(',').some(o 
 const targets = artifacts ? ['ref-ply', 'ref-git', 'art-ply', 'art-git'] : ['ref-ply', 'ref-git'];
 const ref = await startReference();
 const results = [], diffs = [], evaluated = [], errors = [];
+// an interrupted run still revokes the open repository's tokens and deletes it
+let open = null;
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(sig, async () => { console.error(`${sig}: closing the open repository`); if (open !== null) await open.close(); process.exit(130); });
 const t0 = Date.now();
 for (const s of scenarios) {
   const runs = {}, record = { id: s.id, targets: {} };
   let names = {};
-  for (const t of targets) {
+  // a scenario one client cannot send at all is not run for it (no repository is created for it)
+  for (const t of targets.filter(x => runsFor(s, x.endsWith('-git') ? 'git' : 'ply'))) {
     const root = mkdtempSync(join(tmpdir(), 'ply-probe-'));
     const { tracer, spans } = newTracer();
     let handle = null, proxy = ref.proxy, repoPath, before = ref.proxy.exchanges.length;
     const started = Date.now();
     try {
-      if (t.startsWith('art-')) { handle = await art.open(`${s.id}/${t}`); proxy = handle.proxy; repoPath = handle.repoPath; before = 0; }
+      if (t.startsWith('art-')) { handle = await art.open(`${s.id}/${t}`); open = handle; proxy = handle.proxy; repoPath = handle.repoPath; before = 0; }
       else repoPath = (await ref.repo(s)).repoPath;
       const r = await runScenario(s, { name: t, client: t.slice(4), proxy, repoPath }, { tracer, root });
       runs[t] = r.observation; names = r.byOid;
@@ -71,7 +75,7 @@ for (const s of scenarios) {
     } finally {
       record.targets[t].exchanges = proxy.exchanges.slice(before);
       record.targets[t].spans = spans();
-      if (handle !== null) await handle.close();
+      if (handle !== null) { open = null; await handle.close(); }
       rmSync(root, { recursive: true, force: true });
     }
     const st = record.targets[t];
@@ -98,7 +102,7 @@ if (art !== null) console.log(`tokens: ${art.tokens.length} minted (auto ${art.t
 
 if (outDir !== null) {
   mkdirSync(outDir, { recursive: true });
-  const checks = artifacts ? scenarios.flatMap(s => ['art-ply', 'art-git'].map(t => `${s.id}/${t}`)) : [];
+  const checks = artifacts ? scenarios.flatMap(s => ['art-ply', 'art-git'].filter(t => runsFor(s, t === 'art-git' ? 'git' : 'ply')).map(t => `${s.id}/${t}`)) : [];
   // each finding with the cf-ray of every request the client under test made in the scenario's steps, per target
   const raysOf = (id, t) => (results.find(x => x.id === id)?.targets[t]?.stepExchanges ?? []).flat().filter(e => e.channel === 'main').map(e => ({ method: e.method, status: e.status, cfRay: e.cfRay, fault: e.fault }));
   const findings = verdict.findings.map(f => ({ ...f, rays: Object.fromEntries(f.pair.split('~').filter(t => t.startsWith('art-')).map(t => [t, raysOf(f.scenario, t)])) }));

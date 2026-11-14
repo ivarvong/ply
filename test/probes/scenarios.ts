@@ -3,7 +3,7 @@
 // non-fast-forward), then the plain transitions the hard ones are read against. Each is a pure plan; the runner
 // (test/probes/runner.mjs) seeds a fresh repository per target, runs the steps, and stock git judges the result.
 import { ABSENT } from './types.js';
-import type { CommitSpec, Expectation, Fault, FileSpec, FinalRef, Move, NonEmpty, ObjectSpec, OidExpr, Outcome, Push, RefAt, Scenario, StepExpect, TagSpec, Update } from './types.js';
+import type { CommitSpec, Damage, Expectation, Fault, Timeouts, FileSpec, FinalRef, Move, NonEmpty, ObjRef, ObjectSpec, OidExpr, Outcome, Push, RefAt, Scenario, StepExpect, TagSpec, Update } from './types.js';
 
 const text = (path: string, s: string): FileSpec => ({ path, content: { tag: 'text', text: s } });
 const noise = (path: string, seed: string, bytes: number): FileSpec => ({ path, content: { tag: 'noise', seed, bytes } });
@@ -19,7 +19,7 @@ const both = (e: StepExpect): Expectation => ({ tag: 'one', ply: e, git: e });
 const LANDED: Expectation = both(one('landed', null));
 const finalAt = (ref: string, name: string): FinalRef => ({ tag: 'at', ref, at: name });
 const absent = (ref: string): FinalRef => ({ tag: 'absent', ref });
-const pushOf = (updates: NonEmpty<Update>, atomic = false): Push => ({ updates, atomic });
+const pushOf = (updates: NonEmpty<Update>, atomic = false): Push => ({ updates, atomic, omit: [], pack: { tag: 'objects' } });
 const MAIN = 'refs/heads/main';
 const SIDE = 'refs/heads/side';
 
@@ -34,7 +34,8 @@ const EXACT = { tag: 'exact' } as const;
 const PLAIN = { referenceConfig: [], compare: EXACT } as const;
 const SAME = { tag: 'same' } as const;
 const NO_FAULT = { tag: 'none' } as const;
-const step = (push: Push, fault: Fault = NO_FAULT) => ({ tag: 'push', push, fault, git: SAME }) as const;
+const FULL = { tag: 'full' } as const;
+const step = (push: Push, fault: Fault = NO_FAULT) => ({ tag: 'push', push, fault, git: SAME, ply: SAME, from: FULL, timeouts: null }) as const;
 const nonEmpty = <T>(xs: readonly T[]): NonEmpty<T> => {
   const [first, ...rest] = xs;
   if (first === undefined) throw new Error('nonEmpty: empty list');
@@ -50,6 +51,27 @@ const MIB = 1024 * 1024;
 const BIG = commit('big', ['base'], [noise('big/a.bin', 'a', 22 * MIB), noise('big/b.bin', 'b', 22 * MIB), noise('big/c.bin', 'c', 22 * MIB)]);
 const MANY = 50;
 
+// ---- days 5-6 batch B objects ----
+// x: a child of ff; a depth-2 shallow fetch of x holds x and ff, with base below the boundary
+const X = commit('x', ['ff'], [text('f.txt', 'x\n')]);
+// ghost and thin: siblings of ff; ghost is never on the target and holds the blob a thin pack names as its delta base
+const LINES = Array.from({ length: 200 }, (_, i) => `line ${i}\n`).join('');
+const GHOST = commit('ghost', ['base'], [text('t.txt', LINES)]);
+const THIN = commit('thin', ['base'], [text('t.txt', `${LINES}one more\n`)]);
+// y changes f.txt on ff; z adds copy.txt holding the same blob as dir/n.txt, which a blob:none clone never fetched
+const Y = commit('y', ['ff'], [text('f.txt', 'y\n')]);
+const Z = commit('z', ['ff'], [text('copy.txt', 'nested\n')]);
+const blob = (of: string, path: string): ObjRef => ({ tag: 'blob', of, path });
+const hand = (push: Push, deltaBase: ObjRef | null, delta: 'literal' | 'copy-past-end', damage: Damage): Push => ({ ...push, pack: { tag: 'hand', deltaBase, delta, damage } });
+const NO_GIT_PACK = { tag: 'none', why: 'stock git writes its own packs; this pack is written by the harness and sent by ply (pushPack)' } as const;
+const handStep = (push: Push) => ({ tag: 'push', push, fault: NO_FAULT, git: NO_GIT_PACK, ply: SAME, from: FULL, timeouts: null }) as const;
+// ---- days 5-6 batch C objects and steps ----
+// mid: 2 MiB of incompressible content on base, so a cut or a stall lands inside the pack
+const MID = commit('mid', ['base'], [noise('mid.bin', 'mid', 2 * MIB)]);
+const fetchStep = (want: string, fault: Fault, timeouts: Timeouts = null) => ({ tag: 'fetch', ref: MAIN, want, fault, git: SAME, timeouts }) as const;
+const STALL_MS = 20_000;
+const REFUSED_PACK = { tag: 'one', ply: one('rejected', 'push_rejected'), git: null } as const;
+
 export const SCENARIOS: readonly Scenario[] = [
   {
     id: 'concurrency.stale-old-oid#race',
@@ -64,7 +86,7 @@ export const SCENARIOS: readonly Scenario[] = [
     id: 'concurrency.stale-old-oid#direct',
     description: 'ply sends a push whose old id (base) is already stale (main is at diverged): the server refuses it, main unchanged.',
     seed: { objects: CORE, refs: [at(MAIN, 'diverged')] },
-    steps: [{ tag: 'push', push: pushOf([upd(MAIN, o('base'), o('ff'))]), fault: NO_FAULT, git: { tag: 'none', why: 'stock git checks --force-with-lease against its own advertisement and refuses client side ("stale info"); the race variant is its server-side form' } }],
+    steps: [{ tag: 'push', push: pushOf([upd(MAIN, o('base'), o('ff'))]), fault: NO_FAULT, from: FULL, timeouts: null, ply: SAME, git: { tag: 'none', why: 'stock git checks --force-with-lease against its own advertisement and refuses client side ("stale info"); the race variant is its server-side form' } }],
     expect: [{ tag: 'one', ply: one('conflict', 'cas_conflict'), git: null }],
     final: [finalAt(MAIN, 'diverged')],
     ...PLAIN,
@@ -300,6 +322,166 @@ export const SCENARIOS: readonly Scenario[] = [
       { tag: 'many', ply: contenders.map(() => 'landed' as const), git: contenders.map(() => 'landed' as const) },
     ],
     final: contenders.map(c => finalAt(`refs/heads/p-${c.name}`, c.name)),
+    ...PLAIN,
+  },
+  // ---- days 5-6 batch B: packs ply sends as written, shallow and partial clients ----
+  {
+    id: 'pack.push-thin-against-server-base#literal-delta',
+    description: 'ply pushes thin (t.txt of thin as a REF_DELTA against base:f.txt, which the server holds): the server completes it and the push lands.',
+    seed: { objects: [...CORE, GHOST, THIN], refs: [at(MAIN, 'base')] },
+    steps: [{ ...handStep(hand(pushOf([upd(MAIN, o('base'), o('thin'))]), blob('base', 'f.txt'), 'literal', 'none')), git: SAME }],
+    expect: [LANDED],
+    final: [finalAt(MAIN, 'thin')],
+    ...PLAIN,
+  },
+  {
+    id: 'pack.push-thin-missing-base#ghost-base',
+    description: 'ply pushes a pack whose only blob is a REF_DELTA against ghost:t.txt, which the server never had: refused, main unchanged.',
+    seed: { objects: [...CORE, GHOST, THIN], refs: [at(MAIN, 'base')] },
+    steps: [handStep(hand(pushOf([upd(MAIN, o('base'), o('thin'))]), blob('ghost', 't.txt'), 'literal', 'none'))],
+    expect: [REFUSED_PACK],
+    final: [finalAt(MAIN, 'base')],
+    ...PLAIN,
+  },
+  {
+    id: 'pack.push-malformed-object-refused#missing-blob',
+    description: 'ply pushes base->ff in a pack missing ff\'s new f.txt blob (the tree names it): refused, main unchanged.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base')] },
+    steps: [handStep({ ...hand(pushOf([upd(MAIN, o('base'), o('ff'))]), null, 'literal', 'none'), omit: [blob('ff', 'f.txt')] })],
+    expect: [REFUSED_PACK],
+    final: [finalAt(MAIN, 'base')],
+    ...PLAIN,
+  },
+  {
+    id: 'pack.push-malformed-object-refused#delta-copy-past-end',
+    description: 'ply pushes base->ff with ff\'s blob as a REF_DELTA against base:f.txt whose copy reads past the end of the base: refused, main unchanged.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base')] },
+    steps: [handStep(hand(pushOf([upd(MAIN, o('base'), o('ff'))]), blob('base', 'f.txt'), 'copy-past-end', 'none'))],
+    expect: [REFUSED_PACK],
+    final: [finalAt(MAIN, 'base')],
+    ...PLAIN,
+  },
+  ...(['bad-trailer', 'bad-zlib', 'truncated'] as const).map((damage): Scenario => ({
+    id: `pack.push-corrupt-pack-refused#${damage}`,
+    description: `ply pushes base->ff in a pack with ${damage === 'bad-trailer' ? 'a wrong trailing SHA-1' : damage === 'bad-zlib' ? 'an object whose zlib stream fails its Adler-32 check (trailer recomputed)' : 'only its first half'}: refused, main unchanged.`,
+    seed: { objects: CORE, refs: [at(MAIN, 'base')] },
+    steps: [handStep(hand(pushOf([upd(MAIN, o('base'), o('ff'))]), null, 'literal', damage))],
+    expect: [REFUSED_PACK],
+    final: [finalAt(MAIN, 'base')],
+    ...PLAIN,
+  })),
+  {
+    id: 'push.from-shallow-clone#boundary-held',
+    description: 'main at ff; stock git pushes x (a child of ff) from a depth-2 shallow fetch of x (boundary ff, which the server holds): lands.',
+    seed: { objects: [...CORE, X], refs: [at(MAIN, 'ff')] },
+    steps: [{ ...step(pushOf([upd(MAIN, o('ff'), o('x'))])), from: { tag: 'shallow', tip: 'x', depth: 2 } }],
+    expect: [LANDED],
+    final: [finalAt(MAIN, 'x')],
+    ...PLAIN,
+  },
+  {
+    id: 'push.from-shallow-clone#history-missing',
+    description: 'An empty repository; ply pushes x with ff but without base (the history below a depth-2 shallow boundary): refused as a missing object, no ref created.',
+    seed: { objects: [...CORE, X], refs: [] },
+    steps: [{ ...step({ ...pushOf([upd(MAIN, ZERO, o('x'))]), omit: [{ tag: 'commit', name: 'base' }] }), git: { tag: 'none', why: 'stock git sends its shallow boundary with such a push; that form is the shallow-update variant' } }],
+    expect: [{ tag: 'one', ply: one('rejected', 'push_rejected'), git: null }],
+    final: [absent(MAIN)],
+    ...PLAIN,
+  },
+  {
+    id: 'push.from-shallow-clone#shallow-update',
+    // git http-backend refuses this by default ("shallow update not allowed"); the reference runs with
+    // receive.shallowUpdate=true, the receiver this scenario compares against
+    description: 'An empty repository; stock git pushes x from a depth-2 shallow fetch (x and ff, base below the boundary), sending its shallow line; with receive.shallowUpdate=true the push lands and the repository records ff as a shallow boundary.',
+    seed: { objects: [...CORE, X], refs: [] },
+    steps: [{ ...step(pushOf([upd(MAIN, ZERO, o('x'))])), from: { tag: 'shallow', tip: 'x', depth: 2 }, ply: { tag: 'none', why: 'ply keeps no shallow state and sends no shallow line; its form is the history-missing variant' } }],
+    expect: [{ tag: 'one', ply: one('landed', null), git: one('landed', null) }],
+    final: [finalAt(MAIN, 'x')],
+    referenceConfig: [['receive.shallowUpdate', 'true']],
+    compare: EXACT,
+  },
+  {
+    id: 'push.from-partial-clone#blob-none',
+    description: 'main at ff; each client first fetches main with filter blob:none, then pushes y (f.txt changed): lands.',
+    seed: { objects: [...CORE, Y], refs: [at(MAIN, 'ff')] },
+    steps: [{ ...step(pushOf([upd(MAIN, o('ff'), o('y'))])), from: { tag: 'partial' } }],
+    expect: [LANDED],
+    final: [finalAt(MAIN, 'y')],
+    ...PLAIN,
+  },
+  {
+    id: 'push.from-partial-clone#reuse-absent-blob',
+    description: 'main at ff; from a blob:none clone, push z, whose new tree names dir/n.txt\'s blob (never fetched) at copy.txt: lands, and the blob is not sent.',
+    seed: { objects: [...CORE, Z], refs: [at(MAIN, 'ff')] },
+    steps: [{ ...step(pushOf([upd(MAIN, o('ff'), o('z'))])), from: { tag: 'partial' } }],
+    expect: [LANDED],
+    final: [finalAt(MAIN, 'z')],
+    ...PLAIN,
+  },
+  // ---- days 5-6 batch C: a request body cut, stalls on both sides, a fetch answer dropped midway ----
+  {
+    id: 'interrupted.push-body-cut#half',
+    // the 2 MiB body is over git's http.postBuffer, so git streams it (after a 4-byte probe request) and cannot re-send
+    // it: both clients say ambiguous, and each one's retry must land: the server applied nothing of the cut body
+    description: 'A push base->mid (2 MiB) whose request body stops halfway and is aborted: nothing lands; each client says ambiguous and its retry lands; fsck clean.',
+    seed: { objects: [...CORE, MID], refs: [at(MAIN, 'base')] },
+    steps: [step(pushOf([upd(MAIN, o('base'), o('mid'))]), { tag: 'cut-request', fraction: 0.5 }), step(pushOf([upd(MAIN, o('base'), o('mid'))]))],
+    expect: [both(one('ambiguous', 'ambiguous')), LANDED],
+    final: [finalAt(MAIN, 'mid')],
+    ...PLAIN,
+  },
+  {
+    id: 'interrupted.stall-timeouts#push-request-stall',
+    description: `A push base->mid whose request body stops halfway for ${STALL_MS / 1000} s, then finishes: the server waits for it and the push lands.`,
+    seed: { objects: [...CORE, MID], refs: [at(MAIN, 'base')] },
+    steps: [step(pushOf([upd(MAIN, o('base'), o('mid'))]), { tag: 'stall-request', fraction: 0.5, ms: STALL_MS })],
+    expect: [LANDED],
+    final: [finalAt(MAIN, 'mid')],
+    ...PLAIN,
+  },
+  {
+    id: 'interrupted.stall-timeouts#push-request-stall-10s',
+    description: 'A push base->mid whose request body stops halfway for 10 s, then finishes: the server waits for it and the push lands.',
+    seed: { objects: [...CORE, MID], refs: [at(MAIN, 'base')] },
+    steps: [step(pushOf([upd(MAIN, o('base'), o('mid'))]), { tag: 'stall-request', fraction: 0.5, ms: 10_000 })],
+    expect: [LANDED],
+    final: [finalAt(MAIN, 'mid')],
+    ...PLAIN,
+  },
+  {
+    id: 'interrupted.stall-timeouts#push-response-stall',
+    description: 'The server applies base->ff and its answer is held 4 s against a 1 s client timer: ply says ambiguous (typed), stock git gives up with no report; main is at ff.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base')] },
+    steps: [{ ...step(pushOf([upd(MAIN, o('base'), o('ff'))]), { tag: 'stall-response', ms: 4000 }), timeouts: { ms: 1000 } }],
+    expect: [{ tag: 'one', ply: one('ambiguous', 'ambiguous'), git: one('ambiguous', 'ambiguous') }],
+    final: [finalAt(MAIN, 'ff')],
+    ...PLAIN,
+  },
+  {
+    id: 'interrupted.stall-timeouts#fetch-request-stall',
+    description: `A fetch of main (mid) whose request body stops halfway for ${STALL_MS / 1000} s, then finishes: the server waits and the pack arrives.`,
+    seed: { objects: [...CORE, MID], refs: [at(MAIN, 'mid')] },
+    steps: [fetchStep('mid', { tag: 'stall-request', fraction: 0.5, ms: STALL_MS })],
+    expect: [LANDED],
+    final: [finalAt(MAIN, 'mid')],
+    ...PLAIN,
+  },
+  {
+    id: 'interrupted.stall-timeouts#fetch-response-stall',
+    description: 'A fetch of main whose answer is held 4 s against a 1 s client timer: each client fails with a timeout, nothing is half-written.',
+    seed: { objects: [...CORE, MID], refs: [at(MAIN, 'mid')] },
+    steps: [fetchStep('mid', { tag: 'stall-response', ms: 4000 }, { ms: 1000 })],
+    expect: [{ tag: 'one', ply: one('rejected', 'timeout'), git: one('rejected', 'timeout') }],
+    final: [finalAt(MAIN, 'mid')],
+    ...PLAIN,
+  },
+  {
+    id: 'interrupted.fetch-dropped-mid-response#half',
+    description: 'A fetch of main (mid, 2 MiB) whose answer stops halfway (connection closed): each client fails, never a partial result.',
+    seed: { objects: [...CORE, MID], refs: [at(MAIN, 'mid')] },
+    steps: [fetchStep('mid', { tag: 'drop-response', fraction: 0.5 })],
+    expect: [{ tag: 'one', ply: one('rejected', 'network'), git: one('rejected', 'fetch_failed') }],
+    final: [finalAt(MAIN, 'mid')],
     ...PLAIN,
   },
 ];

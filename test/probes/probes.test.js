@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SCENARIOS } from './scenarios.ts';
 import { ALLOW } from './allow.ts';
-import { compareScenario, evaluablePairs, judge, gitOutcome, plyOutcome, classify } from './evaluate.ts';
+import { compareScenario, evaluablePairs, judge, gitOutcome, plyOutcome, classify, runsFor } from './evaluate.ts';
 import { startReference, runScenario, newTracer } from './runner.mjs';
 import { BEHAVIOURS } from '../behaviours/matrix.ts';
 import { ABSENT } from './types.ts';
@@ -29,11 +29,12 @@ test('every scenario probes a matrix behaviour, ids are unique, plans are closed
       ...s.seed.objects.flatMap(o => (o.tag === 'commit' ? o.parents : [o.target])),
       ...s.steps.flatMap(st => (st.tag === 'push' ? [st.push] : st.tag === 'concurrent' ? st.pushes : []).flatMap(p => p.updates.flatMap(u => [u.old, u.new]))).filter(e => e.tag === 'obj').map(e => e.name),
       ...s.steps.flatMap(st => (st.tag === 'push' && st.fault.tag === 'race' ? st.fault.moves.map(m => m.to) : [])).filter(e => e.tag === 'obj').map(e => e.name),
+      ...s.steps.flatMap(st => (st.tag === 'fetch' ? [st.want] : [])),
       ...s.final.flatMap(f => (f.tag === 'at' ? [f.at] : f.tag === 'one-of' ? f.names.filter(n => n !== ABSENT) : [])),
     ];
     for (const n of refs) assert.ok(defined.has(n), `${s.id}: ${n} is not a seed object`);
     s.seed.objects.forEach((o, i) => { if (o.tag === 'commit') for (const p of o.parents) assert.ok(s.seed.objects.slice(0, i).some(x => x.name === p), `${s.id}: ${o.name}'s parent ${p} must come first`); });
-    s.expect.forEach((e, i) => assert.equal(e.tag === 'many', s.steps[i].tag !== 'push', `${s.id}: step ${i}: a concurrent or retry step takes a multiset expectation`));
+    s.expect.forEach((e, i) => assert.equal(e.tag === 'many', s.steps[i].tag === 'concurrent' || s.steps[i].tag === 'retry-unlanded', `${s.id}: step ${i}: a concurrent or retry step takes a multiset expectation`));
     s.steps.forEach((st, i) => { if (st.tag === 'retry-unlanded') assert.ok(st.of < i && s.steps[st.of].tag === 'concurrent', `${s.id}: step ${i} retries an earlier concurrent step`); });
   }
   // and the other way: a matrix behaviour that cites this file has a scenario here
@@ -119,7 +120,7 @@ const diffs = [], evaluated = [];
 for (const s of SCENARIOS) {
   test(`probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository`, async () => {
     const runs = {}; let names = {};
-    for (const t of ['ref-ply', 'ref-git']) {
+    for (const t of ['ref-ply', 'ref-git'].filter(x => runsFor(s, x === 'ref-git' ? 'git' : 'ply'))) {
       const root = mkdtempSync(join(tmpdir(), 'ply-probe-'));
       try {
         const repo = await ref.repo(s);

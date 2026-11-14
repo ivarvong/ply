@@ -39,6 +39,14 @@ const OK_FLAGS = new Set([' ', '+', '-', '*', '=']);
 // non-zero exit is a push whose answer git never read: ambiguous.
 // `creates`: the refs the plan creates (zero old id). git refuses a create of a ref its advertisement already shows as
 // "non-fast-forward" (or "fetch first"): for a create that is the conflict, not a history rule.
+// `git fetch`: landed when it exits 0; a low-speed abort is the timeout class, anything else a failed fetch.
+export function gitFetchOutcome(status: number | null, stderr: string): Classified {
+  const tail = stderr.trim().split('\n').slice(-3).join(' | ').slice(0, 300);
+  if (status === 0) return { outcome: 'landed', error: null, detail: 'fetched' };
+  if (/too slow|timed out|Timeout was reached/i.test(stderr)) return { outcome: 'rejected', error: 'timeout', detail: tail };
+  return { outcome: 'rejected', error: 'fetch_failed', detail: tail };
+}
+
 export function gitOutcome(status: number | null, stdout: string, stderr: string, creates: ReadonlySet<string> = new Set()): Classified {
   const refs = stdout.split('\n').filter(l => /^[ +\-*=!]\t[^\t]*:[^\t]*\t/.test(l)).map(l => {
     const [flag = '!', spec = '', summary = ''] = l.split('\t');
@@ -126,8 +134,15 @@ const CLAIMS_PAIR: { readonly [T in Target]: Pair } = { 'ref-ply': 'ref-ply~clai
 export function claimDiffs(s: Scenario, target: Target, obs: Observation, names: Names): Difference[] {
   const last = s.steps.length - 1;
   const step = s.steps[last], seen = obs.steps[last];
-  if (step === undefined || seen === undefined || (clientOf(target) === 'git' && step.git.tag === 'none')) return [];
-  const pushesOf = (st: Step): readonly Push[] => (st.tag === 'push' ? [st.push] : st.tag === 'concurrent' ? st.pushes : (() => { const of = s.steps[st.of]; return of === undefined || of.tag === 'retry-unlanded' ? [] : pushesOf(of); })());
+  if (step === undefined || seen === undefined || (clientOf(target) === 'git' && step.git.tag === 'none') || (clientOf(target) === 'ply' && step.tag === 'push' && step.ply.tag === 'none')) return [];
+  const pushesOf = (st: Step): readonly Push[] => {
+    switch (st.tag) {
+      case 'push': return [st.push];
+      case 'concurrent': return st.pushes;
+      case 'fetch': return [];
+      case 'retry-unlanded': { const of = s.steps[st.of]; return of === undefined || of.tag === 'retry-unlanded' ? [] : pushesOf(of); }
+    }
+  };
   const pushes = pushesOf(step);
   const byName = Object.fromEntries(Object.entries(names).map(([oid, n]) => [n, oid]));
   const out: Difference[] = [];
@@ -194,6 +209,8 @@ export type Verdict = {
 
 const has = (ds: readonly Difference[], s: string, p: Pair, f: Field | null): boolean => ds.some(d => d.scenario === s && d.pair === p && (f === null || d.field === f));
 const noGitForm = (s: Scenario): boolean => s.steps.some(st => st.git.tag === 'none');
+// a scenario one client cannot run at all: its targets are not run, so no pair with them is evaluated
+export const runsFor = (s: Scenario, c: Client): boolean => (c === 'git' ? !s.steps.every(st => st.git.tag === 'none') : !s.steps.every(st => st.tag === 'push' && st.ply.tag === 'none'));
 
 export function classify(s: Scenario, d: Difference, all: readonly Difference[]): { readonly class: FindingClass; readonly why: string } {
   const plyRefWrong = has(all, s.id, 'ref-ply~expect', null);

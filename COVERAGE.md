@@ -19,7 +19,7 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 
 ## Summary
 
-**107** behaviours: **91** verified, **6** implemented, **10** unsupported. Of the verified, **69** carry some Artifacts evidence and **44** carry evidence of ply itself against Artifacts.
+**109** behaviours: **94** verified, **5** implemented, **10** unsupported. Of the verified, **73** carry some Artifacts evidence and **52** carry evidence of ply itself against Artifacts.
 
 | area | behaviours | verified | implemented | unsupported |
 |---|---:|---:|---:|---:|
@@ -27,38 +27,37 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 | caps | 9 | 6 | 0 | 3 |
 | fetch | 20 | 19 | 0 | 1 |
 | pack | 12 | 12 | 0 | 0 |
-| push | 16 | 15 | 0 | 1 |
+| push | 18 | 17 | 0 | 1 |
 | concurrency | 7 | 7 | 0 | 0 |
 | tags | 5 | 5 | 0 | 0 |
 | ancestry | 7 | 6 | 1 | 0 |
 | errors | 7 | 3 | 3 | 1 |
-| interrupted | 6 | 5 | 1 | 0 |
+| interrupted | 6 | 6 | 0 | 0 |
 | http | 10 | 6 | 1 | 3 |
-| **all** | **107** | **91** | **6** | **10** |
+| **all** | **109** | **94** | **5** | **10** |
 
 Verified behaviours by evidence kind (a behaviour counts once under each kind it has):
 
 | evidence kind | verified behaviours |
 |---|---:|
-| `ply_vs_reference_git` | 85 |
-| `ply_vs_artifacts` | 44 |
-| `native_git_vs_artifacts` | 44 |
+| `ply_vs_reference_git` | 90 |
+| `ply_vs_artifacts` | 52 |
+| `native_git_vs_artifacts` | 50 |
 | `wire_probe_vs_artifacts` | 18 |
 
 ## Gaps
 
 Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed under the first of these classes that holds:
 
-### Exercised by ply, judged by nothing independent (6)
+### Exercised by ply, judged by nothing independent (5)
 
 - `ancestry.cut-graph`: A server that withholds ancestors without saying shallow: ply fails closed, nothing pushed.
 - `errors.http-status-classes`: Statuses 4xx/5xx/429 at each stage map to ply's typed classes, and a refused optional feature is not retried for them.
 - `errors.err-pkt-line`: An ERR pkt-line anywhere in a response is a typed remote error carrying the scrubbed message.
 - `errors.not-git-response`: A 200 that is not git (HTML, wrong content type) is not_git, never parsed as protocol.
-- `interrupted.stall-timeouts`: A server that stalls before the first byte or mid-body is ended by the first-byte or idle timer, typed timeout.
 - `http.sideband-keepalive`: Empty band-1 keepalives while a hook runs do not end the push read.
 
-### Verified against git http-backend only: no evidence of any kind from Artifacts (22)
+### Verified against git http-backend only: no evidence of any kind from Artifacts (21)
 
 - `refs.advertisement-shapes`: Unusual but legal listings (duplicate names, ordering, raw bytes in names) are read as git reads them.
 - `caps.required-capabilities`: A server missing a capability ply needs (ls-refs, fetch) is refused as unsupported before any operation.
@@ -78,12 +77,11 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `push.sideband-hook-output`: side-band-64k on receive-pack: the report on band 1, hook output on band 2.
 - `push.hook-rejection`: A pre-receive or update hook that declines: ng with the hook's reason, ref unchanged.
 - `concurrency.two-transfer-runners`: Two resumable transfers of one plan at once both finish with the planned head; each refused step is settled by reading refs.
-- `interrupted.fetch-dropped-mid-response`: A fetch or advertisement response dropped or cut mid-body is a typed network error or pack_corrupt, never a partial result.
 - `interrupted.abort-during-push`: An external AbortSignal during a push: aborted if the body was never pulled, ambiguous once sent; git decides what landed.
 - `interrupted.resumable-transfer`: A multi-step transfer paused or interrupted is resumed from refs, not from local state, and ends at the planned head.
 - `http.redirects`: A 3xx on the advertisement is followed as git follows it (within policy); a 3xx on a POST is never followed.
 
-### Artifacts observed by stock git or wire probes, never by ply (25)
+### Artifacts observed by stock git or wire probes, never by ply (21)
 
 - `caps.receive-pack-capabilities`: receive-pack capabilities (report-status, report-status-v2, side-band-64k, atomic, push-options, delete-refs, ofs-delta, object-format) are read and checked before the POST.
 - `fetch.want-tip-full-pack`: want of a tip with done and no filter: the pack holds exactly what pack-objects sends.
@@ -100,13 +98,9 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `fetch.thin-pack`: thin-pack with haves: deltas against objects the client has, resolved against external bases.
 - `fetch.ofs-delta-requested`: ofs-delta: OFS_DELTA entries only when asked for.
 - `pack.push-ofs-delta-accepted`: receive-pack accepts a pushed pack with OFS_DELTA entries when it advertises ofs-delta.
-- `pack.push-thin-missing-base`: receive-pack refuses a thin pushed pack whose base it does not hold, and moves no ref.
-- `pack.push-corrupt-pack-refused`: receive-pack refuses a corrupt pushed pack (unpack error, ng for every ref) and moves no ref.
-- `pack.push-malformed-object-refused`: receive-pack refuses a well-framed pack that holds a malformed object or a delta with no base.
 - `push.push-options`: push-options: sent only when advertised; they reach the hook.
 - `push.ref-name-rules`: receive-pack's ref-name rules ("funny refname"): ply refuses before the wire exactly what receive-pack refuses.
 - `tags.many-tags`: A repository with many tags: listing, include-tag and fetch stay correct.
-- `interrupted.push-body-cut`: A push request body that fails midway: nothing lands; failure before the first body pull is definite, after it ambiguous.
 - `http.credential-forms`: Bearer, Basic and URL-userinfo credentials produce the Authorization header git sends for the same input.
 - `http.chunked-request-body`: A large push body streamed with chunked transfer-encoding (duplex half).
 - `http.large-request-body`: A large push request body (tens of MiB) reaches the server whole.
@@ -792,11 +786,11 @@ Evidence:
 | `pack.corrupt-served-pack` | verified | ply↔git | `parsePack`, `scanPack`, `fetchPack` | 2 |
 | `pack.served-pack-limits` | verified | ply↔git | `parsePack`, `resolvePackRange` | 3 |
 | `pack.push-ofs-delta-accepted` | verified | ply↔git, wire↔Artifacts | `push`, `pushPack` | 2 |
-| `pack.push-thin-against-server-base` | verified | ply↔git, ply↔Artifacts, wire↔Artifacts | `editFile`, `push` | 1 |
-| `pack.push-thin-missing-base` | verified | wire↔Artifacts | `pushPack` | 0 |
-| `pack.push-corrupt-pack-refused` | verified | ply↔git, wire↔Artifacts | `pushPack`, `classifyReport` | 3 |
+| `pack.push-thin-against-server-base` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `editFile`, `push` | 2 |
+| `pack.push-thin-missing-base` | verified | ply↔git, ply↔Artifacts, wire↔Artifacts | `pushPack` | 1 |
+| `pack.push-corrupt-pack-refused` | verified | ply↔git, ply↔Artifacts, wire↔Artifacts | `pushPack`, `classifyReport` | 4 |
 | `pack.push-duplicate-object` | verified | ply↔git | `push` | 1 |
-| `pack.push-malformed-object-refused` | verified | wire↔Artifacts | `pushPack` | 0 |
+| `pack.push-malformed-object-refused` | verified | ply↔git, ply↔Artifacts, wire↔Artifacts | `pushPack` | 1 |
 
 #### `pack.ofs-delta-resolve`
 
@@ -915,12 +909,16 @@ Ops: `src/edit.ts` `editFile`, `src/push.ts` `push`.
 Tests:
 
 - `test/edges.test.js`: push = commit + 100 tree deltas + blob delta
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/edges.test.js`
 - ply↔Artifacts: validate-7b0c310f: `write: edit README find/replace (c1)`
 - wire↔Artifacts: loadgen-phase5-delta-20261025: `push/thin_ok`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-thin-against-server-base#literal-delta/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `pack.push-thin-against-server-base#literal-delta/art-git`
 
 #### `pack.push-thin-missing-base`
 
@@ -928,11 +926,17 @@ receive-pack refuses a thin pushed pack whose base it does not hold, and moves n
 
 Ops: `src/receivecaps.ts` `pushPack`.
 
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
 Evidence:
 
 - wire↔Artifacts: loadgen-phase5-delta-20261025: `push/thin_missing`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-thin-missing-base#ghost-base/art-ply`
 
-> pushPack can send such a pack but no test does; only a hand-built probe has checked Artifacts.
+> pushPack carries a thin pack whose delta base the server lacks in the probes, against the reference and Artifacts.
 
 #### `pack.push-corrupt-pack-refused`
 
@@ -945,6 +949,7 @@ Tests:
 - `test/push-pack.test.js`: a corrupt pack against stock git
 - `test/custom-exchange.test.js`: a corrupt pack: the report is unpackFailed
 - `test/push-unpack-host.test.js`: the echoed shape is unpackFailed and decides push_rejected; delete-only stays ambiguous
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
@@ -954,8 +959,12 @@ Evidence:
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `pack/truncated`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `pack/bad_magic`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `pack/wrong_object_count`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-corrupt-pack-refused#bad-trailer/art-ply`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-corrupt-pack-refused#bad-zlib/art-ply`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-corrupt-pack-refused#truncated/art-ply`
 
-> ply's reading of Artifacts' own unpack-failure report is tested only on bytes copied from prod into a fake (push-unpack-host.test.js).
+> ply's reading of Artifacts' own unpack-failure report is tested on bytes copied from prod into a fake (push-unpack-host.test.js) and live by the corrupt-pack probes (bad trailer, bad zlib, truncated).
 
 #### `pack.push-duplicate-object`
 
@@ -977,14 +986,21 @@ receive-pack refuses a well-framed pack that holds a malformed object or a delta
 
 Ops: `src/receivecaps.ts` `pushPack`.
 
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
 Evidence:
 
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `pack/invalid_commit_payload`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `pack/delta_missing_base`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-malformed-object-refused#missing-blob/art-ply`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-malformed-object-refused#delta-copy-past-end/art-ply`
 
-> ply's encoders never write a malformed object (the encode-*-fsck tests); pushPack could carry one but no test does.
+> ply's encoders never write a malformed object (the encode-*-fsck tests); the probes carry one through pushPack: a commit naming a missing blob, a delta copying past its base.
 
-### Push and receive-pack (`push`, 16)
+### Push and receive-pack (`push`, 18)
 
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
@@ -1004,6 +1020,8 @@ Evidence:
 | `push.size-limits` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push`, `pushPack` | 2 |
 | `push.many-ref-updates` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push` | 1 |
 | `push.signed-push` | unsupported (observed) | git↔Artifacts | — | 0 |
+| `push.from-shallow-clone` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push` | 1 |
+| `push.from-partial-clone` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `fetchPack`, `push` | 1 |
 
 #### `push.create-ref`
 
@@ -1305,6 +1323,46 @@ Unsupported: ply signs commits (src/sign.ts) but never sends a push certificate.
 Observed:
 
 - git↔Artifacts: loadgen-phase2-20261025: `signed_push`
+
+#### `push.from-shallow-clone`
+
+A push from a shallow clone: when the server holds the boundary commit the push lands; when it lacks the history below the boundary the push is refused and no ref moves.
+
+Ops: `src/push.ts` `push`.
+
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `push.from-shallow-clone#boundary-held/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `push.from-shallow-clone#boundary-held/art-git`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `push.from-shallow-clone#history-missing/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `push.from-shallow-clone#shallow-update/art-git`
+
+> ply keeps no shallow state; its form of the push is the same objects without the history below the boundary.
+
+> The stock git push into a repository without the boundary history is compared against git http-backend with receive.shallowUpdate=true.
+
+#### `push.from-partial-clone`
+
+A push from a blob:none partial clone sends only the new objects, including a tree that names a blob the client never fetched, and lands.
+
+Ops: `src/fetchpack.ts` `fetchPack`, `src/push.ts` `push`.
+
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `push.from-partial-clone#blob-none/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `push.from-partial-clone#blob-none/art-git`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `push.from-partial-clone#reuse-absent-blob/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `push.from-partial-clone#reuse-absent-blob/art-git`
 
 ### Concurrent updates and stale refs (`concurrency`, 7)
 
@@ -1824,9 +1882,9 @@ Observed:
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
 | `interrupted.push-response-lost` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `runTransfer`, `editFile` | 3 |
-| `interrupted.push-body-cut` | verified | ply↔git, wire↔Artifacts | `push`, `pushPack` | 2 |
-| `interrupted.fetch-dropped-mid-response` | verified | ply↔git | `fetchPack`, `readFile` | 2 |
-| `interrupted.stall-timeouts` | implemented | — | `exchangeClock`, `createTransport` | 2 |
+| `interrupted.push-body-cut` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push`, `pushPack` | 3 |
+| `interrupted.fetch-dropped-mid-response` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `fetchPack`, `readFile` | 3 |
+| `interrupted.stall-timeouts` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `exchangeClock`, `createTransport` | 3 |
 | `interrupted.abort-during-push` | verified | ply↔git | `push`, `pushPack`, `runTransfer` | 2 |
 | `interrupted.resumable-transfer` | verified | ply↔git | `runTransfer` | 1 |
 
@@ -1862,12 +1920,16 @@ Tests:
 
 - `test/custom-exchange.test.js`: a body stream that errors midway: a typed error from the iteration, the span records it, nothing lands
 - `test/push-pack-preabort.test.js`: push with a pack sent as bytes: a signal already fired is the definite aborted with no request; a rejected fetch stays ambiguous
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/custom-exchange.test.js`
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `http/partial_send_once`
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `http/cl_larger_than_body`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.push-body-cut#half/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.push-body-cut#half/art-git`
 
 #### `interrupted.fetch-dropped-mid-response`
 
@@ -1879,12 +1941,16 @@ Tests:
 
 - `test/adversarial.test.js`: HTTP-level faults at every stage: statuses, non-git bodies, stall, drop, empty
 - `test/http-options.test.js`: a body that fails mid-read is the network error it is
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/space/pack-cut.test.js`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.fetch-dropped-mid-response#half/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.fetch-dropped-mid-response#half/art-git`
 
-> No Artifacts evidence: no run has dropped an Artifacts upload-pack response.
+> The probe proxy drops an upload-pack response halfway, against the reference and Artifacts.
 
 #### `interrupted.stall-timeouts`
 
@@ -1896,8 +1962,23 @@ Tests:
 
 - `test/http-options.test.js`: the transport reads the parsed timeout: the span carries it and a stalled request ends at it
 - `test/workerd.test.js`: workerd: first-byte and idle timeouts; a long steady body or upload is not cut
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
-> Stalls are injected; no recorded run checks Artifacts' own idle limits.
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-request-stall/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-request-stall/art-git`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-request-stall-10s/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-request-stall-10s/art-git`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-response-stall/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-response-stall/art-git`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#fetch-request-stall/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#fetch-request-stall/art-git`
+- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#fetch-response-stall/art-ply`
+- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#fetch-response-stall/art-git`
+
+> The probe proxy injects the stalls: request-body stalls of 10 s and 20 s and a response stall against a 1 s client timeout, on push and fetch; each check's outcome is kept in the private run record.
 
 #### `interrupted.abort-during-push`
 
@@ -2109,4 +2190,5 @@ Observed:
 | `loadgen-phase6-plyw-20261025` | 2026-10-25 | ply↔Artifacts | 39 | ply-artifacts-loadgen phase 6: the deployed ply Worker (ply-web) against Artifacts: reads, edits, CAS, races, merges, errors; stock git judges. |
 | `probes-20261114t1745-5jxl` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 42 | ply differential probes (scripts/probes.mjs --artifacts; plans in test/probes/scenarios.ts, probe code d18a262915bc7c56): each scenario seeded with identical objects into a fresh Artifacts repository per client (namespace ply-loadgen) and into git http-backend with Artifacts' known policy; ply and stock git 2.47.3 run the same plan; a recording proxy injects the fault (held receive-pack while another writer moves refs, or a cut answer) and keeps the cf-ray of every request; stock git judges (ls-remote --symref, mirror clone, fsck --strict, rev-list --parents, merge-base); test/probes/evaluate.ts compares. |
 | `probes-20261114t1837-53b4` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 10 | ply differential probes, days 5-6 batch A (scripts/probes.mjs --artifacts, probe code b55fa846fcd21188 on ply 06042f8): race shapes (delete against an update, create against a create, delete against an update at once), a create of a ref that exists, and a retry of every push that did not land under contention; same harness as probes-20261114t1745-5jxl, with the proxy also keeping the commands of each receive-pack request and the refs of each advertisement; stock git 2.47.3. |
+| `probes-20261114t1909-sl8l` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 30 | ply differential probes, days 5-6 batches B and C (scripts/probes.mjs --artifacts, probe code 7c155a159f2bda27 on ply 55205ae; one code comment in scenarios.ts reworded since): hand-built packs sent through pushPack (a thin pack against a base the server has and one whose base it lacks, a commit naming a missing blob, a delta copying past its base, a bad trailer, bad zlib, a truncated pack), pushes from a shallow clone and from a blob:none partial clone, a push body cut halfway, request and response stalls on push and fetch against set client timeouts, and an upload-pack response dropped halfway; same harness as probes-20261114t1837-53b4, with the proxy also injecting request-side faults and recording the socket error of a failed upstream call; stock git git version 2.47.3. |
 

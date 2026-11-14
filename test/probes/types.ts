@@ -46,18 +46,58 @@ export type Move = { readonly ref: string; readonly to: OidExpr };
 // cut-response  the step's first receive-pack POST is forwarded and the server's whole answer read, then the client's
 //               connection is destroyed before a byte of it: the server applied (or refused) a push the client never
 //               hears about
+// cut-request    the step's request is forwarded only up to `fraction` of its body, then the upstream request is
+//                aborted and the client's connection destroyed: the server reads a body that stops halfway
+// stall-request  the body is forwarded up to `fraction`, then nothing for `ms`, then the rest: the server's idle limit
+// stall-response the server's whole answer is held `ms` before the client gets a byte: the client's own timer
+// drop-response  the client gets the status, headers and `fraction` of the body, then the connection is destroyed
+// For a push step the fault is on the first receive-pack POST of `main`; for a fetch step, the first upload-pack POST
+// of `main` that carries command=fetch.
 export type Fault =
   | { readonly tag: 'none' }
   | { readonly tag: 'race'; readonly moves: NonEmpty<Move> }
-  | { readonly tag: 'cut-response' };
+  | { readonly tag: 'cut-response' }
+  | { readonly tag: 'cut-request'; readonly fraction: number }
+  | { readonly tag: 'stall-request'; readonly fraction: number; readonly ms: number }
+  | { readonly tag: 'stall-response'; readonly ms: number }
+  | { readonly tag: 'drop-response'; readonly fraction: number };
+// The client's own timers for a step: ply's firstByteTimeoutMs and idleTimeoutMs limits; stock git's
+// http.lowSpeedLimit=1 with http.lowSpeedTime the same span rounded up to a second. null: each client's defaults.
+export type Timeouts = { readonly ms: number } | null;
 
 // How stock git renders a push, or why it cannot: some scenarios have no native-git form (git checks a lease client
 // side, so a plain stale old id never reaches the server from git).
 export type GitForm = { readonly tag: 'same' } | { readonly tag: 'none'; readonly why: string };
 
-export type Push = { readonly updates: NonEmpty<Update>; readonly atomic: boolean };
+// An object of the seed, by name: a commit, or the blob at a path of a commit's tree.
+export type ObjRef = { readonly tag: 'commit'; readonly name: string } | { readonly tag: 'blob'; readonly of: string; readonly path: string };
+// How a pack is damaged after it is built (the trailer is recomputed except for bad-trailer and truncated):
+//   bad-trailer  the trailing SHA-1 is wrong      bad-zlib  an object's zlib stream fails its Adler-32 check
+//   truncated    the pack ends halfway through    none      intact
+export const DAMAGE = ['none', 'bad-trailer', 'bad-zlib', 'truncated'] as const;
+export type Damage = (typeof DAMAGE)[number];
+// objects  ply's own push: ply builds the pack from the objects (the pushed objects not reachable from the seed's refs,
+//          minus `omit`)
+// hand     the same objects as a pack the harness writes and ply sends as is (pushPack): the first blob sent as a
+//          REF_DELTA against `deltaBase` when it is set (a valid literal-only delta, or one whose copy reads past the end
+//          of its base), then damaged. Stock git cannot send such a pack, so a step carrying one has no native-git form.
+export type PackForm =
+  | { readonly tag: 'objects' }
+  | { readonly tag: 'hand'; readonly deltaBase: ObjRef | null; readonly delta: 'literal' | 'copy-past-end'; readonly damage: Damage };
+export type Push = { readonly updates: NonEmpty<Update>; readonly atomic: boolean; readonly omit: readonly ObjRef[]; readonly pack: PackForm };
+// Where the pushing client's repository came from:
+//   full     the client holds every seed object (ply: the plan's objects; git: the seed store)
+//   shallow  git pushes from `git fetch --depth <depth>` of `tip` out of the seed store (ply, which has no shallow
+//            state, sends the objects the plan names, minus `omit`)
+//   partial  each client first fetches the target's main with filter blob:none (ply: fetchPack, checked to carry no
+//            blob; git: clone --filter=blob:none), then the new objects are added locally and pushed
+export type From = { readonly tag: 'full' } | { readonly tag: 'shallow'; readonly tip: string; readonly depth: number } | { readonly tag: 'partial' };
 export type Step =
-  | { readonly tag: 'push'; readonly push: Push; readonly fault: Fault; readonly git: GitForm }
+  // `ply`: whether ply has a form of this push (ply keeps no shallow state, so it cannot send git's shallow lines)
+  | { readonly tag: 'push'; readonly push: Push; readonly fault: Fault; readonly git: GitForm; readonly ply: GitForm; readonly from: From; readonly timeouts: Timeouts }
+  // fetch `want` (a seed object `ref` points at): ply fetchPack of it, stock git `git fetch <url> <ref>` into an empty
+  // repository; landed means the wanted object arrived
+  | { readonly tag: 'fetch'; readonly ref: string; readonly want: string; readonly fault: Fault; readonly git: GitForm; readonly timeouts: Timeouts }
   // every push starts at once (Promise.all for ply; concurrent processes for git); each on its own connection
   | { readonly tag: 'concurrent'; readonly pushes: NonEmpty<Push>; readonly git: GitForm }
   // once step `of` (a concurrent step) is over, every push of it that did not land is sent again, one at a time, with
