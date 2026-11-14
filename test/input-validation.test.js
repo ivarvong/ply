@@ -86,7 +86,6 @@ const STACK = [
   ['packSubset', [['source', O, true], ['pack', O, true], ['selection', [], true, [null, 5, O]], ['options', O, false]]],
   ['planTransfer', [['pack', O, true], ['resolved', O, true], ['options', O, true]]],
   ['copyTree', [['dst', O, true], ['from', O, true], ['options', O, true]]],
-  ['decodeSavedIndex', [['bytes', new Uint8Array(0), true, [null, 5, [], O]], ['want', O, true]]],
   ['loadTransferPack', [['dst', O, true], ['source', O, true], ['saved', O, true], ['options', O, false]]],
   ['pushPack', [['transport', O, true], ['options', O, true]]],
 ];
@@ -103,6 +102,16 @@ for (const [name, args] of STACK) {
     }
   });
 }
+// decodeSavedIndex keeps one error union (README "Results"): a wrong-shape argument is its `bad_argument` refusal,
+// by `tag` like the other seven, naming the argument.
+test('decodeSavedIndex: a wrong-shape bytes or want is the bad_argument refusal naming it, never a throw (#296-2)', async () => {
+  const { decodeSavedIndex } = await index();
+  for (const bad of [null, undefined, 5, [], O]) assert.deepEqual(decodeSavedIndex(bad, O), { ok: false, error: { tag: 'bad_argument', what: 'bytes' } }, show(bad));
+  for (const bad of [null, undefined, 5, []]) assert.deepEqual(decodeSavedIndex(new Uint8Array(0), bad), { ok: false, error: { tag: 'bad_argument', what: 'want' } }, show(bad));
+  const { describeSavedIndexRefusal } = await index();
+  assert.equal(describeSavedIndexRefusal({ tag: 'bad_argument', what: 'bytes' }), 'decodeSavedIndex: bytes must be a Uint8Array');
+  assert.equal(describeSavedIndexRefusal({ tag: 'bad_argument', what: 'want' }), 'decodeSavedIndex: want must be an object');
+});
 test('transferStatus and runTransfer answer null with a coded Err, no throw (#296-2)', async () => {
   const { transferStatus, runTransfer } = await index();
   for (const fn of [transferStatus, runTransfer]) await coded(fn.name, () => fn(null, null, null, null, null));

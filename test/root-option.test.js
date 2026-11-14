@@ -22,8 +22,34 @@ test('Option constructors and helpers are root exports and behave as README says
   assert.equal(isSome(none), false);
   assert.equal(isNone(none), true);
   const h = { some: v => `some:${v.length}`, none: () => 'none' };
-  assert.equal(matchOption(s, h), 'some:3');
-  assert.equal(matchOption(none, h), 'none');
+  assert.deepEqual(matchOption(s, h), { ok: true, value: 'some:3' });
+  assert.deepEqual(matchOption(none, h), { ok: true, value: 'none' });
+});
+
+// #296 at the root: an argument that is not an Option is no Option. Expected from README "Saved pack index": isSome and
+// isNone answer false, matchOption answers bad_request naming the argument, and a branch that throws is bad_request
+// naming 'matchOption handler' with the thrown value as cause. None of them throws.
+test('the root Option helpers answer a wrong shape as a value, never a throw (#296)', () => {
+  const h = { some: () => 1, none: () => 2 };
+  for (const bad of [null, undefined, 5, 'some', [], {}, { tag: 'other' }]) {
+    assert.equal(isSome(bad), false, String(bad));
+    assert.equal(isNone(bad), false, String(bad));
+    const r = matchOption(bad, h);
+    assert.deepEqual([r.ok, r.error.code, r.error.what], [false, 'bad_request', 'option'], String(bad));
+  }
+  assert.equal(isSome({ tag: 'some', value: 0 }), true);
+  assert.equal(isNone({ tag: 'none' }), true);
+  for (const bad of [null, undefined, 5, [], {}, { some: () => 1 }, { none: () => 2 }, { some: 1, none: () => 2 }, { some: () => 1, none: 'x' }]) {
+    for (const o of [some(1), none]) {
+      const r = matchOption(o, bad);
+      assert.deepEqual([r.ok, r.error.code, r.error.what], [false, 'bad_request', 'handlers'], JSON.stringify(bad));
+    }
+  }
+  const boom = new Error('boom');
+  for (const o of [some(1), none]) {
+    const r = matchOption(o, { some: () => { throw boom; }, none: () => { throw boom; } });
+    assert.deepEqual([r.ok, r.error.code, r.error.what, r.error.cause], [false, 'bad_request', 'matchOption handler', boom]);
+  }
 });
 
 test('encodeSavedIndex takes the root none, and decodeSavedIndex gives none back for an unresolved index', async () => {

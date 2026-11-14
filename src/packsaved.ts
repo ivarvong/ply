@@ -22,8 +22,9 @@
 // without ids finds no REF base), resolved columns the index
 // contradicts or whose bases do not form chains ending at a whole object or a thin base: see checkResolved).
 // loadTransferPack (transferload.ts) turns any refusal into a fresh scan and says why on its span.
-import type { ErrorOf, PlyError } from './errors.js';
-import { fail, argsError } from './errors.js';
+import type { PlyError } from './errors.js';
+import { fail } from './errors.js';
+import { isArgObject } from './absent.js';
 import type { Option, Result } from './result.js';
 import { ok, err, some, none, isSome, assertNever } from './result.js';
 import type { RangeSource, Halt, Halted } from './rangesource.js';
@@ -62,7 +63,10 @@ export type SavedIndexRefusal =
   | { readonly tag: 'corrupt' }
   | { readonly tag: 'other_pack'; readonly saved: PackIdentity; readonly want: PackIdentity }
   | { readonly tag: 'malformed'; readonly field: string; readonly index: number }
-  | { readonly tag: 'limit_exceeded'; readonly what: 'pack objects'; readonly got: number; readonly max: number };
+  | { readonly tag: 'limit_exceeded'; readonly what: 'pack objects'; readonly got: number; readonly max: number }
+  // decodeSavedIndex's own arguments of the wrong shape (#296): `bytes` not a Uint8Array, `want` not an object. A
+  // tag like every other refusal, so the error stays one union a caller switches on by `tag` (README, #301-3).
+  | { readonly tag: 'bad_argument'; readonly what: 'bytes' | 'want' };
 
 const refused = (r: SavedIndexRefusal): Result<never, SavedIndexRefusal> => err(r);
 const malformed = (field: string, index = -1): Result<never, SavedIndexRefusal> => refused({ tag: 'malformed', field, index });
@@ -121,6 +125,7 @@ export function describeRefusal(r: SavedIndexRefusal): string {
     case 'other_pack': return `saved index is of pack ${r.saved.trailer} (${r.saved.bytes} B), not ${r.want.trailer} (${r.want.bytes} B)`;
     case 'limit_exceeded': return `saved index has ${r.got} entries by its header, over limits.maxPackObjects ${r.max}`;
     case 'malformed': return `saved index ${r.field} is not one a scan gives${r.index >= 0 ? ` (entry ${r.index})` : ''}`;
+    case 'bad_argument': return r.what === 'bytes' ? 'decodeSavedIndex: bytes must be a Uint8Array' : 'decodeSavedIndex: want must be an object';
   }
   // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(r);
@@ -389,9 +394,10 @@ export function decodeSavedBytes(bytes: Uint8Array, want: PackIdentity, maxDelta
   return ok({ pack, resolved: some(resolvedIndexOf(r, statsOf(c.view, c.at))) });
 }
 
-// The public entry: the arguments' shape first (#296: null bytes or want is bad_request naming it, not a TypeError).
-export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity, maxDeltaChain: number = DEFAULT_LIMITS.maxDeltaChain, maxPackObjects: number = DEFAULT_LIMITS.maxPackObjects): Result<SavedIndex, SavedIndexRefusal | ErrorOf<'bad_request'>> {
-  const shape = argsError('decodeSavedIndex', [['bytes', bytes, 'bytes'], ['want', want, 'object']]);
-  if (shape !== null) return shape;
+// The public entry: the arguments' shape first (#296: a non-Uint8Array `bytes` or a non-object `want` is the
+// `bad_argument` refusal naming it, not a TypeError). loadTransferPack calls decodeSavedBytes on bytes it checked.
+export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity, maxDeltaChain: number = DEFAULT_LIMITS.maxDeltaChain, maxPackObjects: number = DEFAULT_LIMITS.maxPackObjects): Result<SavedIndex, SavedIndexRefusal> {
+  if (!(bytes instanceof Uint8Array)) return refused({ tag: 'bad_argument', what: 'bytes' });
+  if (!isArgObject(want)) return refused({ tag: 'bad_argument', what: 'want' });
   return decodeSavedBytes(bytes, want, maxDeltaChain, maxPackObjects);
 }

@@ -67,8 +67,11 @@ export type Option<T> = Some<T> | None;
 export const some = <T>(value: T): Some<T> => ({ tag: 'some', value });
 export const none: None = { tag: 'none' };
 
-export const isSome = <T>(o: Option<T>): o is Some<T> => o.tag === 'some';
-export const isNone = <T>(o: Option<T>): o is None => o.tag === 'none';
+// Total over any input (#296): a value that is not an Option (null, a number, an object with another tag) is neither
+// some nor none, so both answer false for it rather than throwing on the property read.
+const isTagged = (o: unknown, tag: Option<unknown>['tag']): boolean => isRecord(o) && o['tag'] === tag;
+export const isSome = <T>(o: Option<T>): o is Some<T> => isTagged(o, 'some');
+export const isNone = <T>(o: Option<T>): o is None => isTagged(o, 'none');
 
 export type OptionHandlers<T, R> = { readonly some: (value: T) => R; readonly none: (absent: None) => R };
 export const matchOption = <T, R>(o: Option<T>, h: OptionHandlers<T, R>): R => {
