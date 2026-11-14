@@ -917,8 +917,8 @@ Evidence:
 - ply↔Artifacts: validate-7b0c310f: `write: edit README find/replace (c1)`
 - wire↔Artifacts: loadgen-phase5-delta-20261025: `push/thin_ok`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-thin-against-server-base#literal-delta/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `pack.push-thin-against-server-base#literal-delta/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `pack.push-thin-against-server-base#literal-delta/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `pack.push-thin-against-server-base#literal-delta/art-git`
 
 #### `pack.push-thin-missing-base`
 
@@ -934,7 +934,7 @@ Evidence:
 
 - wire↔Artifacts: loadgen-phase5-delta-20261025: `push/thin_missing`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-thin-missing-base#ghost-base/art-ply`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `pack.push-thin-missing-base#ghost-base/art-ply`
 
 > pushPack carries a thin pack whose delta base the server lacks in the probes, against the reference and Artifacts.
 
@@ -960,9 +960,9 @@ Evidence:
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `pack/bad_magic`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `pack/wrong_object_count`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-corrupt-pack-refused#bad-trailer/art-ply`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-corrupt-pack-refused#bad-zlib/art-ply`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-corrupt-pack-refused#truncated/art-ply`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `pack.push-corrupt-pack-refused#bad-trailer/art-ply`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `pack.push-corrupt-pack-refused#bad-zlib/art-ply`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `pack.push-corrupt-pack-refused#truncated/art-ply`
 
 > ply's reading of Artifacts' own unpack-failure report is tested on bytes copied from prod into a fake (push-unpack-host.test.js) and live by the corrupt-pack probes (bad trailer, bad zlib, truncated).
 
@@ -995,8 +995,8 @@ Evidence:
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `pack/invalid_commit_payload`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `pack/delta_missing_base`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-malformed-object-refused#missing-blob/art-ply`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `pack.push-malformed-object-refused#delta-copy-past-end/art-ply`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `pack.push-malformed-object-refused#missing-blob/art-ply`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `pack.push-malformed-object-refused#delta-copy-past-end/art-ply`
 
 > ply's encoders never write a malformed object (the encode-*-fsck tests); the probes carry one through pushPack: a commit naming a missing blob, a delta copying past its base.
 
@@ -1042,10 +1042,10 @@ Evidence:
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `branch/create`
 - git↔Artifacts: loadgen-phase2-20261025: `new_branch`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `push.create-ref#plain/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `push.create-ref#plain/art-git`
-- ply↔Artifacts: probes-20261114t1837-53b4: `push.create-ref#already-exists/art-ply`
-- git↔Artifacts: probes-20261114t1837-53b4: `push.create-ref#already-exists/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.create-ref#plain/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.create-ref#plain/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.create-ref#already-exists/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.create-ref#already-exists/art-git`
 
 #### `push.first-commit-empty-repo`
 
@@ -1063,8 +1063,8 @@ Evidence:
 - ply↔git: `test/changes.test.js`
 - ply↔Artifacts: validate-7b0c310f: `write: root commit (edit changes)`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `push.first-commit-empty-repo#root/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `push.first-commit-empty-repo#root/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.first-commit-empty-repo#root/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.first-commit-empty-repo#root/art-git`
 
 #### `push.fast-forward-update`
 
@@ -1083,8 +1083,8 @@ Evidence:
 - ply↔Artifacts: validate-7b0c310f: `write: edit README find/replace (c1)`
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `edit/ok`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `push.fast-forward-update#plain/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `push.fast-forward-update#plain/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.fast-forward-update#plain/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.fast-forward-update#plain/art-git`
 
 #### `push.non-fast-forward`
 
@@ -1104,8 +1104,8 @@ Evidence:
 - git↔Artifacts: loadgen-phase2-20261025: `non_ff_reject`
 - git↔Artifacts: loadgen-compat-20261024: `force_push/scratch/v2`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `push.non-fast-forward#with-old-id/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `push.non-fast-forward#with-old-id/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.non-fast-forward#with-old-id/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.non-fast-forward#with-old-id/art-git`
 
 #### `push.delete-ref`
 
@@ -1126,8 +1126,8 @@ Evidence:
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `branch/delete`
 - git↔Artifacts: loadgen-compat-20261024: `tag_push_delete/scratch/v2`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `push.delete-ref#plain/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `push.delete-ref#plain/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.delete-ref#plain/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.delete-ref#plain/art-git`
 
 #### `push.atomic`
 
@@ -1146,10 +1146,10 @@ Evidence:
 - ply↔git: `test/push-pack.test.js`
 - git↔Artifacts: loadgen-compat-20261024: `atomic_push_multi_ref/scratch/v2`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `push.atomic#all-land/art-ply`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `push.atomic#one-stale/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `push.atomic#all-land/art-git`
-- git↔Artifacts: probes-20261114t1745-5jxl: `push.atomic#one-stale/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.atomic#all-land/art-ply`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.atomic#one-stale/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.atomic#all-land/art-git`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.atomic#one-stale/art-git`
 
 > The one-stale variant makes one command fail at the server: another writer moves its ref while the request is held.
 
@@ -1168,8 +1168,8 @@ Evidence:
 
 - ply↔git: `test/push.test.js`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `push.non-atomic-partial#one-stale/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `push.non-atomic-partial#one-stale/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.non-atomic-partial#one-stale/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.non-atomic-partial#one-stale/art-git`
 
 > Probed by a two-ref push while another writer moves one ref (src/probe-scenarios.ts). Per-check outcomes are in the private run record.
 
@@ -1289,8 +1289,8 @@ Evidence:
 - git↔Artifacts: loadgen-compat-20261024: `large_blob_push_24m/scratch/v2`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `pack/zlib_bomb_40m`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `push.size-limits#pack-over-cap/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `push.size-limits#pack-over-cap/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.size-limits#pack-over-cap/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.size-limits#pack-over-cap/art-git`
 
 > A 66 MiB pack against a 64 MiB cap. ply classifies the server's stated cap as limit_exceeded; git http-backend (receive.maxInputSize) refuses with `unpacker error`, its reason on band 2 only, which ply reports as push_rejected: an expected difference, src/probe-allow.ts.
 
@@ -1309,8 +1309,8 @@ Evidence:
 - git↔Artifacts: loadgen-phase2-20261025: `many_refs_5000`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `ref/fifty_updates`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `push.many-ref-updates#fifty-creates/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `push.many-ref-updates#fifty-creates/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.many-ref-updates#fifty-creates/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.many-ref-updates#fifty-creates/art-git`
 
 > The probe sends 50 creates in one push; no other test sends more than a few.
 
@@ -1337,10 +1337,10 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `push.from-shallow-clone#boundary-held/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `push.from-shallow-clone#boundary-held/art-git`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `push.from-shallow-clone#history-missing/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `push.from-shallow-clone#shallow-update/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.from-shallow-clone#boundary-held/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.from-shallow-clone#boundary-held/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.from-shallow-clone#history-missing/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.from-shallow-clone#shallow-update/art-git`
 
 > ply keeps no shallow state; its form of the push is the same objects without the history below the boundary.
 
@@ -1359,10 +1359,10 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `push.from-partial-clone#blob-none/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `push.from-partial-clone#blob-none/art-git`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `push.from-partial-clone#reuse-absent-blob/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `push.from-partial-clone#reuse-absent-blob/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.from-partial-clone#blob-none/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.from-partial-clone#blob-none/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `push.from-partial-clone#reuse-absent-blob/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `push.from-partial-clone#reuse-absent-blob/art-git`
 
 ### Concurrent updates and stale refs (`concurrency`, 7)
 
@@ -1395,11 +1395,11 @@ Evidence:
 - ply↔git: `test/push-pack.test.js`
 - git↔Artifacts: loadgen-phase2-20261025: `force_with_lease_stale`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.stale-old-oid#race/art-ply`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.stale-old-oid#direct/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.stale-old-oid#race/art-git`
-- ply↔Artifacts: probes-20261114t1837-53b4: `concurrency.stale-old-oid#delete-vs-update/art-ply`
-- git↔Artifacts: probes-20261114t1837-53b4: `concurrency.stale-old-oid#delete-vs-update/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `concurrency.stale-old-oid#race/art-ply`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `concurrency.stale-old-oid#direct/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `concurrency.stale-old-oid#race/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `concurrency.stale-old-oid#delete-vs-update/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `concurrency.stale-old-oid#delete-vs-update/art-git`
 
 > The validate CAS checks (stale head, stale delete) are refused by ply-web from ls-refs, before any push. The probe run sends the stale old id to Artifacts itself: directly from ply, and from a race (another writer moves the ref while the receive-pack request is held) from ply and stock git.
 
@@ -1423,10 +1423,10 @@ Evidence:
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `edit/race_same_file`
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `edit/race_diff_files`
 - git↔Artifacts: loadgen-phase2-20261025: `fetch_push_race`
-- ply↔Artifacts: probes-20261114t1837-53b4: `concurrency.concurrent-writers#create-vs-create/art-ply`
-- git↔Artifacts: probes-20261114t1837-53b4: `concurrency.concurrent-writers#create-vs-create/art-git`
-- ply↔Artifacts: probes-20261114t1837-53b4: `concurrency.concurrent-writers#delete-vs-update/art-ply`
-- git↔Artifacts: probes-20261114t1837-53b4: `concurrency.concurrent-writers#delete-vs-update/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `concurrency.concurrent-writers#create-vs-create/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `concurrency.concurrent-writers#create-vs-create/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `concurrency.concurrent-writers#delete-vs-update/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `concurrency.concurrent-writers#delete-vs-update/art-git`
 
 #### `concurrency.ref-created-between-read-and-push`
 
@@ -1444,8 +1444,8 @@ Evidence:
 
 - ply↔git: `test/e2e-customer.test.js`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.ref-created-between-read-and-push#race/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.ref-created-between-read-and-push#race/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `concurrency.ref-created-between-read-and-push#race/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `concurrency.ref-created-between-read-and-push#race/art-git`
 
 > validate's duplicate-branch check is refused by ply-web from ls-refs, before receive-pack; the probe run's race reaches receive-pack.
 
@@ -1464,8 +1464,8 @@ Evidence:
 
 - ply↔git: `test/changes-delete-race.test.js`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.ref-deleted-between-read-and-push#race/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.ref-deleted-between-read-and-push#race/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `concurrency.ref-deleted-between-read-and-push#race/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `concurrency.ref-deleted-between-read-and-push#race/art-git`
 
 #### `concurrency.read-after-write`
 
@@ -1501,12 +1501,12 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.empty-report-under-contention#distinct-refs/art-ply`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `concurrency.empty-report-under-contention#same-ref/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.empty-report-under-contention#distinct-refs/art-git`
-- git↔Artifacts: probes-20261114t1745-5jxl: `concurrency.empty-report-under-contention#same-ref/art-git`
-- ply↔Artifacts: probes-20261114t1837-53b4: `concurrency.empty-report-under-contention#retry-after-busy/art-ply`
-- git↔Artifacts: probes-20261114t1837-53b4: `concurrency.empty-report-under-contention#retry-after-busy/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `concurrency.empty-report-under-contention#distinct-refs/art-ply`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `concurrency.empty-report-under-contention#same-ref/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `concurrency.empty-report-under-contention#distinct-refs/art-git`
+- git↔Artifacts: probes-20261114t2226-yyjq: `concurrency.empty-report-under-contention#same-ref/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `concurrency.empty-report-under-contention#retry-after-busy/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `concurrency.empty-report-under-contention#retry-after-busy/art-git`
 
 > Probed with 8 concurrent pushes to one repository (8 distinct refs; one ref from 8 contenders); every push a client called landed is checked against the refs stock git reads back. Per-check outcomes are in the private run record.
 
@@ -1556,8 +1556,8 @@ Evidence:
 - ply↔git: `test/e2e-customer.test.js`
 - ply↔Artifacts: validate-7b0c310f: `tag lightweight`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `tags.lightweight-create#plain/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `tags.lightweight-create#plain/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `tags.lightweight-create#plain/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `tags.lightweight-create#plain/art-git`
 
 #### `tags.annotated-create`
 
@@ -1576,8 +1576,8 @@ Evidence:
 - ply↔Artifacts: validate-7b0c310f: `tag annotated`
 - git↔Artifacts: validate-7b0c310f: `git judge: fsck --strict, refs, history`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `tags.annotated-create#plain/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `tags.annotated-create#plain/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `tags.annotated-create#plain/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `tags.annotated-create#plain/art-git`
 
 #### `tags.delete`
 
@@ -1596,8 +1596,8 @@ Evidence:
 - ply↔Artifacts: validate-7b0c310f: `tag delete (CAS) + stale delete -> 409`
 - git↔Artifacts: loadgen-compat-20261024: `tag_push_delete/scratch/v2`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `tags.delete#plain/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `tags.delete#plain/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `tags.delete#plain/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `tags.delete#plain/art-git`
 
 > The stale half of the validate check is refused by ply-web from ls-refs, not by Artifacts.
 
@@ -1677,8 +1677,8 @@ Evidence:
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `merge/verify`
 - git↔Artifacts: loadgen-phase2-20261025: `shape/merges`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `ancestry.merge-commit-push#two-parents/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `ancestry.merge-commit-push#two-parents/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `ancestry.merge-commit-push#two-parents/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `ancestry.merge-commit-push#two-parents/art-git`
 
 #### `ancestry.fast-forward-and-up-to-date`
 
@@ -1905,8 +1905,8 @@ Evidence:
 - ply↔git: `test/adversarial.test.js`
 - ply↔git: `test/transfer-outcomes.test.js`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1745-5jxl: `interrupted.push-response-lost#cut/art-ply`
-- git↔Artifacts: probes-20261114t1745-5jxl: `interrupted.push-response-lost#cut/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `interrupted.push-response-lost#cut/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `interrupted.push-response-lost#cut/art-git`
 
 > Probe: the recording proxy reads the server's whole answer, then cuts the connection. Stock git (libcurl) re-sends a POST whose reused connection closed with no answer; on git http-backend the replay is refused by compare-and-swap and git then finds the ref up to date (src/probe-scenarios.ts).
 
@@ -1928,8 +1928,8 @@ Evidence:
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `http/partial_send_once`
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `http/cl_larger_than_body`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.push-body-cut#half/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.push-body-cut#half/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `interrupted.push-body-cut#half/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `interrupted.push-body-cut#half/art-git`
 
 #### `interrupted.fetch-dropped-mid-response`
 
@@ -1947,8 +1947,8 @@ Evidence:
 
 - ply↔git: `test/space/pack-cut.test.js`
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.fetch-dropped-mid-response#half/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.fetch-dropped-mid-response#half/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `interrupted.fetch-dropped-mid-response#half/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `interrupted.fetch-dropped-mid-response#half/art-git`
 
 > The probe proxy drops an upload-pack response halfway, against the reference and Artifacts.
 
@@ -1967,16 +1967,16 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-request-stall/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-request-stall/art-git`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-request-stall-10s/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-request-stall-10s/art-git`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-response-stall/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#push-response-stall/art-git`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#fetch-request-stall/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#fetch-request-stall/art-git`
-- ply↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#fetch-response-stall/art-ply`
-- git↔Artifacts: probes-20261114t1909-sl8l: `interrupted.stall-timeouts#fetch-response-stall/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `interrupted.stall-timeouts#push-request-stall/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `interrupted.stall-timeouts#push-request-stall/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `interrupted.stall-timeouts#push-request-stall-10s/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `interrupted.stall-timeouts#push-request-stall-10s/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `interrupted.stall-timeouts#push-response-stall/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `interrupted.stall-timeouts#push-response-stall/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `interrupted.stall-timeouts#fetch-request-stall/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `interrupted.stall-timeouts#fetch-request-stall/art-git`
+- ply↔Artifacts: probes-20261114t2226-yyjq: `interrupted.stall-timeouts#fetch-response-stall/art-ply`
+- git↔Artifacts: probes-20261114t2226-yyjq: `interrupted.stall-timeouts#fetch-response-stall/art-git`
 
 > The probe proxy injects the stalls: request-body stalls of 10 s and 20 s and a response stall against a 1 s client timeout, on push and fetch; each check's outcome is kept in the private run record.
 
@@ -2191,4 +2191,5 @@ Observed:
 | `probes-20261114t1745-5jxl` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 42 | ply differential probes (scripts/probes.mjs --artifacts; plans in test/probes/scenarios.ts, probe code d18a262915bc7c56): each scenario seeded with identical objects into a fresh Artifacts repository per client (namespace ply-loadgen) and into git http-backend with Artifacts' known policy; ply and stock git 2.47.3 run the same plan; a recording proxy injects the fault (held receive-pack while another writer moves refs, or a cut answer) and keeps the cf-ray of every request; stock git judges (ls-remote --symref, mirror clone, fsck --strict, rev-list --parents, merge-base); test/probes/evaluate.ts compares. |
 | `probes-20261114t1837-53b4` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 10 | ply differential probes, days 5-6 batch A (scripts/probes.mjs --artifacts, probe code b55fa846fcd21188 on ply 06042f8): race shapes (delete against an update, create against a create, delete against an update at once), a create of a ref that exists, and a retry of every push that did not land under contention; same harness as probes-20261114t1745-5jxl, with the proxy also keeping the commands of each receive-pack request and the refs of each advertisement; stock git 2.47.3. |
 | `probes-20261114t1909-sl8l` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 30 | ply differential probes, days 5-6 batches B and C (scripts/probes.mjs --artifacts, probe code 7c155a159f2bda27 on ply 55205ae; since then one scenario comment reworded and, after ply c22b066, the stock git expectation dropped from the two response-stall scenarios because git's low-speed timer differs by build): hand-built packs sent through pushPack (a thin pack against a base the server has and one whose base it lacks, a commit naming a missing blob, a delta copying past its base, a bad trailer, bad zlib, a truncated pack), pushes from a shallow clone and from a blob:none partial clone, a push body cut halfway, request and response stalls on push and fetch against set client timeouts, and an upload-pack response dropped halfway; same harness as probes-20261114t1837-53b4, with the proxy also injecting request-side faults and recording the socket error of a failed upstream call; stock git git version 2.47.3. |
+| `probes-20261114t2226-yyjq` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 81 | ply differential probes, full matrix (t229u days 9-10; scripts/probes.mjs --artifacts, probe code 744e85097786a1b0 on ply a78ed24 plus the two harness fixes committed with this entry: the run's signal handler also closes a repository still being created, and a stock git update carries its lease without a forced refspec): every scenario in src/probe-scenarios.ts, ply and stock git 2.47.3 (node 24.22.1), each against git http-backend with Artifacts' known policy and against a fresh Artifacts repository per scenario and client (namespace ply-loadgen, one at a time); same recording proxy and stock git judge as probes-20261114t1909-sl8l; cf-ray kept for every Artifacts request; every token revoked and probed, every repository deleted and checked by listing. |
 

@@ -50,9 +50,16 @@ const scenarios = SCENARIOS.filter(s => only === null || only.split(',').some(o 
 const targets = artifacts ? ['ref-ply', 'ref-git', 'art-ply', 'art-git'] : ['ref-ply', 'ref-git'];
 const ref = await startReference();
 const results = [], diffs = [], evaluated = [], errors = [];
-// an interrupted run still revokes the open repository's tokens and deletes it
-let open = null;
-for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(sig, async () => { console.error(`${sig}: closing the open repository`); if (open !== null) await open.close(); process.exit(130); });
+// An interrupted run still revokes the open repository's tokens and deletes it. `open` is set before the repository
+// is created (a signal during art.open used to leave it behind, run 20261114t2200-full) and `closing` until the close
+// has finished, so a signal at any point waits for the repository to be opened and then closes it.
+let open = null, closing = null;
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(sig, async () => {
+  console.error(`${sig}: closing the open repository`);
+  if (open !== null) { const h = await open.catch(() => null); if (h !== null) await h.close(); }
+  if (closing !== null) await closing.catch(() => {});
+  process.exit(130);
+});
 const t0 = Date.now();
 for (const s of scenarios) {
   const runs = {}, record = { id: s.id, targets: {} };
@@ -64,7 +71,7 @@ for (const s of scenarios) {
     let handle = null, proxy = ref.proxy, repoPath, before = ref.proxy.exchanges.length;
     const started = Date.now();
     try {
-      if (t.startsWith('art-')) { handle = await art.open(`${s.id}/${t}`); open = handle; proxy = handle.proxy; repoPath = handle.repoPath; before = 0; }
+      if (t.startsWith('art-')) { open = art.open(`${s.id}/${t}`); handle = await open; proxy = handle.proxy; repoPath = handle.repoPath; before = 0; }
       else repoPath = (await ref.repo(s)).repoPath;
       const r = await runScenario(s, { name: t, client: t.slice(4), proxy, repoPath }, { tracer, root });
       runs[t] = r.observation; names = r.byOid;
@@ -75,7 +82,8 @@ for (const s of scenarios) {
     } finally {
       record.targets[t].exchanges = proxy.exchanges.slice(before);
       record.targets[t].spans = spans();
-      if (handle !== null) { open = null; await handle.close(); }
+      open = null;
+      if (handle !== null) { closing = handle.close(); await closing; closing = null; }
       rmSync(root, { recursive: true, force: true });
     }
     const st = record.targets[t];

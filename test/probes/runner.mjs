@@ -298,12 +298,16 @@ export function startRecordingProxy({ upstream, authorization = null, filterPoli
 // A create is a plain push (no lease, no force): git 2.47 does not protect a create with --force-with-lease=<ref>: or
 // <ref>:<zero id> (it force-updates a ref that exists), so a lease there would turn a lost create race into a silent
 // overwrite. Without force, git refuses client side when its advertisement already has the ref ("fetch first") and
-// otherwise sends the zero old id for the server to check. An update or delete carries a lease on the plan's old id.
+// otherwise sends the zero old id for the server to check. An update or delete carries a lease on the plan's old id,
+// and its refspec has no `+`: git lets a `+` (forced) refspec override a stale lease (remote.c set_ref_status_for_push
+// drops REJECT_STALE when the ref is forced), so with a `+` a git client that read a moved ref sent that ref as the old
+// id and overwrote it (run 20261114t2158-165d, same-ref contention). A matching lease alone already permits a
+// non-fast-forward update.
 const gitArgs = (seed, push) => [
   ...(push.atomic ? ['--atomic'] : []),
   ...push.updates.filter(u => u.old.tag !== 'zero').map(u => `--force-with-lease=${u.ref}:${oidOf(seed, u.old)}`),
 ];
-const gitSpecs = (seed, push) => push.updates.map(u => (u.new.tag === 'zero' ? `:${u.ref}` : `${u.old.tag === 'zero' ? '' : '+'}${oidOf(seed, u.new)}:${u.ref}`));
+const gitSpecs = (seed, push) => push.updates.map(u => (u.new.tag === 'zero' ? `:${u.ref}` : `${oidOf(seed, u.new)}:${u.ref}`));
 
 const plyErr = (r, prefix = '') => plyOutcome({ ok: false, code: r.error.code, message: `${prefix}${String(r.error.message)}` });
 const plyLimits = timeouts => (timeouts === null ? {} : { limits: { firstByteTimeoutMs: timeouts.ms, idleTimeoutMs: timeouts.ms } });

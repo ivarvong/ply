@@ -31,14 +31,10 @@ const hostile = (check: CheckOf<'loadgen-phase4-hostile-20261025'>): OtherEviden
 const hostileWrite = (check: CheckOf<'loadgen-phase4-hostile-write-20261025'>): OtherEvidence => ({ kind: 'wire_probe_vs_artifacts', ref: { tag: 'run', run: 'loadgen-phase4-hostile-write-20261025', check } });
 const deltaGit = (check: CheckOf<'loadgen-phase5-delta-20261025'>): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'loadgen-phase5-delta-20261025', check } });
 const deltaWire = (check: CheckOf<'loadgen-phase5-delta-20261025'>): OtherEvidence => ({ kind: 'wire_probe_vs_artifacts', ref: { tag: 'run', run: 'loadgen-phase5-delta-20261025', check } });
-// The differential probe run (test/probes, scripts/probes.mjs --artifacts): one scenario per check, `<scenario>/art-ply`
+// The differential probe run, full matrix (test/probes, scripts/probes.mjs --artifacts): one scenario per check, `<scenario>/art-ply`
 // for ply against Artifacts, `<scenario>/art-git` for stock git against it; the same plans run in CI against the reference.
-const probePly = (check: CheckOf<'probes-20261114t1745-5jxl'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1745-5jxl', check } });
-const probeGit = (check: CheckOf<'probes-20261114t1745-5jxl'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1745-5jxl', check } });
-const probeAPly = (check: CheckOf<'probes-20261114t1837-53b4'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1837-53b4', check } });
-const probeAGit = (check: CheckOf<'probes-20261114t1837-53b4'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1837-53b4', check } });
-const probeBPly = (check: CheckOf<'probes-20261114t1909-sl8l'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1909-sl8l', check } });
-const probeBGit = (check: CheckOf<'probes-20261114t1909-sl8l'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t1909-sl8l', check } });
+const probePly = (check: CheckOf<'probes-20261114t2226-yyjq'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t2226-yyjq', check } });
+const probeGit = (check: CheckOf<'probes-20261114t2226-yyjq'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t2226-yyjq', check } });
 
 const verified = (...evidence: NonEmpty<Evidence>): Extract<Status, { readonly tag: 'verified' }> => ({ tag: 'verified', evidence });
 const IMPLEMENTED: Extract<Status, { readonly tag: 'implemented' }> = { tag: 'implemented' };
@@ -468,7 +464,7 @@ const PACK: readonly BehaviourIn<'pack'>[] = [
     description: 'receive-pack completes a thin pushed pack whose REF bases it holds (every ply edit pushes blob and tree deltas this way).',
     ops: [EDIT_FILE, PUSH],
     tests: [t('test/edges.test.js', 'push = commit + 100 tree deltas + blob delta'), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/edges.test.js', 'push = commit + 100 tree deltas + blob delta'), validatePly('write: edit README find/replace (c1)'), deltaWire('push/thin_ok'), git('test/probes/probes.test.js', PROBES), probeBPly('pack.push-thin-against-server-base#literal-delta/art-ply'), probeBGit('pack.push-thin-against-server-base#literal-delta/art-git')),
+    status: verified(git('test/edges.test.js', 'push = commit + 100 tree deltas + blob delta'), validatePly('write: edit README find/replace (c1)'), deltaWire('push/thin_ok'), git('test/probes/probes.test.js', PROBES), probePly('pack.push-thin-against-server-base#literal-delta/art-ply'), probeGit('pack.push-thin-against-server-base#literal-delta/art-git')),
     notes: [],
   }),
   b({
@@ -476,7 +472,7 @@ const PACK: readonly BehaviourIn<'pack'>[] = [
     description: 'receive-pack refuses a thin pushed pack whose base it does not hold, and moves no ref.',
     ops: [PUSH_PACK],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(deltaWire('push/thin_missing'), git('test/probes/probes.test.js', PROBES), probeBPly('pack.push-thin-missing-base#ghost-base/art-ply')),
+    status: verified(deltaWire('push/thin_missing'), git('test/probes/probes.test.js', PROBES), probePly('pack.push-thin-missing-base#ghost-base/art-ply')),
     notes: ['pushPack carries a thin pack whose delta base the server lacks in the probes, against the reference and Artifacts.'],
   }),
   b({
@@ -484,7 +480,7 @@ const PACK: readonly BehaviourIn<'pack'>[] = [
     description: 'receive-pack refuses a corrupt pushed pack (unpack error, ng for every ref) and moves no ref.',
     ops: [PUSH_PACK, CLASSIFY_REPORT],
     tests: [t('test/push-pack.test.js', 'a corrupt pack against stock git'), t('test/custom-exchange.test.js', 'a corrupt pack: the report is unpackFailed'), t('test/push-unpack-host.test.js', 'the echoed shape is unpackFailed and decides push_rejected; delete-only stays ambiguous'), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/push-pack.test.js', 'a corrupt pack against stock git'), hostileWrite('pack/corrupt_zlib'), hostileWrite('pack/bad_checksum'), hostileWrite('pack/truncated'), hostileWrite('pack/bad_magic'), hostileWrite('pack/wrong_object_count'), git('test/probes/probes.test.js', PROBES), probeBPly('pack.push-corrupt-pack-refused#bad-trailer/art-ply'), probeBPly('pack.push-corrupt-pack-refused#bad-zlib/art-ply'), probeBPly('pack.push-corrupt-pack-refused#truncated/art-ply')),
+    status: verified(git('test/push-pack.test.js', 'a corrupt pack against stock git'), hostileWrite('pack/corrupt_zlib'), hostileWrite('pack/bad_checksum'), hostileWrite('pack/truncated'), hostileWrite('pack/bad_magic'), hostileWrite('pack/wrong_object_count'), git('test/probes/probes.test.js', PROBES), probePly('pack.push-corrupt-pack-refused#bad-trailer/art-ply'), probePly('pack.push-corrupt-pack-refused#bad-zlib/art-ply'), probePly('pack.push-corrupt-pack-refused#truncated/art-ply')),
     notes: ['ply\'s reading of Artifacts\' own unpack-failure report is tested on bytes copied from prod into a fake (push-unpack-host.test.js) and live by the corrupt-pack probes (bad trailer, bad zlib, truncated).'],
   }),
   b({
@@ -500,7 +496,7 @@ const PACK: readonly BehaviourIn<'pack'>[] = [
     description: 'receive-pack refuses a well-framed pack that holds a malformed object or a delta with no base.',
     ops: [PUSH_PACK],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(hostileWrite('pack/invalid_commit_payload'), hostileWrite('pack/delta_missing_base'), git('test/probes/probes.test.js', PROBES), probeBPly('pack.push-malformed-object-refused#missing-blob/art-ply'), probeBPly('pack.push-malformed-object-refused#delta-copy-past-end/art-ply')),
+    status: verified(hostileWrite('pack/invalid_commit_payload'), hostileWrite('pack/delta_missing_base'), git('test/probes/probes.test.js', PROBES), probePly('pack.push-malformed-object-refused#missing-blob/art-ply'), probePly('pack.push-malformed-object-refused#delta-copy-past-end/art-ply')),
     notes: ['ply\'s encoders never write a malformed object (the encode-*-fsck tests); the probes carry one through pushPack: a commit naming a missing blob, a delta copying past its base.'],
   }),
 ];
@@ -511,7 +507,7 @@ const PUSHES: readonly BehaviourIn<'push'>[] = [
     description: 'A command with the zero old id creates a ref.',
     ops: [PUSH, CREATE_BRANCH],
     tests: [t('test/push.test.js', "'create': t =>"), t('test/e2e-customer.test.js', 'createBranch from a branch name, a short name, a peeled annotated tag'), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/push.test.js', "'create': t =>"), validatePly('branch create (feat from c0)'), plyWorker('branch/create'), phase2Git('new_branch'), git('test/probes/probes.test.js', PROBES), probePly('push.create-ref#plain/art-ply'), probeGit('push.create-ref#plain/art-git'), probeAPly('push.create-ref#already-exists/art-ply'), probeAGit('push.create-ref#already-exists/art-git')),
+    status: verified(git('test/push.test.js', "'create': t =>"), validatePly('branch create (feat from c0)'), plyWorker('branch/create'), phase2Git('new_branch'), git('test/probes/probes.test.js', PROBES), probePly('push.create-ref#plain/art-ply'), probeGit('push.create-ref#plain/art-git'), probePly('push.create-ref#already-exists/art-ply'), probeGit('push.create-ref#already-exists/art-git')),
     notes: [],
   }),
   b({
@@ -639,7 +635,7 @@ const PUSHES: readonly BehaviourIn<'push'>[] = [
     description: 'A push from a shallow clone: when the server holds the boundary commit the push lands; when it lacks the history below the boundary the push is refused and no ref moves.',
     ops: [PUSH],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES), probeBPly('push.from-shallow-clone#boundary-held/art-ply'), probeBGit('push.from-shallow-clone#boundary-held/art-git'), probeBPly('push.from-shallow-clone#history-missing/art-ply'), probeBGit('push.from-shallow-clone#shallow-update/art-git')),
+    status: verified(git('test/probes/probes.test.js', PROBES), probePly('push.from-shallow-clone#boundary-held/art-ply'), probeGit('push.from-shallow-clone#boundary-held/art-git'), probePly('push.from-shallow-clone#history-missing/art-ply'), probeGit('push.from-shallow-clone#shallow-update/art-git')),
     notes: ['ply keeps no shallow state; its form of the push is the same objects without the history below the boundary.', 'The stock git push into a repository without the boundary history is compared against git http-backend with receive.shallowUpdate=true.'],
   }),
   b({
@@ -647,7 +643,7 @@ const PUSHES: readonly BehaviourIn<'push'>[] = [
     description: 'A push from a blob:none partial clone sends only the new objects, including a tree that names a blob the client never fetched, and lands.',
     ops: [FETCH_PACK, PUSH],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES), probeBPly('push.from-partial-clone#blob-none/art-ply'), probeBGit('push.from-partial-clone#blob-none/art-git'), probeBPly('push.from-partial-clone#reuse-absent-blob/art-ply'), probeBGit('push.from-partial-clone#reuse-absent-blob/art-git')),
+    status: verified(git('test/probes/probes.test.js', PROBES), probePly('push.from-partial-clone#blob-none/art-ply'), probeGit('push.from-partial-clone#blob-none/art-git'), probePly('push.from-partial-clone#reuse-absent-blob/art-ply'), probeGit('push.from-partial-clone#reuse-absent-blob/art-git')),
     notes: [],
   }),
 ];
@@ -658,7 +654,7 @@ const CONCURRENCY: readonly BehaviourIn<'concurrency'>[] = [
     description: 'A push whose old id is no longer the ref\'s value is refused (compare-and-swap) and the ref is unchanged.',
     ops: [PUSH, PUSH_PACK, EDIT_FILE],
     tests: [t('test/push.test.js', "'stale-old': t =>"), t('test/push-pack.test.js', 'a stale old oid is cas_conflict, as push reports it'), t('test/custom-exchange.test.js', 'receive-pack refuses a command (stale old id)'), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/push.test.js', "'stale-old': t =>"), git('test/push-pack.test.js', 'a stale old oid is cas_conflict, as push reports it'), phase2Git('force_with_lease_stale'), git('test/probes/probes.test.js', PROBES), probePly('concurrency.stale-old-oid#race/art-ply'), probePly('concurrency.stale-old-oid#direct/art-ply'), probeGit('concurrency.stale-old-oid#race/art-git'), probeAPly('concurrency.stale-old-oid#delete-vs-update/art-ply'), probeAGit('concurrency.stale-old-oid#delete-vs-update/art-git')),
+    status: verified(git('test/push.test.js', "'stale-old': t =>"), git('test/push-pack.test.js', 'a stale old oid is cas_conflict, as push reports it'), phase2Git('force_with_lease_stale'), git('test/probes/probes.test.js', PROBES), probePly('concurrency.stale-old-oid#race/art-ply'), probePly('concurrency.stale-old-oid#direct/art-ply'), probeGit('concurrency.stale-old-oid#race/art-git'), probePly('concurrency.stale-old-oid#delete-vs-update/art-ply'), probeGit('concurrency.stale-old-oid#delete-vs-update/art-git')),
     notes: ['The validate CAS checks (stale head, stale delete) are refused by ply-web from ls-refs, before any push. The probe run sends the stale old id to Artifacts itself: directly from ply, and from a race (another writer moves the ref while the receive-pack request is held) from ply and stock git.'],
   }),
   b({
@@ -666,7 +662,7 @@ const CONCURRENCY: readonly BehaviourIn<'concurrency'>[] = [
     description: 'Concurrent writers on one ref: one wins each round, the rest are refused as stale and retry; nothing is lost.',
     ops: [EDIT_FILE, PUSH],
     tests: [t('test/probes/probes.test.js', PROBES), t('test/concurrency.test.js', 'concurrent CAS writers converge; conflicts are observed and retried, never lost'), t('test/edit-race-f34.test.js', 'same-file edit race ×1000 attempts: only ok and cas_conflict')],
-    status: verified(git('test/probes/probes.test.js', PROBES), git('test/concurrency.test.js', 'concurrent CAS writers converge; conflicts are observed and retried, never lost'), git('test/edit-race-f34.test.js', 'same-file edit race ×1000 attempts: only ok and cas_conflict'), plyWorker('edit/race_same_file'), plyWorker('edit/race_diff_files'), phase2Git('fetch_push_race'), probeAPly('concurrency.concurrent-writers#create-vs-create/art-ply'), probeAGit('concurrency.concurrent-writers#create-vs-create/art-git'), probeAPly('concurrency.concurrent-writers#delete-vs-update/art-ply'), probeAGit('concurrency.concurrent-writers#delete-vs-update/art-git')),
+    status: verified(git('test/probes/probes.test.js', PROBES), git('test/concurrency.test.js', 'concurrent CAS writers converge; conflicts are observed and retried, never lost'), git('test/edit-race-f34.test.js', 'same-file edit race ×1000 attempts: only ok and cas_conflict'), plyWorker('edit/race_same_file'), plyWorker('edit/race_diff_files'), phase2Git('fetch_push_race'), probePly('concurrency.concurrent-writers#create-vs-create/art-ply'), probeGit('concurrency.concurrent-writers#create-vs-create/art-git'), probePly('concurrency.concurrent-writers#delete-vs-update/art-ply'), probeGit('concurrency.concurrent-writers#delete-vs-update/art-git')),
     notes: [],
   }),
   b({
@@ -698,7 +694,7 @@ const CONCURRENCY: readonly BehaviourIn<'concurrency'>[] = [
     description: 'A receive-pack 200 that carries no report (no unpack or ref lines), whether an empty body or only a band-3 fatal such as the busy refusal Artifacts sends to concurrent same-repo pushes, is ambiguous, never landed; the server applied nothing for it.',
     ops: [PUSH, CLASSIFY_REPORT],
     tests: [t('test/push-unpack-host.test.js', 'an empty receive-pack report stays ambiguous (concurrent same-repo 200 with no unpack/ref lines)'), t('test/mutant-kill.test.js', BAND3_NO_REPORT), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES), probePly('concurrency.empty-report-under-contention#distinct-refs/art-ply'), probePly('concurrency.empty-report-under-contention#same-ref/art-ply'), probeGit('concurrency.empty-report-under-contention#distinct-refs/art-git'), probeGit('concurrency.empty-report-under-contention#same-ref/art-git'), probeAPly('concurrency.empty-report-under-contention#retry-after-busy/art-ply'), probeAGit('concurrency.empty-report-under-contention#retry-after-busy/art-git')),
+    status: verified(git('test/probes/probes.test.js', PROBES), probePly('concurrency.empty-report-under-contention#distinct-refs/art-ply'), probePly('concurrency.empty-report-under-contention#same-ref/art-ply'), probeGit('concurrency.empty-report-under-contention#distinct-refs/art-git'), probeGit('concurrency.empty-report-under-contention#same-ref/art-git'), probePly('concurrency.empty-report-under-contention#retry-after-busy/art-ply'), probeGit('concurrency.empty-report-under-contention#retry-after-busy/art-git')),
     notes: ['Probed with 8 concurrent pushes to one repository (8 distinct refs; one ref from 8 contenders); every push a client called landed is checked against the refs stock git reads back. Per-check outcomes are in the private run record.', 'Observed shape on Artifacts (probes run probes-20261114t1745-5jxl): HTTP 200 whose body is a single band-3 fatal (busy) and no report-status, for distinct refs as well as one ref; the refs read back show none of those pushes applied. Stock git reports it as the remote hanging up (exit 128).', 'Retry probe (run probes-20261114t1837-53b4): each push that did not land is sent again alone with the same zero old id, which the server would refuse had the first attempt been applied; per-check outcomes are in the private run record.'],
   }),
   b({
@@ -890,7 +886,7 @@ const INTERRUPTED: readonly BehaviourIn<'interrupted'>[] = [
     description: 'A push request body that fails midway: nothing lands; failure before the first body pull is definite, after it ambiguous.',
     ops: [PUSH, PUSH_PACK],
     tests: [t('test/custom-exchange.test.js', 'a body stream that errors midway: a typed error from the iteration, the span records it, nothing lands'), t('test/push-pack-preabort.test.js', 'push with a pack sent as bytes: a signal already fired is the definite aborted with no request; a rejected fetch stays ambiguous'), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/custom-exchange.test.js', 'a body stream that errors midway: a typed error from the iteration, the span records it, nothing lands'), hostile('http/partial_send_once'), hostile('http/cl_larger_than_body'), git('test/probes/probes.test.js', PROBES), probeBPly('interrupted.push-body-cut#half/art-ply'), probeBGit('interrupted.push-body-cut#half/art-git')),
+    status: verified(git('test/custom-exchange.test.js', 'a body stream that errors midway: a typed error from the iteration, the span records it, nothing lands'), hostile('http/partial_send_once'), hostile('http/cl_larger_than_body'), git('test/probes/probes.test.js', PROBES), probePly('interrupted.push-body-cut#half/art-ply'), probeGit('interrupted.push-body-cut#half/art-git')),
     notes: [],
   }),
   b({
@@ -898,7 +894,7 @@ const INTERRUPTED: readonly BehaviourIn<'interrupted'>[] = [
     description: 'A fetch or advertisement response dropped or cut mid-body is a typed network error or pack_corrupt, never a partial result.',
     ops: [FETCH_PACK, READ_FILE],
     tests: [t('test/adversarial.test.js', 'HTTP-level faults at every stage: statuses, non-git bodies, stall, drop, empty'), t('test/http-options.test.js', 'a body that fails mid-read is the network error it is'), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/space/pack-cut.test.js', 'cut: every byte offset of every pack is refused, typed, on every path'), git('test/probes/probes.test.js', PROBES), probeBPly('interrupted.fetch-dropped-mid-response#half/art-ply'), probeBGit('interrupted.fetch-dropped-mid-response#half/art-git')),
+    status: verified(git('test/space/pack-cut.test.js', 'cut: every byte offset of every pack is refused, typed, on every path'), git('test/probes/probes.test.js', PROBES), probePly('interrupted.fetch-dropped-mid-response#half/art-ply'), probeGit('interrupted.fetch-dropped-mid-response#half/art-git')),
     notes: ['The probe proxy drops an upload-pack response halfway, against the reference and Artifacts.'],
   }),
   b({
@@ -906,7 +902,7 @@ const INTERRUPTED: readonly BehaviourIn<'interrupted'>[] = [
     description: 'A server that stalls before the first byte or mid-body is ended by the first-byte or idle timer, typed timeout.',
     ops: [EXCHANGE_CLOCK, CREATE_TRANSPORT],
     tests: [t('test/http-options.test.js', 'the transport reads the parsed timeout: the span carries it and a stalled request ends at it'), t('test/workerd.test.js', 'workerd: first-byte and idle timeouts; a long steady body or upload is not cut'), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES), probeBPly('interrupted.stall-timeouts#push-request-stall/art-ply'), probeBGit('interrupted.stall-timeouts#push-request-stall/art-git'), probeBPly('interrupted.stall-timeouts#push-request-stall-10s/art-ply'), probeBGit('interrupted.stall-timeouts#push-request-stall-10s/art-git'), probeBPly('interrupted.stall-timeouts#push-response-stall/art-ply'), probeBGit('interrupted.stall-timeouts#push-response-stall/art-git'), probeBPly('interrupted.stall-timeouts#fetch-request-stall/art-ply'), probeBGit('interrupted.stall-timeouts#fetch-request-stall/art-git'), probeBPly('interrupted.stall-timeouts#fetch-response-stall/art-ply'), probeBGit('interrupted.stall-timeouts#fetch-response-stall/art-git')),
+    status: verified(git('test/probes/probes.test.js', PROBES), probePly('interrupted.stall-timeouts#push-request-stall/art-ply'), probeGit('interrupted.stall-timeouts#push-request-stall/art-git'), probePly('interrupted.stall-timeouts#push-request-stall-10s/art-ply'), probeGit('interrupted.stall-timeouts#push-request-stall-10s/art-git'), probePly('interrupted.stall-timeouts#push-response-stall/art-ply'), probeGit('interrupted.stall-timeouts#push-response-stall/art-git'), probePly('interrupted.stall-timeouts#fetch-request-stall/art-ply'), probeGit('interrupted.stall-timeouts#fetch-request-stall/art-git'), probePly('interrupted.stall-timeouts#fetch-response-stall/art-ply'), probeGit('interrupted.stall-timeouts#fetch-response-stall/art-git')),
     notes: ['The probe proxy injects the stalls: request-body stalls of 10 s and 20 s and a response stall against a 1 s client timeout, on push and fetch; each check\'s outcome is kept in the private run record.'],
   }),
   b({
