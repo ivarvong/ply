@@ -1031,9 +1031,9 @@ const HTTP: readonly BehaviourIn<'http'>[] = [
     id: 'http.sideband-keepalive', area: 'http',
     description: 'Empty band-1 keepalives while a hook runs do not end the push read.',
     ops: [PUSH],
-    tests: [t('test/push-report-bound.test.js', '13,000 band-1 keepalives while a hook runs, then the report: landed')],
-    status: IMPLEMENTED,
-    notes: ['Keepalives are injected; whether Artifacts sends them is unrecorded.'],
+    tests: [t('test/push-report-bound.test.js', '13,000 band-1 keepalives while a hook runs, then the report: landed'), t('test/push-keepalive-git.test.js', 'real git keepalives while a pre-receive hook runs: band-1 empty packets, then the report; ply lands')],
+    status: verified(git('test/push-keepalive-git.test.js', 'real git keepalives while a pre-receive hook runs: band-1 empty packets, then the report; ply lands')),
+    notes: ['git http-backend with receive.keepAlive=1 and a 3 s silent pre-receive hook writes empty band-1 packets before the report; the test captures them. Whether Artifacts sends keepalives is unrecorded (it runs no hooks a client can arrange).'],
   }),
   b({
     id: 'http.request-content-encoding', area: 'http',

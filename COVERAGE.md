@@ -19,7 +19,7 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 
 ## Summary
 
-**116** behaviours: **102** verified, **4** implemented, **10** unsupported. Of the verified, **73** carry some Artifacts evidence and **52** carry evidence of ply itself against Artifacts.
+**116** behaviours: **103** verified, **3** implemented, **10** unsupported. Of the verified, **73** carry some Artifacts evidence and **52** carry evidence of ply itself against Artifacts.
 
 | area | behaviours | verified | implemented | unsupported |
 |---|---:|---:|---:|---:|
@@ -33,14 +33,14 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 | ancestry | 7 | 6 | 1 | 0 |
 | errors | 7 | 4 | 2 | 1 |
 | interrupted | 6 | 6 | 0 | 0 |
-| http | 10 | 6 | 1 | 3 |
-| **all** | **116** | **102** | **4** | **10** |
+| http | 10 | 7 | 0 | 3 |
+| **all** | **116** | **103** | **3** | **10** |
 
 Verified behaviours by evidence kind (a behaviour counts once under each kind it has):
 
 | evidence kind | verified behaviours |
 |---|---:|
-| `ply_vs_reference_git` | 99 |
+| `ply_vs_reference_git` | 100 |
 | `ply_vs_artifacts` | 52 |
 | `native_git_vs_artifacts` | 50 |
 | `wire_probe_vs_artifacts` | 18 |
@@ -49,14 +49,13 @@ Verified behaviours by evidence kind (a behaviour counts once under each kind it
 
 Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed under the first of these classes that holds:
 
-### Exercised by ply, judged by nothing independent (4)
+### Exercised by ply, judged by nothing independent (3)
 
 - `ancestry.cut-graph`: A server that withholds ancestors without saying shallow: ply fails closed, nothing pushed.
 - `errors.http-status-classes`: Statuses 4xx/5xx/429 at each stage map to ply's typed classes, and a refused optional feature is not retried for them.
 - `errors.not-git-response`: A 200 that is not git (HTML, wrong content type) is not_git, never parsed as protocol.
-- `http.sideband-keepalive`: Empty band-1 keepalives while a hook runs do not end the push read.
 
-### Verified against git http-backend only: no evidence of any kind from Artifacts (29)
+### Verified against git http-backend only: no evidence of any kind from Artifacts (30)
 
 - `refs.advertisement-shapes`: Unusual but legal listings (duplicate names, ordering, raw bytes in names) are read as git reads them.
 - `caps.required-capabilities`: A server missing a capability ply needs (ls-refs, fetch) is refused as unsupported before any operation.
@@ -87,6 +86,7 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `interrupted.abort-during-push`: An external AbortSignal during a push: aborted if the body was never pulled, ambiguous once sent; git decides what landed.
 - `interrupted.resumable-transfer`: A multi-step transfer paused or interrupted is resumed from refs, not from local state, and ends at the planned head.
 - `http.redirects`: A 3xx on the advertisement is followed as git follows it (within policy); a 3xx on a POST is never followed.
+- `http.sideband-keepalive`: Empty band-1 keepalives while a hook runs do not end the push read.
 
 ### Artifacts observed by stock git or wire probes, never by ply (21)
 
@@ -2150,7 +2150,7 @@ Evidence:
 | `http.chunked-request-body` | verified | ply↔git, wire↔Artifacts | `push`, `pushPack` | 1 |
 | `http.large-response-body` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `readFile`, `fetchPack` | 1 |
 | `http.large-request-body` | verified | ply↔git, git↔Artifacts | `editFile`, `push` | 2 |
-| `http.sideband-keepalive` | implemented | — | `push` | 1 |
+| `http.sideband-keepalive` | verified | ply↔git | `push` | 2 |
 | `http.request-content-encoding` | unsupported (observed) | wire↔Artifacts | — | 0 |
 | `http.content-length-framing` | unsupported (observed) | wire↔Artifacts | — | 0 |
 | `http.expect-continue-and-dumb-http` | unsupported (observed) | wire↔Artifacts | — | 0 |
@@ -2267,8 +2267,13 @@ Ops: `src/push.ts` `push`.
 Tests:
 
 - `test/push-report-bound.test.js`: 13,000 band-1 keepalives while a hook runs, then the report: landed
+- `test/push-keepalive-git.test.js`: real git keepalives while a pre-receive hook runs: band-1 empty packets, then the report; ply lands
 
-> Keepalives are injected; whether Artifacts sends them is unrecorded.
+Evidence:
+
+- ply↔git: `test/push-keepalive-git.test.js`
+
+> git http-backend with receive.keepAlive=1 and a 3 s silent pre-receive hook writes empty band-1 packets before the report; the test captures them. Whether Artifacts sends keepalives is unrecorded (it runs no hooks a client can arrange).
 
 #### `http.request-content-encoding`
 
