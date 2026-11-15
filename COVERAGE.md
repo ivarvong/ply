@@ -19,7 +19,7 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 
 ## Summary
 
-**118** behaviours: **106** verified, **2** implemented, **10** unsupported. Of the verified, **81** carry some Artifacts evidence and **61** carry evidence of ply itself against Artifacts.
+**118** behaviours: **106** verified, **2** implemented, **10** unsupported. Of the verified, **84** carry some Artifacts evidence and **65** carry evidence of ply itself against Artifacts.
 
 | area | behaviours | verified | implemented | unsupported |
 |---|---:|---:|---:|---:|
@@ -40,10 +40,10 @@ Verified behaviours by evidence kind (a behaviour counts once under each kind it
 
 | evidence kind | verified behaviours |
 |---|---:|
-| `ply_vs_reference_git` | 102 |
-| `ply_vs_artifacts` | 61 |
-| `native_git_vs_artifacts` | 54 |
-| `wire_probe_vs_artifacts` | 19 |
+| `ply_vs_reference_git` | 103 |
+| `ply_vs_artifacts` | 65 |
+| `native_git_vs_artifacts` | 58 |
+| `wire_probe_vs_artifacts` | 21 |
 
 ## Gaps
 
@@ -54,13 +54,11 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `ancestry.cut-graph`: A server that withholds ancestors without saying shallow: ply fails closed, nothing pushed.
 - `errors.not-git-response`: A 200 that is not git (HTML, wrong content type) is not_git, never parsed as protocol.
 
-### Verified against git http-backend only: no evidence of any kind from Artifacts (25)
+### Verified against git http-backend only: no evidence of any kind from Artifacts (22)
 
-- `refs.directory-file-conflict`: A ref cannot be both a name and a directory: creating refs/heads/a/b while refs/heads/a exists (or the reverse, or both in one push) is refused and leaves the existing ref as it was.
 - `refs.advertisement-shapes`: Unusual but legal listings (duplicate names, ordering, raw bytes in names) are read as git reads them.
 - `caps.required-capabilities`: A server missing a capability ply needs (ls-refs, fetch) is refused as unsupported before any operation.
 - `caps.object-format`: object-format=sha1 is accepted; any other object format is refused as unsupported.
-- `caps.fetch-argument-gating`: ply sends a fetch argument (filter, shallow, include-tag, thin-pack, ofs-delta) only when the advertisement allows it, as git fetch does.
 - `caps.filter-not-advertised`: A server whose fetch= line lists no `filter` (stock http-backend) gets no filter argument after one probe.
 - `fetch.acknowledgments-ready-packfile`: v2 response sections in order (acknowledgments, ready, shallow-info, packfile); a server that breaks the order is a protocol error, as it is for git.
 - `fetch.filter-combine`: filter combine:blob:none+tree:&lt;k> (a commit and the first levels of its path in one request).
@@ -75,15 +73,15 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `push.sideband-hook-output`: side-band-64k on receive-pack: the report on band 1, hook output on band 2.
 - `push.hook-rejection`: A pre-receive or update hook that declines: ng with the hook's reason, ref unchanged.
 - `concurrency.two-transfer-runners`: Two resumable transfers of one plan at once both finish with the planned head; each refused step is settled by reading refs.
-- `tags.move-existing-tag`: An existing tag ref moved with its current old id (a non-fast-forward lightweight move, or one annotated tag replaced by another) is an ordinary ref update.
 - `errors.err-pkt-line`: An ERR pkt-line anywhere in a response is a typed remote error carrying the scrubbed message.
 - `interrupted.abort-during-push`: An external AbortSignal during a push: aborted if the body was never pulled, ambiguous once sent; git decides what landed.
 - `interrupted.resumable-transfer`: A multi-step transfer paused or interrupted is resumed from refs, not from local state, and ends at the planned head.
 - `http.redirects`: A 3xx on the advertisement is followed as git follows it (within policy); a 3xx on a POST is never followed.
 - `http.sideband-keepalive`: Empty band-1 keepalives while a hook runs do not end the push read.
 
-### Artifacts observed by stock git or wire probes, never by ply (20)
+### Artifacts observed by stock git or wire probes, never by ply (19)
 
+- `caps.fetch-argument-gating`: ply sends a fetch argument (filter, shallow, include-tag, thin-pack, ofs-delta) only when the advertisement allows it, as git fetch does.
 - `caps.receive-pack-capabilities`: receive-pack capabilities (report-status, report-status-v2, side-band-64k, atomic, push-options, delete-refs, ofs-delta, object-format) are read and checked before the POST.
 - `fetch.want-tip-full-pack`: want of a tip with done and no filter: the pack holds exactly what pack-objects sends.
 - `fetch.want-have-line-syntax`: want/have/shallow lines: upload-pack's verdict on each class of id, and ply refusing non-ids before the wire.
@@ -99,8 +97,6 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `fetch.ofs-delta-requested`: ofs-delta: OFS_DELTA entries only when asked for.
 - `pack.push-ofs-delta-accepted`: receive-pack accepts a pushed pack with OFS_DELTA entries when it advertises ofs-delta.
 - `push.push-options`: push-options: sent only when advertised; they reach the hook.
-- `push.ref-name-rules`: receive-pack's ref-name rules ("funny refname"): ply refuses before the wire exactly what receive-pack refuses.
-- `tags.many-tags`: A repository with many tags: listing, include-tag and fetch stay correct.
 - `http.credential-forms`: Bearer, Basic and URL-userinfo credentials produce the Authorization header git sends for the same input.
 - `http.chunked-request-body`: A large push body streamed with chunked transfer-encoding (duplex half).
 - `http.large-request-body`: A large push request body (tens of MiB) reaches the server whole.
@@ -130,10 +126,10 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
-| `refs.ls-refs-listing` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `lsRefs`, `listRefs` | 2 |
+| `refs.ls-refs-listing` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `lsRefs`, `listRefs` | 3 |
 | `refs.ref-prefix` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `lsRefs`, `listRefs` | 1 |
-| `refs.symref-head` | verified | ply↔git, ply↔Artifacts | `lsRefs` | 1 |
-| `refs.directory-file-conflict` | verified | ply↔git | `push` | 1 |
+| `refs.symref-head` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `lsRefs`, `push` | 2 |
+| `refs.directory-file-conflict` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push` | 1 |
 | `refs.peeled-tags` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `lsRefs`, `listRefs` | 1 |
 | `refs.unborn-empty-repo` | verified | ply↔git, ply↔Artifacts | `lsRefs` | 2 |
 | `refs.advertisement-shapes` | verified | ply↔git | `lsRefs` | 2 |
@@ -150,6 +146,7 @@ Tests:
 
 - `test/parity.test.js`: ls-refs == git ls-remote (prefixes, symrefs, peeled tags, many refs)
 - `test/e2e-customer.test.js`: listRefs is for-each-ref, before the deletes
+- `test/probes/wire.test.js`: reference: ${plan.id} meets its answer with every sender
 
 Evidence:
 
@@ -158,6 +155,15 @@ Evidence:
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `refs/small`
 - git↔Artifacts: loadgen-compat-20261024: `ls_remote/small/v2`
 - git↔Artifacts: validate-7b0c310f: `git judge: fsck --strict, refs, history`
+- ply↔git: `test/probes/wire.test.js`
+- ply↔Artifacts: wire-20261115t2116-1nam: `refs.ls-refs-listing#two-thousand-refs/art-ply`
+- git↔Artifacts: wire-20261115t2116-1nam: `refs.ls-refs-listing#two-thousand-refs/art-git`
+- wire↔Artifacts: wire-20261115t2116-1nam: `refs.ls-refs-listing#two-thousand-refs/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `refs.ls-refs-listing#two-thousand-refs/art-curl`
+- wire↔Artifacts: wire-20261115t2116-1nam: `refs.ls-refs-listing#unknown-argument/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `refs.ls-refs-listing#unknown-argument/art-curl`
+
+> The two-thousand-refs plan lists 1500 branches, 500 annotated tags and HEAD and compares a digest of the whole listing.
 
 #### `refs.ref-prefix`
 
@@ -180,19 +186,25 @@ Evidence:
 
 ls-refs `symrefs` reports the target of HEAD, and the target is the default branch.
 
-Ops: `src/lsrefs.ts` `lsRefs`.
+Ops: `src/lsrefs.ts` `lsRefs`, `src/push.ts` `push`.
 
 Tests:
 
 - `test/parity.test.js`: ls-refs == git ls-remote (prefixes, symrefs, peeled tags, many refs)
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/parity.test.js`
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `refs/n4_head`
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `refs/n4`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t2113-phhp: `refs.symref-head#delete-default-branch/art-ply`
+- git↔Artifacts: probes-20261115t2113-phhp: `refs.symref-head#delete-default-branch/art-git`
+- ply↔Artifacts: probes-20261115t2133-txqj: `refs.symref-head#delete-default-branch/art-ply`
+- git↔Artifacts: probes-20261115t2133-txqj: `refs.symref-head#delete-default-branch/art-git`
 
-> The Artifacts checks read a repository stock git pushed; no probe checks HEAD after a multi-branch push from ply itself.
+> The delete-default-branch probe asks for a delete of the branch HEAD names and reads HEAD back with ls-remote --symref.
 
 #### `refs.directory-file-conflict`
 
@@ -207,6 +219,18 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t2126-d4jn: `refs.directory-file-conflict#file-then-dir/art-ply`
+- git↔Artifacts: probes-20261115t2126-d4jn: `refs.directory-file-conflict#file-then-dir/art-git`
+- ply↔Artifacts: probes-20261115t2126-d4jn: `refs.directory-file-conflict#dir-then-file/art-ply`
+- git↔Artifacts: probes-20261115t2126-d4jn: `refs.directory-file-conflict#dir-then-file/art-git`
+- ply↔Artifacts: probes-20261115t2126-d4jn: `refs.directory-file-conflict#both-in-one-push/art-ply`
+- git↔Artifacts: probes-20261115t2126-d4jn: `refs.directory-file-conflict#both-in-one-push/art-git`
+- ply↔Artifacts: probes-20261115t2133-txqj: `refs.directory-file-conflict#file-then-dir/art-ply`
+- git↔Artifacts: probes-20261115t2133-txqj: `refs.directory-file-conflict#file-then-dir/art-git`
+- ply↔Artifacts: probes-20261115t2133-txqj: `refs.directory-file-conflict#dir-then-file/art-ply`
+- git↔Artifacts: probes-20261115t2133-txqj: `refs.directory-file-conflict#dir-then-file/art-git`
+- ply↔Artifacts: probes-20261115t2133-txqj: `refs.directory-file-conflict#both-in-one-push/art-ply`
+- git↔Artifacts: probes-20261115t2133-txqj: `refs.directory-file-conflict#both-in-one-push/art-git`
 
 #### `refs.peeled-tags`
 
@@ -272,6 +296,9 @@ Observed:
 - wire↔Artifacts: wire-20261115t2038-ee4x: `refs.v0-upload-pack-advertisement#no-protocol-header/art-raw`
 - wire↔Artifacts: wire-20261115t2038-ee4x: `refs.v0-upload-pack-advertisement#no-protocol-header/art-curl`
 - git↔Artifacts: wire-20261115t2038-ee4x: `refs.v0-upload-pack-advertisement#no-protocol-header/art-git`
+- wire↔Artifacts: wire-20261115t2116-1nam: `refs.v0-upload-pack-advertisement#two-thousand-refs/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `refs.v0-upload-pack-advertisement#two-thousand-refs/art-curl`
+- git↔Artifacts: wire-20261115t2116-1nam: `refs.v0-upload-pack-advertisement#two-thousand-refs/art-git`
 
 > Stock git, raw requests and curl have probed v0 on Artifacts; ply has not.
 
@@ -299,7 +326,7 @@ Evidence:
 | `caps.v2-capability-advertisement` | verified | ply↔git, ply↔Artifacts, wire↔Artifacts | `discover`, `parseCapabilitiesV2` | 2 |
 | `caps.required-capabilities` | verified | ply↔git | `checkRequiredV2`, `discover` | 1 |
 | `caps.object-format` | verified | ply↔git | `decideObjectFormat`, `discover` | 1 |
-| `caps.fetch-argument-gating` | verified | ply↔git | `fetchPack`, `fetchRequest` | 1 |
+| `caps.fetch-argument-gating` | verified | ply↔git, wire↔Artifacts | `fetchPack`, `fetchRequest` | 1 |
 | `caps.filter-not-advertised` | verified | ply↔git | `fetchPack`, `readFile`, `listTree` | 1 |
 | `caps.receive-pack-capabilities` | verified | ply↔git, wire↔Artifacts | `receiveCaps`, `checkPushCaps` | 2 |
 | `caps.server-option` | unsupported (observed) | wire↔Artifacts | — | 0 |
@@ -324,6 +351,8 @@ Evidence:
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `discover/v2_caps`
 - wire↔Artifacts: loadgen-phase2-20261025: `capability_table/v2`
 - wire↔Artifacts: loadgen-phase5-delta-20261025: `caps/v2_fetch_features`
+- wire↔Artifacts: wire-20261115t2116-1nam: `caps.v2-capability-advertisement#unknown-capability-line/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `caps.v2-capability-advertisement#unknown-capability-line/art-curl`
 
 #### `caps.required-capabilities`
 
@@ -370,6 +399,8 @@ Tests:
 Evidence:
 
 - ply↔git: `test/space/advertisement.test.js`
+- wire↔Artifacts: wire-20261115t2116-1nam: `caps.fetch-argument-gating#unknown-fetch-argument/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `caps.fetch-argument-gating#unknown-fetch-argument/art-curl`
 
 #### `caps.filter-not-advertised`
 
@@ -401,6 +432,8 @@ Evidence:
 - ply↔git: `test/space/advertisement.test.js`
 - wire↔Artifacts: loadgen-phase2-20261025: `receive_caps/artifacts`
 - wire↔Artifacts: loadgen-phase5-delta-20261025: `caps/receive_pack_ofs_delta`
+- wire↔Artifacts: wire-20261115t2116-1nam: `caps.receive-pack-capabilities#unknown-capability-on-push/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `caps.receive-pack-capabilities#unknown-capability-on-push/art-curl`
 
 #### `caps.server-option`
 
@@ -1030,6 +1063,7 @@ Evidence:
 - ply↔git: `test/probes/probes.test.js`
 - ply↔Artifacts: probes-20261114t2226-yyjq: `pack.push-malformed-object-refused#missing-blob/art-ply`
 - ply↔Artifacts: probes-20261114t2226-yyjq: `pack.push-malformed-object-refused#delta-copy-past-end/art-ply`
+- ply↔Artifacts: probes-20261115t2113-phhp: `pack.push-malformed-object-refused#tag-type-mismatch/art-ply`
 
 > ply's encoders never write a malformed object (the encode-*-fsck tests); the probes carry one through pushPack: a commit naming a missing blob, a delta copying past its base.
 
@@ -1168,7 +1202,7 @@ Evidence:
 | `push.sideband-hook-output` | verified | ply↔git | `push` | 1 |
 | `push.push-options` | verified | ply↔git, git↔Artifacts | `push`, `pushPack` | 2 |
 | `push.hook-rejection` | verified | ply↔git | `push` | 1 |
-| `push.ref-name-rules` | verified | ply↔git, git↔Artifacts, wire↔Artifacts | `push` | 1 |
+| `push.ref-name-rules` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push` | 2 |
 | `push.ref-to-missing-object-refused` | verified | ply↔git, ply↔Artifacts | `pushPack` | 1 |
 | `push.size-limits` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push`, `pushPack` | 2 |
 | `push.many-ref-updates` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push` | 1 |
@@ -1409,13 +1443,14 @@ Evidence:
 
 #### `push.ref-name-rules`
 
-receive-pack's ref-name rules ("funny refname"): ply refuses before the wire exactly what receive-pack refuses.
+receive-pack's ref-name rules ("funny refname"): ply refuses before the wire exactly what receive-pack refuses, and also any name over 1024 bytes, which receive-pack accepts.
 
 Ops: `src/push.ts` `push`.
 
 Tests:
 
 - `test/space/refname.test.js`: ref names: ply agrees with git check-ref-format and receive-pack on every cell
+- `test/probes/wire.test.js`: reference: ${plan.id} meets its answer with every sender
 
 Evidence:
 
@@ -1424,6 +1459,38 @@ Evidence:
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `ref/dotdot`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `ref/control_char`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `ref/long_name`
+- ply↔git: `test/probes/wire.test.js`
+- ply↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#leading-dash/art-ply`
+- ply↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#component-200/art-ply`
+- ply↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#path-1000/art-ply`
+- ply↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#component-300/art-ply`
+- git↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#leading-dash/art-git`
+- git↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#component-200/art-git`
+- git↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#path-1000/art-git`
+- git↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#component-300/art-git`
+- git↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#path-4000/art-git`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#dot-dot/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#at-brace/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#lock-suffix/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#control-char/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#del-char/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#space/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#colon/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#backslash/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#double-slash/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#trailing-slash/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#trailing-dot/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#dot-component/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#bare-head/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#refs-heads-at/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#refs-heads-head/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#path-4000/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#leading-dash/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#component-200/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#path-1000/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `push.ref-name-rules#component-300/art-raw`
+
+> The wire plans send each refused name from a raw socket; stock git and ply refuse them before any request, so their Artifacts checks for those names say nothing about the server and are not cited. ply's 1024-byte cap (src/validate.ts) refuses the 4000-byte name receive-pack and stock git push.
 
 #### `push.ref-to-missing-object-refused`
 
@@ -1439,6 +1506,7 @@ Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
 - ply↔Artifacts: probes-20261115t1926-gfhc: `push.ref-to-missing-object-refused#not-in-pack-or-repo/art-ply`
+- ply↔Artifacts: probes-20261115t2113-phhp: `push.ref-to-missing-object-refused#tag-of-missing-object/art-ply`
 
 > Stock git refuses such a push client side, so only ply (pushPack with a pack of no objects) sends it.
 
@@ -1707,9 +1775,9 @@ Evidence:
 | `tags.lightweight-create` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `createTag` | 2 |
 | `tags.annotated-create` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `createTag` | 2 |
 | `tags.delete` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `deleteTag` | 2 |
-| `tags.move-existing-tag` | verified | ply↔git | `push` | 1 |
-| `tags.peel-chain` | verified | ply↔git, ply↔Artifacts | `readFile`, `createBranch` | 2 |
-| `tags.many-tags` | verified | git↔Artifacts | `lsRefs` | 0 |
+| `tags.move-existing-tag` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push` | 1 |
+| `tags.peel-chain` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `readFile`, `createBranch` | 3 |
+| `tags.many-tags` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `lsRefs` | 1 |
 
 #### `tags.lightweight-create`
 
@@ -1769,6 +1837,8 @@ Evidence:
 - ply↔git: `test/probes/probes.test.js`
 - ply↔Artifacts: probes-20261114t2226-yyjq: `tags.delete#plain/art-ply`
 - git↔Artifacts: probes-20261114t2226-yyjq: `tags.delete#plain/art-git`
+- ply↔Artifacts: probes-20261115t2113-phhp: `tags.delete#annotated/art-ply`
+- git↔Artifacts: probes-20261115t2113-phhp: `tags.delete#annotated/art-git`
 
 > The stale half of the validate check is refused by ply-web from ls-refs, not by Artifacts.
 
@@ -1785,6 +1855,10 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t2113-phhp: `tags.move-existing-tag#non-fast-forward/art-ply`
+- git↔Artifacts: probes-20261115t2113-phhp: `tags.move-existing-tag#non-fast-forward/art-git`
+- ply↔Artifacts: probes-20261115t2113-phhp: `tags.move-existing-tag#annotated-to-other-tag/art-ply`
+- git↔Artifacts: probes-20261115t2113-phhp: `tags.move-existing-tag#annotated-to-other-tag/art-git`
 
 #### `tags.peel-chain`
 
@@ -1796,11 +1870,15 @@ Tests:
 
 - `test/e2e-customer.test.js`: createBranch from a branch name, a short name, a peeled annotated tag
 - `test/read.test.js`: readFile bytes == git show &lt;ref>:&lt;path> for every blob path and every ref form
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
 - ply↔git: `test/read.test.js`
 - ply↔Artifacts: validate-7b0c310f: `read: tag name resolves (ref=v1)`
+- ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t2113-phhp: `tags.peel-chain#tag-of-tag/art-ply`
+- git↔Artifacts: probes-20261115t2113-phhp: `tags.peel-chain#tag-of-tag/art-git`
 
 #### `tags.many-tags`
 
@@ -1808,11 +1886,17 @@ A repository with many tags: listing, include-tag and fetch stay correct.
 
 Ops: `src/lsrefs.ts` `lsRefs`.
 
+Tests:
+
+- `test/probes/wire.test.js`: reference: ${plan.id} meets its answer with every sender
+
 Evidence:
 
 - git↔Artifacts: loadgen-phase2-20261025: `shape/manytags`
+- ply↔git: `test/probes/wire.test.js`
+- ply↔Artifacts: wire-20261115t2116-1nam: `refs.ls-refs-listing#two-thousand-refs/art-ply`
 
-> No ply test or probe lists a many-tag repository.
+> ply lists a 500-tag repository (2001 refs) in the wire plans; include-tag and fetch across many tags are checked only with stock git.
 
 ### Merges and rebases as ancestry exercisers (`ancestry`, 7)
 
@@ -2247,7 +2331,7 @@ Evidence:
 | `http.sideband-keepalive` | verified | ply↔git | `push` | 2 |
 | `http.request-content-encoding` | unsupported (observed) | wire↔Artifacts | — | 0 |
 | `http.content-length-framing` | unsupported (observed) | git↔Artifacts, wire↔Artifacts | — | 0 |
-| `http.expect-continue-and-dumb-http` | unsupported (observed) | wire↔Artifacts | — | 0 |
+| `http.expect-continue-and-dumb-http` | unsupported (observed) | git↔Artifacts, wire↔Artifacts | — | 0 |
 
 #### `http.smart-http-discovery`
 
@@ -2414,6 +2498,10 @@ Observed:
 - wire↔Artifacts: loadgen-phase2-20261025: `dumb_http`
 - wire↔Artifacts: wire-20261115t2038-ee4x: `http.expect-continue-and-dumb-http#expect-100-receive-pack/art-raw`
 - wire↔Artifacts: wire-20261115t2038-ee4x: `http.expect-continue-and-dumb-http#expect-100-receive-pack/art-curl`
+- wire↔Artifacts: wire-20261115t2116-1nam: `http.expect-continue-and-dumb-http#dumb-info-refs/art-raw`
+- git↔Artifacts: wire-20261115t2116-1nam: `http.expect-continue-and-dumb-http#dumb-info-refs/art-git`
+- wire↔Artifacts: wire-20261115t2116-1nam: `http.expect-continue-and-dumb-http#dumb-head/art-raw`
+- wire↔Artifacts: wire-20261115t2116-1nam: `http.expect-continue-and-dumb-http#dumb-objects-info-packs/art-raw`
 
 ## Recorded runs
 
@@ -2433,4 +2521,8 @@ Observed:
 | `probes-20261114t2226-yyjq` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 81 | ply differential probes, full matrix (t229u days 9-10; scripts/probes.mjs --artifacts, probe code 744e85097786a1b0 on ply a78ed24 plus the two harness fixes committed with this entry: the run's signal handler also closes a repository still being created, and a stock git update carries its lease without a forced refspec): every scenario in src/probe-scenarios.ts, ply and stock git 2.47.3 (node 24.22.1), each against git http-backend with Artifacts' known policy and against a fresh Artifacts repository per scenario and client (namespace ply-loadgen, one at a time); same recording proxy and stock git judge as probes-20261114t1909-sl8l; cf-ray kept for every Artifacts request; every token revoked and probed, every repository deleted and checked by listing. |
 | `probes-20261115t1926-gfhc` | 2026-11-15 | ply↔Artifacts, git↔Artifacts | 31 | ply differential probes, malformed packs and objects (scripts/probes.mjs --artifacts --only the 21 scenarios added in 24cafa1, probe code ca2eec66b288b4b2 on ply b9b33db): ply and, where it can send the input, stock git 2.47.3 (node 24.22.1), each against git http-backend with Artifacts' known policy and against a fresh Artifacts repository per scenario and client (namespace ply-loadgen, one at a time); same recording proxy and stock git judge as probes-20261114t2226-yyjq; cf-ray kept for every Artifacts request; every token revoked and probed, every repository deleted and checked by listing. |
 | `wire-20261115t2038-ee4x` | 2026-11-15 | wire↔Artifacts, git↔Artifacts, ply↔Artifacts | 50 | ply HTTP-framing and malformed-request wire probes (scripts/wire-probes.mjs --artifacts, the 20 plans of test/probes/wire-plans.ts, probe code 19288b51af72a83f on ply 96b7a7d): each request sent directly to the target, without a proxy, from a raw socket (node net/tls, exact framing), curl 8.14.1, stock git 2.47.3 and ply where each can express it, against git http-backend with Artifacts' known policy and against a fresh Artifacts repository per plan (namespace ply-loadgen, one at a time, seeded and judged through the recording proxy's side and judge channels); credentials only from 0600 files (curl -H @file, git include.path); cf-ray kept for every Artifacts answer; every token revoked and probed, every repository deleted and checked by listing. |
+| `probes-20261115t2113-phhp` | 2026-11-15 | ply↔Artifacts, git↔Artifacts | 12 | ply differential probes, ref and tag-object semantics (scripts/probes.mjs --artifacts --only the 10 scenarios of REF_SEMANTICS, probe code b726c69c5eaa6ecd on ply d5db942 plus the phase-4 harness): ply and, where it can send the push, stock git 2.47.3 (node 24.22.1), each against git http-backend with Artifacts' known policy and against a fresh Artifacts repository per scenario and client (namespace ply-loadgen, one at a time); same recording proxy and stock git judge as probes-20261114t2226-yyjq; cf-ray kept for every Artifacts request; every token revoked and probed, every repository deleted and checked by listing. The three directory/file scenarios stopped at the judge in this run and are recorded by probes-20261115t2126-d4jn. |
+| `probes-20261115t2126-d4jn` | 2026-11-15 | ply↔Artifacts, git↔Artifacts | 6 | The three refs.directory-file-conflict scenarios again (probe code 5d7f4447288f58df), with the judge recording a repository stock git cannot mirror as such (its refs as listed, the clone's refusal as its fsck problem) instead of stopping; otherwise as probes-20261115t2113-phhp. |
+| `wire-20261115t2116-1nam` | 2026-11-15 | wire↔Artifacts, git↔Artifacts, ply↔Artifacts | 75 | ply wire probes, ref names, unknown capabilities, dumb HTTP and a 2001-ref listing (scripts/wire-probes.mjs --artifacts, the 29 phase-4 plans of test/probes/wire-plans.ts, probe code e5af73ceefc0d6a8 on ply d5db942 plus the phase-4 harness): each request sent directly to the target from a raw socket, curl 8.14.1 where listed, stock git 2.47.3 and ply where each can express it, against git http-backend with Artifacts' known policy and a fresh Artifacts repository per plan (namespace ply-loadgen, one at a time); a sender that refuses a request itself is recorded as such and never reaches the server; credentials only from 0600 files; cf-ray kept for every Artifacts answer; every token revoked and probed, every repository deleted and checked by listing. |
+| `probes-20261115t2133-txqj` | 2026-11-15 | ply↔Artifacts, git↔Artifacts | 8 | The three refs.directory-file-conflict scenarios and refs.symref-head#delete-default-branch again (probe code 60d752563bc119fa), with the recording proxy also keeping each receive-pack answer's per-command report (its unpack, ok and ng lines); otherwise as probes-20261115t2126-d4jn. |
 

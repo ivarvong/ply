@@ -44,6 +44,18 @@ const malGit = (check: CheckOf<'probes-20261115t1926-gfhc'> & `${string}/art-git
 const wireArt = (check: CheckOf<'wire-20261115t2038-ee4x'> & (`${string}/art-raw` | `${string}/art-curl`)): OtherEvidence => ({ kind: 'wire_probe_vs_artifacts', ref: { tag: 'run', run: 'wire-20261115t2038-ee4x', check } });
 const wireGit = (check: CheckOf<'wire-20261115t2038-ee4x'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'wire-20261115t2038-ee4x', check } });
 const wirePly = (check: CheckOf<'wire-20261115t2038-ee4x'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'wire-20261115t2038-ee4x', check } });
+// Phase 4 (15 Nov): ref and tag-object semantics (probes-20261115t2113-phhp, the directory/file three in
+// probes-20261115t2126-d4jn) and the ref-name, capability, dumb-HTTP and listing wire plans (wire-20261115t2116-1nam).
+const semPly = (check: CheckOf<'probes-20261115t2113-phhp'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261115t2113-phhp', check } });
+const semGit = (check: CheckOf<'probes-20261115t2113-phhp'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261115t2113-phhp', check } });
+const dfPly = (check: CheckOf<'probes-20261115t2126-d4jn'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261115t2126-d4jn', check } });
+const dfGit = (check: CheckOf<'probes-20261115t2126-d4jn'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261115t2126-d4jn', check } });
+const rpPly = (check: CheckOf<'probes-20261115t2133-txqj'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261115t2133-txqj', check } });
+const rpGit = (check: CheckOf<'probes-20261115t2133-txqj'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261115t2133-txqj', check } });
+const w4Art = (check: CheckOf<'wire-20261115t2116-1nam'> & (`${string}/art-raw` | `${string}/art-curl`)): OtherEvidence => ({ kind: 'wire_probe_vs_artifacts', ref: { tag: 'run', run: 'wire-20261115t2116-1nam', check } });
+const w4Git = (check: CheckOf<'wire-20261115t2116-1nam'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'wire-20261115t2116-1nam', check } });
+const w4Ply = (check: CheckOf<'wire-20261115t2116-1nam'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'wire-20261115t2116-1nam', check } });
+const WIRE_TEST = 'reference: ${plan.id} meets its answer with every sender';
 const verified = (...evidence: NonEmpty<Evidence>): Extract<Status, { readonly tag: 'verified' }> => ({ tag: 'verified', evidence });
 const IMPLEMENTED: Extract<Status, { readonly tag: 'implemented' }> = { tag: 'implemented' };
 const unsupported = (why: string, ...observed: readonly OtherEvidence[]): Extract<Status, { readonly tag: 'unsupported' }> => ({ tag: 'unsupported', why, observed });
@@ -108,9 +120,9 @@ const REFS: readonly BehaviourIn<'refs'>[] = [
     id: 'refs.ls-refs-listing', area: 'refs',
     description: 'v2 ls-refs lists every ref with its object id.',
     ops: [LS_REFS, LIST_REFS],
-    tests: [t('test/parity.test.js', PARITY_LSREFS), t('test/e2e-customer.test.js', 'listRefs is for-each-ref, before the deletes')],
-    status: verified(git('test/parity.test.js', PARITY_LSREFS), validatePly('refs list (peeled tags)'), plyWorker('refs/small'), compat('ls_remote/small/v2'), validateGit('git judge: fsck --strict, refs, history')),
-    notes: [],
+    tests: [t('test/parity.test.js', PARITY_LSREFS), t('test/e2e-customer.test.js', 'listRefs is for-each-ref, before the deletes'), t('test/probes/wire.test.js', WIRE_TEST)],
+    status: verified(git('test/parity.test.js', PARITY_LSREFS), validatePly('refs list (peeled tags)'), plyWorker('refs/small'), compat('ls_remote/small/v2'), validateGit('git judge: fsck --strict, refs, history'), git('test/probes/wire.test.js', WIRE_TEST), w4Ply('refs.ls-refs-listing#two-thousand-refs/art-ply'), w4Git('refs.ls-refs-listing#two-thousand-refs/art-git'), w4Art('refs.ls-refs-listing#two-thousand-refs/art-raw'), w4Art('refs.ls-refs-listing#two-thousand-refs/art-curl'), w4Art('refs.ls-refs-listing#unknown-argument/art-raw'), w4Art('refs.ls-refs-listing#unknown-argument/art-curl')),
+    notes: ['The two-thousand-refs plan lists 1500 branches, 500 annotated tags and HEAD and compares a digest of the whole listing.'],
   }),
   b({
     id: 'refs.ref-prefix', area: 'refs',
@@ -123,17 +135,17 @@ const REFS: readonly BehaviourIn<'refs'>[] = [
   b({
     id: 'refs.symref-head', area: 'refs',
     description: 'ls-refs `symrefs` reports the target of HEAD, and the target is the default branch.',
-    ops: [LS_REFS],
-    tests: [t('test/parity.test.js', PARITY_LSREFS)],
-    status: verified(git('test/parity.test.js', PARITY_LSREFS), plyWorker('refs/n4_head'), plyWorker('refs/n4')),
-    notes: ['The Artifacts checks read a repository stock git pushed; no probe checks HEAD after a multi-branch push from ply itself.'],
+    ops: [LS_REFS, PUSH],
+    tests: [t('test/parity.test.js', PARITY_LSREFS), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/parity.test.js', PARITY_LSREFS), plyWorker('refs/n4_head'), plyWorker('refs/n4'), git('test/probes/probes.test.js', PROBES), semPly('refs.symref-head#delete-default-branch/art-ply'), semGit('refs.symref-head#delete-default-branch/art-git'), rpPly('refs.symref-head#delete-default-branch/art-ply'), rpGit('refs.symref-head#delete-default-branch/art-git')),
+    notes: ['The delete-default-branch probe asks for a delete of the branch HEAD names and reads HEAD back with ls-remote --symref.'],
   }),
   b({
     id: 'refs.directory-file-conflict', area: 'refs',
     description: 'A ref cannot be both a name and a directory: creating refs/heads/a/b while refs/heads/a exists (or the reverse, or both in one push) is refused and leaves the existing ref as it was.',
     ops: [PUSH],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES)),
+    status: verified(git('test/probes/probes.test.js', PROBES), dfPly('refs.directory-file-conflict#file-then-dir/art-ply'), dfGit('refs.directory-file-conflict#file-then-dir/art-git'), dfPly('refs.directory-file-conflict#dir-then-file/art-ply'), dfGit('refs.directory-file-conflict#dir-then-file/art-git'), dfPly('refs.directory-file-conflict#both-in-one-push/art-ply'), dfGit('refs.directory-file-conflict#both-in-one-push/art-git'), rpPly('refs.directory-file-conflict#file-then-dir/art-ply'), rpGit('refs.directory-file-conflict#file-then-dir/art-git'), rpPly('refs.directory-file-conflict#dir-then-file/art-ply'), rpGit('refs.directory-file-conflict#dir-then-file/art-git'), rpPly('refs.directory-file-conflict#both-in-one-push/art-ply'), rpGit('refs.directory-file-conflict#both-in-one-push/art-git')),
     notes: [],
   }),
   b({
@@ -165,7 +177,7 @@ const REFS: readonly BehaviourIn<'refs'>[] = [
     description: 'The v0/v1 upload-pack advertisement (refs and capabilities on the info/refs GET, no Git-Protocol header).',
     ops: [],
     tests: [],
-    status: unsupported('ply asks for protocol v2 on upload-pack and refuses a server that answers otherwise (src/caps.ts).', compat('ls_remote/small/v0'), compat('clone_full/small/v0'), compat('depth_1/small/v0'), wireArt('refs.v0-upload-pack-advertisement#no-protocol-header/art-raw'), wireArt('refs.v0-upload-pack-advertisement#no-protocol-header/art-curl'), wireGit('refs.v0-upload-pack-advertisement#no-protocol-header/art-git')),
+    status: unsupported('ply asks for protocol v2 on upload-pack and refuses a server that answers otherwise (src/caps.ts).', compat('ls_remote/small/v0'), compat('clone_full/small/v0'), compat('depth_1/small/v0'), wireArt('refs.v0-upload-pack-advertisement#no-protocol-header/art-raw'), wireArt('refs.v0-upload-pack-advertisement#no-protocol-header/art-curl'), wireGit('refs.v0-upload-pack-advertisement#no-protocol-header/art-git'), w4Art('refs.v0-upload-pack-advertisement#two-thousand-refs/art-raw'), w4Art('refs.v0-upload-pack-advertisement#two-thousand-refs/art-curl'), w4Git('refs.v0-upload-pack-advertisement#two-thousand-refs/art-git')),
     notes: ['Stock git, raw requests and curl have probed v0 on Artifacts; ply has not.'],
   }),
   b({
@@ -184,7 +196,7 @@ const CAPS: readonly BehaviourIn<'caps'>[] = [
     description: 'The v2 capability advertisement: version 2, agent, ls-refs and fetch features, object-format, server-option, session-id.',
     ops: [DISCOVER, PARSE_CAPS],
     tests: [t('test/space/advertisement.test.js', 'caps: every cell through discover() (derived from the table)'), t('test/space/advertisement.test.js', ADV_REAL)],
-    status: verified(git('test/space/advertisement.test.js', ADV_REAL), validatePly('discover'), plyWorker('discover/v2_caps'), phase2Wire('capability_table/v2'), deltaWire('caps/v2_fetch_features')),
+    status: verified(git('test/space/advertisement.test.js', ADV_REAL), validatePly('discover'), plyWorker('discover/v2_caps'), phase2Wire('capability_table/v2'), deltaWire('caps/v2_fetch_features'), w4Art('caps.v2-capability-advertisement#unknown-capability-line/art-raw'), w4Art('caps.v2-capability-advertisement#unknown-capability-line/art-curl')),
     notes: [],
   }),
   b({
@@ -208,7 +220,7 @@ const CAPS: readonly BehaviourIn<'caps'>[] = [
     description: 'ply sends a fetch argument (filter, shallow, include-tag, thin-pack, ofs-delta) only when the advertisement allows it, as git fetch does.',
     ops: [FETCH_PACK, FETCH_REQUEST],
     tests: [t('test/space/advertisement.test.js', 'request: fetch arguments ply sends, judged by git fetch')],
-    status: verified(git('test/space/advertisement.test.js', 'request: fetch arguments ply sends, judged by git fetch')),
+    status: verified(git('test/space/advertisement.test.js', 'request: fetch arguments ply sends, judged by git fetch'), w4Art('caps.fetch-argument-gating#unknown-fetch-argument/art-raw'), w4Art('caps.fetch-argument-gating#unknown-fetch-argument/art-curl')),
     notes: [],
   }),
   b({
@@ -224,7 +236,7 @@ const CAPS: readonly BehaviourIn<'caps'>[] = [
     description: 'receive-pack capabilities (report-status, report-status-v2, side-band-64k, atomic, push-options, delete-refs, ofs-delta, object-format) are read and checked before the POST.',
     ops: [RECEIVE_CAPS, CHECK_PUSH_CAPS],
     tests: [t('test/space/advertisement.test.js', ADV_PUSH), t('test/push-pack.test.js', 'atomic the server does not advertise: unsupported, no POST, the pack unread')],
-    status: verified(git('test/space/advertisement.test.js', ADV_PUSH), phase2Wire('receive_caps/artifacts'), deltaWire('caps/receive_pack_ofs_delta')),
+    status: verified(git('test/space/advertisement.test.js', ADV_PUSH), phase2Wire('receive_caps/artifacts'), deltaWire('caps/receive_pack_ofs_delta'), w4Art('caps.receive-pack-capabilities#unknown-capability-on-push/art-raw'), w4Art('caps.receive-pack-capabilities#unknown-capability-on-push/art-curl')),
     notes: [],
   }),
   b({
@@ -512,7 +524,7 @@ const PACK: readonly BehaviourIn<'pack'>[] = [
     description: 'receive-pack refuses a well-framed pack that holds a malformed object or a delta with no base.',
     ops: [PUSH_PACK],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(hostileWrite('pack/invalid_commit_payload'), hostileWrite('pack/delta_missing_base'), git('test/probes/probes.test.js', PROBES), probePly('pack.push-malformed-object-refused#missing-blob/art-ply'), probePly('pack.push-malformed-object-refused#delta-copy-past-end/art-ply')),
+    status: verified(hostileWrite('pack/invalid_commit_payload'), hostileWrite('pack/delta_missing_base'), git('test/probes/probes.test.js', PROBES), probePly('pack.push-malformed-object-refused#missing-blob/art-ply'), probePly('pack.push-malformed-object-refused#delta-copy-past-end/art-ply'), semPly('pack.push-malformed-object-refused#tag-type-mismatch/art-ply')),
     notes: ['ply\'s encoders never write a malformed object (the encode-*-fsck tests); the probes carry one through pushPack: a commit naming a missing blob, a delta copying past its base.'],
   }),  b({
     id: 'pack.push-bad-header-refused', area: 'pack',
@@ -663,18 +675,18 @@ const PUSHES: readonly BehaviourIn<'push'>[] = [
   }),
   b({
     id: 'push.ref-name-rules', area: 'push',
-    description: 'receive-pack\'s ref-name rules ("funny refname"): ply refuses before the wire exactly what receive-pack refuses.',
+    description: 'receive-pack\'s ref-name rules ("funny refname"): ply refuses before the wire exactly what receive-pack refuses, and also any name over 1024 bytes, which receive-pack accepts.',
     ops: [PUSH],
-    tests: [t('test/space/refname.test.js', 'ref names: ply agrees with git check-ref-format and receive-pack on every cell')],
-    status: verified(git('test/space/refname.test.js', 'ref names: ply agrees with git check-ref-format and receive-pack on every cell'), phase2Git('invalid_ref_names'), hostileWrite('ref/dotdot'), hostileWrite('ref/control_char'), hostileWrite('ref/long_name')),
-    notes: [],
+    tests: [t('test/space/refname.test.js', 'ref names: ply agrees with git check-ref-format and receive-pack on every cell'), t('test/probes/wire.test.js', WIRE_TEST)],
+    status: verified(git('test/space/refname.test.js', 'ref names: ply agrees with git check-ref-format and receive-pack on every cell'), phase2Git('invalid_ref_names'), hostileWrite('ref/dotdot'), hostileWrite('ref/control_char'), hostileWrite('ref/long_name'), git('test/probes/wire.test.js', WIRE_TEST), w4Ply('push.ref-name-rules#leading-dash/art-ply'), w4Ply('push.ref-name-rules#component-200/art-ply'), w4Ply('push.ref-name-rules#path-1000/art-ply'), w4Ply('push.ref-name-rules#component-300/art-ply'), w4Git('push.ref-name-rules#leading-dash/art-git'), w4Git('push.ref-name-rules#component-200/art-git'), w4Git('push.ref-name-rules#path-1000/art-git'), w4Git('push.ref-name-rules#component-300/art-git'), w4Git('push.ref-name-rules#path-4000/art-git'), w4Art('push.ref-name-rules#dot-dot/art-raw'), w4Art('push.ref-name-rules#at-brace/art-raw'), w4Art('push.ref-name-rules#lock-suffix/art-raw'), w4Art('push.ref-name-rules#control-char/art-raw'), w4Art('push.ref-name-rules#del-char/art-raw'), w4Art('push.ref-name-rules#space/art-raw'), w4Art('push.ref-name-rules#colon/art-raw'), w4Art('push.ref-name-rules#backslash/art-raw'), w4Art('push.ref-name-rules#double-slash/art-raw'), w4Art('push.ref-name-rules#trailing-slash/art-raw'), w4Art('push.ref-name-rules#trailing-dot/art-raw'), w4Art('push.ref-name-rules#dot-component/art-raw'), w4Art('push.ref-name-rules#bare-head/art-raw'), w4Art('push.ref-name-rules#refs-heads-at/art-raw'), w4Art('push.ref-name-rules#refs-heads-head/art-raw'), w4Art('push.ref-name-rules#path-4000/art-raw'), w4Art('push.ref-name-rules#leading-dash/art-raw'), w4Art('push.ref-name-rules#component-200/art-raw'), w4Art('push.ref-name-rules#path-1000/art-raw'), w4Art('push.ref-name-rules#component-300/art-raw')),
+    notes: ['The wire plans send each refused name from a raw socket; stock git and ply refuse them before any request, so their Artifacts checks for those names say nothing about the server and are not cited. ply\'s 1024-byte cap (src/validate.ts) refuses the 4000-byte name receive-pack and stock git push.'],
   }),
   b({
     id: 'push.ref-to-missing-object-refused', area: 'push',
     description: 'receive-pack refuses a command whose new id is in neither the pack nor the repository (missing necessary objects), moves no ref, and still serves the repository fsck-clean.',
     ops: [PUSH_PACK],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES), malPly('push.ref-to-missing-object-refused#not-in-pack-or-repo/art-ply')),
+    status: verified(git('test/probes/probes.test.js', PROBES), malPly('push.ref-to-missing-object-refused#not-in-pack-or-repo/art-ply'), semPly('push.ref-to-missing-object-refused#tag-of-missing-object/art-ply')),
     notes: ['Stock git refuses such a push client side, so only ply (pushPack with a pack of no objects) sends it.'],
   }),
   b({
@@ -802,7 +814,7 @@ const TAGS: readonly BehaviourIn<'tags'>[] = [
     description: 'A tag delete with the expected old id; a stale expected id is refused.',
     ops: [PUSH, DELETE_TAG],
     tests: [t('test/e2e-customer.test.js', 'deleteTag'), t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/e2e-customer.test.js', 'deleteTag'), validatePly('tag delete (CAS) + stale delete -> 409'), compat('tag_push_delete/scratch/v2'), git('test/probes/probes.test.js', PROBES), probePly('tags.delete#plain/art-ply'), probeGit('tags.delete#plain/art-git')),
+    status: verified(git('test/e2e-customer.test.js', 'deleteTag'), validatePly('tag delete (CAS) + stale delete -> 409'), compat('tag_push_delete/scratch/v2'), git('test/probes/probes.test.js', PROBES), probePly('tags.delete#plain/art-ply'), probeGit('tags.delete#plain/art-git'), semPly('tags.delete#annotated/art-ply'), semGit('tags.delete#annotated/art-git')),
     notes: ['The stale half of the validate check is refused by ply-web from ls-refs, not by Artifacts.'],
   }),
   b({
@@ -810,24 +822,24 @@ const TAGS: readonly BehaviourIn<'tags'>[] = [
     description: 'An existing tag ref moved with its current old id (a non-fast-forward lightweight move, or one annotated tag replaced by another) is an ordinary ref update.',
     ops: [PUSH],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES)),
+    status: verified(git('test/probes/probes.test.js', PROBES), semPly('tags.move-existing-tag#non-fast-forward/art-ply'), semGit('tags.move-existing-tag#non-fast-forward/art-git'), semPly('tags.move-existing-tag#annotated-to-other-tag/art-ply'), semGit('tags.move-existing-tag#annotated-to-other-tag/art-git')),
     notes: [],
   }),
   b({
     id: 'tags.peel-chain', area: 'tags',
     description: 'A ref given as an annotated tag (or a tag of a tag) is peeled to its commit for reads and branch creation.',
     ops: [READ_FILE, CREATE_BRANCH],
-    tests: [t('test/e2e-customer.test.js', 'createBranch from a branch name, a short name, a peeled annotated tag'), t('test/read.test.js', 'readFile bytes == git show <ref>:<path> for every blob path and every ref form')],
-    status: verified(git('test/read.test.js', 'readFile bytes == git show <ref>:<path> for every blob path and every ref form'), validatePly('read: tag name resolves (ref=v1)')),
+    tests: [t('test/e2e-customer.test.js', 'createBranch from a branch name, a short name, a peeled annotated tag'), t('test/read.test.js', 'readFile bytes == git show <ref>:<path> for every blob path and every ref form'), t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/read.test.js', 'readFile bytes == git show <ref>:<path> for every blob path and every ref form'), validatePly('read: tag name resolves (ref=v1)'), git('test/probes/probes.test.js', PROBES), semPly('tags.peel-chain#tag-of-tag/art-ply'), semGit('tags.peel-chain#tag-of-tag/art-git')),
     notes: [],
   }),
   b({
     id: 'tags.many-tags', area: 'tags',
     description: 'A repository with many tags: listing, include-tag and fetch stay correct.',
     ops: [LS_REFS],
-    tests: [],
-    status: verified(phase2Git('shape/manytags')),
-    notes: ['No ply test or probe lists a many-tag repository.'],
+    tests: [t('test/probes/wire.test.js', WIRE_TEST)],
+    status: verified(phase2Git('shape/manytags'), git('test/probes/wire.test.js', WIRE_TEST), w4Ply('refs.ls-refs-listing#two-thousand-refs/art-ply')),
+    notes: ['ply lists a 500-tag repository (2001 refs) in the wire plans; include-tag and fetch across many tags are checked only with stock git.'],
   }),
 ];
 
@@ -1080,7 +1092,7 @@ const HTTP: readonly BehaviourIn<'http'>[] = [
     description: 'Expect: 100-continue, and the dumb HTTP protocol.',
     ops: [],
     tests: [],
-    status: unsupported('ply speaks only smart HTTP and never sends Expect.', phase2Wire('expect_100_continue'), phase2Wire('dumb_http'), wireArt('http.expect-continue-and-dumb-http#expect-100-receive-pack/art-raw'), wireArt('http.expect-continue-and-dumb-http#expect-100-receive-pack/art-curl')),
+    status: unsupported('ply speaks only smart HTTP and never sends Expect.', phase2Wire('expect_100_continue'), phase2Wire('dumb_http'), wireArt('http.expect-continue-and-dumb-http#expect-100-receive-pack/art-raw'), wireArt('http.expect-continue-and-dumb-http#expect-100-receive-pack/art-curl'), w4Art('http.expect-continue-and-dumb-http#dumb-info-refs/art-raw'), w4Git('http.expect-continue-and-dumb-http#dumb-info-refs/art-git'), w4Art('http.expect-continue-and-dumb-http#dumb-head/art-raw'), w4Art('http.expect-continue-and-dumb-http#dumb-objects-info-packs/art-raw')),
     notes: [],
   }),
 ];
