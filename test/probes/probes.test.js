@@ -11,7 +11,7 @@ import { SCENARIOS } from '../../src/probe-scenarios.ts';
 import { ALLOW } from '../../src/probe-allow.ts';
 import { compareScenario, evaluablePairs, judge, plyOutcome, classify, runsFor, soloDiffs } from '../../src/probe-evaluate.ts';
 import { gitOutcome } from './git-outcome.ts';
-import { startReference, runScenario, newTracer } from './runner.mjs';
+import { startReference, runScenario, newTracer, reportOf } from './runner.mjs';
 import { BEHAVIOURS } from '../behaviours/matrix.ts';
 import { ABSENT } from '../../src/probe-types.ts';
 
@@ -34,12 +34,14 @@ test('every scenario probes a matrix behaviour, ids are unique, plans are closed
           case 'raw-commit': return [...o.parents, o.tree];
           case 'raw-tree': return o.entries.map(e => e.blob.tag === 'blob' ? e.blob.of : e.blob.name);
           case 'phantom': return [];
+          case 'raw-tag': return [o.object];
         }
         throw new Error(`unknown seed object ${o.tag}`);
       }),
       ...s.steps.flatMap(st => (st.tag === 'push' ? [st.push] : st.tag === 'concurrent' ? st.pushes : []).flatMap(p => p.updates.flatMap(u => [u.old, u.new]))).filter(e => e.tag === 'obj').map(e => e.name),
       ...s.steps.flatMap(st => (st.tag === 'push' && st.fault.tag === 'race' ? st.fault.moves.map(m => m.to) : [])).filter(e => e.tag === 'obj').map(e => e.name),
       ...s.steps.flatMap(st => (st.tag === 'fetch' ? [st.want] : [])),
+      ...s.steps.flatMap(st => (st.tag === 'push' && st.push.pack.tag === 'listed' ? st.push.pack.objects : [])),
       ...s.final.flatMap(f => (f.tag === 'at' ? [f.at] : f.tag === 'one-of' ? f.names.filter(n => n !== ABSENT) : [])),
     ];
     for (const n of refs) assert.ok(defined.has(n), `${s.id}: ${n} is not a seed object`);
@@ -173,6 +175,16 @@ for (const s of SCENARIOS) {
     assert.deepEqual(v.findings, [], `${s.id}: findings against the reference`);
   });
 }
+
+test('the proxy reads the per-command push report, inside side-band 1 or bare', () => {
+  const pkt = (s) => { const b = Buffer.from(s, 'latin1'); return Buffer.concat([Buffer.from((b.length + 4).toString(16).padStart(4, '0')), b]); };
+  const status = Buffer.concat([pkt('unpack ok\n'), pkt('ok refs/heads/a\n'), pkt('ng refs/heads/a/b failed to update ref\n'), Buffer.from('0000')]);
+  const want = ['unpack ok', 'ok refs/heads/a', 'ng refs/heads/a/b failed to update ref'];
+  assert.deepEqual(reportOf(status), want);
+  assert.deepEqual(reportOf(Buffer.concat([pkt('\x02progress\n'), pkt(`\x01${status.toString('latin1')}`), Buffer.from('0000')])), want);
+  assert.deepEqual(reportOf(Buffer.alloc(0)), []);
+  assert.deepEqual(reportOf(Buffer.from('0010ERR refused\n')), []);
+});
 
 test('no allow entry is unused on the reference pairs', () => {
   assert.deepEqual(judge(SCENARIOS, diffs, ALLOW, evaluated).unused, []);

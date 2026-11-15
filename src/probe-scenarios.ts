@@ -4,7 +4,7 @@
 // (test/probes/runner.mjs here, ply-web's workbench in a Worker) seeds a fresh repository per target, runs the steps,
 // and a judge reads the result back.
 import { ABSENT } from './probe-types.js';
-import type { CommitSpec, Damage, Expectation, Fault, Timeouts, FileSpec, FinalRef, GitForm, Move, NonEmpty, ObjRef, ObjectSpec, OidExpr, Outcome, PackDefect, Push, RawCommitSpec, RawTreeEntry, RawTreeSpec, RefAt, Scenario, Step, StepExpect, TagSpec, Update } from './probe-types.js';
+import type { CommitSpec, Damage, Expectation, Fault, Timeouts, FileSpec, FinalRef, GitForm, Move, NonEmpty, ObjRef, ObjectSpec, OidExpr, Outcome, PackDefect, Push, RawCommitSpec, RawTagSpec, RawTreeEntry, RawTreeSpec, RefAt, Scenario, Step, StepExpect, TagSpec, Update } from './probe-types.js';
 
 const text = (path: string, s: string): FileSpec => ({ path, content: { tag: 'text', text: s } });
 const noise = (path: string, seed: string, bytes: number): FileSpec => ({ path, content: { tag: 'noise', seed, bytes } });
@@ -193,6 +193,104 @@ const MALFORMED: readonly Scenario[] = [
     steps: [step(pushOf([upd(MAIN, o('base'), o('ratio'))])), { tag: 'fetch', ref: MAIN, want: 'ratio', fault: NO_FAULT, git: SAME, timeouts: null }],
     expect: [LANDED, LANDED],
     final: [finalAt(MAIN, 'ratio')],
+    ...PLAIN,
+  },
+];
+
+// ---- ref and object semantics (phase 4): what git refuses about ref shapes and tag objects ----
+// A tag of a tag (t2 -> t1 -> base), a tag of an object nobody holds, a tag whose type line says tree for a commit.
+const rawTag = (name: string, object: string, type: string, tagName: string): RawTagSpec => ({ tag: 'raw-tag', name, object, type, tagName, message: `tag ${tagName}` });
+const NO_GIT_TAG_WALK: GitForm = { tag: 'none', why: 'stock git walks a pushed tag to its object while packing (pack-objects), so it cannot send a tag of a missing or mistyped object' };
+const listedPush = (updates: NonEmpty<Update>, objects: NonEmpty<string>): Push => ({ ...pushOf(updates), pack: { tag: 'listed', objects } });
+const REF_SEMANTICS: readonly Scenario[] = [
+  {
+    id: 'refs.directory-file-conflict#file-then-dir',
+    description: 'refs/heads/a exists; a create of refs/heads/a/b is refused (a ref cannot be both a name and a directory) and a is untouched.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base'), at('refs/heads/a', 'base')] },
+    steps: [step(pushOf([upd('refs/heads/a/b', ZERO, o('ff'))]))],
+    expect: [both(one('conflict', 'cas_conflict'))],
+    final: [finalAt(MAIN, 'base'), finalAt('refs/heads/a', 'base'), absent('refs/heads/a/b')],
+    ...PLAIN,
+  },
+  {
+    id: 'refs.directory-file-conflict#dir-then-file',
+    description: 'refs/heads/a/b exists; a create of refs/heads/a is refused and a/b is untouched.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base'), at('refs/heads/a/b', 'base')] },
+    steps: [step(pushOf([upd('refs/heads/a', ZERO, o('ff'))]))],
+    expect: [both(one('conflict', 'cas_conflict'))],
+    final: [finalAt(MAIN, 'base'), finalAt('refs/heads/a/b', 'base'), absent('refs/heads/a')],
+    ...PLAIN,
+  },
+  {
+    id: 'refs.directory-file-conflict#both-in-one-push',
+    description: 'One non-atomic push creating refs/heads/a and refs/heads/a/b: never both. receive-pack applies each command alone, so a lands and a/b is refused (partial).',
+    seed: { objects: CORE, refs: [at(MAIN, 'base')] },
+    steps: [step(pushOf([upd('refs/heads/a', ZERO, o('ff')), upd('refs/heads/a/b', ZERO, o('diverged'))]))],
+    expect: [both(one('partial', 'push_partial'))],
+    final: [finalAt(MAIN, 'base'), finalAt('refs/heads/a', 'ff'), absent('refs/heads/a/b')],
+    ...PLAIN,
+  },
+  {
+    id: 'refs.symref-head#delete-default-branch',
+    description: 'A delete of the default branch main (what HEAD names) while side exists: refused (receive.denyDeleteCurrent, git\'s default); main and HEAD unchanged.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base'), at(SIDE, 'ff')] },
+    steps: [step(pushOf([upd(MAIN, o('base'), ZERO)]))],
+    expect: [both(REFUSED)],
+    final: [finalAt(MAIN, 'base'), finalAt(SIDE, 'ff')],
+    ...PLAIN,
+  },
+  {
+    id: 'tags.peel-chain#tag-of-tag',
+    description: 'refs/tags/v2 created at a tag (t2) of a tag (t1) of base: lands, both tag objects reachable, peels to base.',
+    seed: { objects: [...CORE, tag('t1', 'base', 'v1'), rawTag('t2', 't1', 'tag', 'v2')], refs: [at(MAIN, 'base')] },
+    steps: [step(pushOf([upd('refs/tags/v2', ZERO, o('t2'))]))],
+    expect: [LANDED],
+    final: [finalAt(MAIN, 'base'), finalAt('refs/tags/v2', 't2')],
+    ...PLAIN,
+  },
+  {
+    id: 'push.ref-to-missing-object-refused#tag-of-missing-object',
+    description: 'refs/tags/m created at a tag object (sent) whose object nobody holds: refused (missing necessary objects); no ref, fsck clean.',
+    seed: { objects: [...CORE, { tag: 'phantom', name: 'phantom', seed: 'tag-of-missing' }, rawTag('tm', 'phantom', 'commit', 'm')], refs: [at(MAIN, 'base')] },
+    steps: [{ ...step(listedPush([upd('refs/tags/m', ZERO, o('tm'))], ['tm'])), git: NO_GIT_TAG_WALK }],
+    expect: [{ tag: 'one', ply: one('rejected', 'push_rejected'), git: null }],
+    final: [finalAt(MAIN, 'base'), absent('refs/tags/m')],
+    ...PLAIN,
+  },
+  {
+    id: 'pack.push-malformed-object-refused#tag-type-mismatch',
+    description: 'refs/tags/w created at a tag object (sent) whose type line says tree while its object, base, is a commit the server holds: refused; no ref, fsck clean.',
+    seed: { objects: [...CORE, rawTag('tw', 'base', 'tree', 'w')], refs: [at(MAIN, 'base')] },
+    steps: [{ ...step(listedPush([upd('refs/tags/w', ZERO, o('tw'))], ['tw'])), git: NO_GIT_TAG_WALK }],
+    expect: [{ tag: 'one', ply: one('rejected', 'push_rejected'), git: null }],
+    final: [finalAt(MAIN, 'base'), absent('refs/tags/w')],
+    ...PLAIN,
+  },
+  {
+    id: 'tags.move-existing-tag#non-fast-forward',
+    description: 'refs/tags/v1 (lightweight, at ff) moved to diverged naming the current old id (git: a lease, which forces): accepted as any ref update.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base'), at('refs/tags/v1', 'ff')] },
+    steps: [step(pushOf([upd('refs/tags/v1', o('ff'), o('diverged'))]))],
+    expect: [LANDED],
+    final: [finalAt(MAIN, 'base'), finalAt('refs/tags/v1', 'diverged')],
+    ...PLAIN,
+  },
+  {
+    id: 'tags.move-existing-tag#annotated-to-other-tag',
+    description: 'refs/tags/v1 at annotated t1 (base) moved to annotated t3 (ff) with the current old id: accepted; t1 no longer reachable.',
+    seed: { objects: [...CORE, tag('t1', 'base', 'v1'), tag('t3', 'ff', 'v1')], refs: [at(MAIN, 'base'), at('refs/tags/v1', 't1')] },
+    steps: [step(pushOf([upd('refs/tags/v1', o('t1'), o('t3'))]))],
+    expect: [LANDED],
+    final: [finalAt(MAIN, 'base'), finalAt('refs/tags/v1', 't3')],
+    ...PLAIN,
+  },
+  {
+    id: 'tags.delete#annotated',
+    description: 'A delete of refs/tags/v1, an annotated tag, naming the tag object as the old id.',
+    seed: { objects: [...CORE, tag('t1', 'base', 'v1')], refs: [at(MAIN, 'base'), at('refs/tags/v1', 't1')] },
+    steps: [step(pushOf([upd('refs/tags/v1', o('t1'), ZERO)]))],
+    expect: [LANDED],
+    final: [finalAt(MAIN, 'base'), absent('refs/tags/v1')],
     ...PLAIN,
   },
 ];
@@ -607,4 +705,5 @@ export const SCENARIOS: readonly Scenario[] = [
     ...PLAIN,
   },
   ...MALFORMED,
+  ...REF_SEMANTICS,
 ];

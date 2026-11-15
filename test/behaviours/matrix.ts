@@ -129,6 +129,14 @@ const REFS: readonly BehaviourIn<'refs'>[] = [
     notes: ['The Artifacts checks read a repository stock git pushed; no probe checks HEAD after a multi-branch push from ply itself.'],
   }),
   b({
+    id: 'refs.directory-file-conflict', area: 'refs',
+    description: 'A ref cannot be both a name and a directory: creating refs/heads/a/b while refs/heads/a exists (or the reverse, or both in one push) is refused and leaves the existing ref as it was.',
+    ops: [PUSH],
+    tests: [t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/probes/probes.test.js', PROBES)),
+    notes: [],
+  }),
+  b({
     id: 'refs.peeled-tags', area: 'refs',
     description: 'ls-refs `peel` attaches the peeled id to annotated tags, and only to them.',
     ops: [LS_REFS, LIST_REFS],
@@ -796,6 +804,14 @@ const TAGS: readonly BehaviourIn<'tags'>[] = [
     tests: [t('test/e2e-customer.test.js', 'deleteTag'), t('test/probes/probes.test.js', PROBES)],
     status: verified(git('test/e2e-customer.test.js', 'deleteTag'), validatePly('tag delete (CAS) + stale delete -> 409'), compat('tag_push_delete/scratch/v2'), git('test/probes/probes.test.js', PROBES), probePly('tags.delete#plain/art-ply'), probeGit('tags.delete#plain/art-git')),
     notes: ['The stale half of the validate check is refused by ply-web from ls-refs, not by Artifacts.'],
+  }),
+  b({
+    id: 'tags.move-existing-tag', area: 'tags',
+    description: 'An existing tag ref moved with its current old id (a non-fast-forward lightweight move, or one annotated tag replaced by another) is an ordinary ref update.',
+    ops: [PUSH],
+    tests: [t('test/probes/probes.test.js', PROBES)],
+    status: verified(git('test/probes/probes.test.js', PROBES)),
+    notes: [],
   }),
   b({
     id: 'tags.peel-chain', area: 'tags',

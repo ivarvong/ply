@@ -43,7 +43,11 @@ export type RawTreeSpec = { readonly tag: 'raw-tree'; readonly name: string; rea
 export type RawCommitSpec = { readonly tag: 'raw-commit'; readonly name: string; readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly message: string };
 // An object id that no target and no client holds (the SHA-1 of `seed`), named so a command can point a ref at it.
 export type PhantomSpec = { readonly tag: 'phantom'; readonly name: string; readonly seed: string };
-export type ObjectSpec = CommitSpec | TagSpec | RawTreeSpec | RawCommitSpec | PhantomSpec;
+// A tag object written byte for byte (`git hash-object --literally -t tag`): `object` names any seed object (a phantom
+// for a tag of an object nobody holds, another tag for a tag of a tag), `type` is the type line as written, which need
+// not be the named object's type; the tagger is the probe identity.
+export type RawTagSpec = { readonly tag: 'raw-tag'; readonly name: string; readonly object: string; readonly type: string; readonly tagName: string; readonly message: string };
+export type ObjectSpec = CommitSpec | TagSpec | RawTreeSpec | RawCommitSpec | PhantomSpec | RawTagSpec;
 // What the target holds before the first step: refs pointing at named objects. Objects no ref names stay local, for a
 // step to push.
 export type RefAt = { readonly ref: string; readonly at: string };
@@ -104,8 +108,11 @@ export type Damage = (typeof DAMAGE)[number];
 //          of its base), then damaged. Stock git cannot send such a pack, so a step carrying one has no native-git form.
 // defect   the same objects as a pack the harness writes with one structural defect (PackDefect), trailer recomputed:
 //          a pack git's own index-pack must refuse whole, or, for `duplicate`, a pack with every entry twice
+// listed   exactly the named seed objects, as ply's own push builds a pack of them: for an object no reachability walk
+//          can start from (a tag of an object nobody holds, a tag whose type line disagrees with its object)
 export type PackForm =
   | { readonly tag: 'objects' }
+  | { readonly tag: 'listed'; readonly objects: NonEmpty<string> }
   | { readonly tag: 'hand'; readonly deltaBase: ObjRef | null; readonly delta: 'literal' | 'copy-past-end'; readonly damage: Damage }
   | { readonly tag: 'defect'; readonly defect: PackDefect };
 // One defect of a pack's structure (the trailer is recomputed over the damaged bytes, so only the defect is wrong):

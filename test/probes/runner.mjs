@@ -95,6 +95,11 @@ export async function buildSeed(root, seed) {
       names[o.name] = await writeLiteral(dir, env, 'commit', Buffer.from(body, 'utf8'), `raw commit ${o.name}`);
       continue;
     }
+    if (o.tag === 'raw-tag') {
+      const body = `object ${names[o.object]}\ntype ${o.type}\ntag ${o.tagName}\ntagger ply probe <probe@ply.invalid> 1700000000 +0000\n\n${o.message}\n`;
+      names[o.name] = await writeLiteral(dir, env, 'tag', Buffer.from(body, 'utf8'), `raw tag ${o.name}`);
+      continue;
+    }
     if (o.tag === 'phantom') {
       // an id nothing holds: never written to the seed store
       names[o.name] = createHash('sha1').update(`probe phantom ${o.seed}`).digest('hex');
@@ -142,6 +147,7 @@ async function catFile(seed, oids) {
 // may add objects the server has; sending them again is harmless), minus the plan's `omit`.
 async function objectsFor(seed, scenario, push) {
   if (push.pack.tag === 'defect' && push.pack.defect.tag === 'no-objects') return [];
+  if (push.pack.tag === 'listed') return catFile(seed, push.pack.objects.map(n => seed.names[n]));
   const news = push.updates.map(u => oidOf(seed, u.new)).filter(o => o !== ZERO);
   if (news.length === 0) return [];
   const have = scenario.seed.refs.map(r => seed.names[r.at]);
@@ -300,6 +306,28 @@ function filterOf(body) {
   }
   return null;
 }
+// The per-command report a receive-pack answer carries (report-status, inside side-band 1 when the push asked for it):
+// its `unpack …`, `ok <ref>` and `ng <ref> <reason>` lines, as sent.
+function pkts(buf) {
+  const out = [];
+  let o = 0;
+  while (o + 4 <= buf.length) {
+    const h = buf.subarray(o, o + 4).toString('latin1');
+    if (!/^[0-9a-f]{4}$/.test(h)) break;
+    const n = parseInt(h, 16);
+    if (n < 4) { o += 4; continue; }
+    if (o + n > buf.length) break;
+    out.push(buf.subarray(o + 4, o + n));
+    o += n;
+  }
+  return out;
+}
+export function reportOf(buf) {
+  const lines = pkts(buf);
+  const banded = lines.length > 0 && lines.every(l => l.length > 0 && l[0] >= 1 && l[0] <= 3);
+  const inner = banded ? pkts(Buffer.concat(lines.filter(l => l[0] === 1).map(l => l.subarray(1)))) : lines;
+  return inner.map(l => l.toString('latin1').replace(/\n$/, '')).filter(l => /^(unpack |ok |ng )/.test(l));
+}
 export function startRecordingProxy({ upstream, authorization = null, filterPolicy = false }) {
   const base = new URL(upstream);
   const exchanges = [];
@@ -355,7 +383,7 @@ export function startRecordingProxy({ upstream, authorization = null, filterPoli
         const up = await fetch(target, { method: req.method, headers, body: reqBody, ...(reqBody instanceof ReadableStream ? { duplex: 'half' } : {}), redirect: 'manual' });
         const buf = Buffer.from(await up.arrayBuffer());
         rec.status = up.status; rec.resBytes = buf.length; rec.cfRay = up.headers.get('cf-ray');
-        if (isReceive) { const plain = req.headers['content-encoding'] === 'gzip' ? gunzipSync(body) : body; rec.commands = pktLines(plain, 400).filter(l => OID_LINE.test(l)); }
+        if (isReceive) { const plain = req.headers['content-encoding'] === 'gzip' ? gunzipSync(body) : body; rec.commands = pktLines(plain, 400).filter(l => OID_LINE.test(l)); rec.report = reportOf(buf); }
         if (req.method === 'GET' && /service=git-receive-pack/.test(rec.path) && up.status === 200) rec.advertised = pktLines(buf, 400).filter(l => OID_LINE.test(l)).map(l => l.replace(/^([0-9a-f]{40}) (\S+).*$/, '$1 $2'));
         rec.ms = +(performance.now() - t0).toFixed(1);
         if (fault?.tag === 'cut-response') { req.socket.destroy(); return; }
@@ -476,7 +504,10 @@ export async function observeEnd(url, root, env) {
   }
   if (Object.keys(refs).length === 0) return { head, refs, objects: [], trees: {}, ancestry: [], mergeBases: {}, fsck: [] };
   const dir = join(root, `judge-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.git`);
-  await must(run('git', ['clone', '-q', '--mirror', url, dir], { cwd: root, env }), 'clone --mirror');
+  // a repository stock git cannot mirror (refs it will not hold side by side, say) is judged as such: its refs as listed, and
+  // the clone's refusal as its one fsck problem
+  const cl = await run('git', ['clone', '-q', '--mirror', url, dir], { cwd: root, env });
+  if (cl.status !== 0) { rmSync(dir, { recursive: true, force: true }); return { head, refs, objects: [], trees: {}, ancestry: [], mergeBases: {}, fsck: [`clone --mirror failed: ${cl.stderr.trim().split('\n').pop()?.slice(0, 200) ?? ''}`] }; }
   const g = async args => (await must(run('git', args, { cwd: dir, env }), args[0])).stdout;
   const objects = (await g(['rev-list', '--objects', '--no-object-names', '--all'])).trim().split('\n').filter(Boolean).sort();
   const trees = {};

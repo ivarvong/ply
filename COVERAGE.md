@@ -19,28 +19,28 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 
 ## Summary
 
-**116** behaviours: **104** verified, **2** implemented, **10** unsupported. Of the verified, **81** carry some Artifacts evidence and **61** carry evidence of ply itself against Artifacts.
+**118** behaviours: **106** verified, **2** implemented, **10** unsupported. Of the verified, **81** carry some Artifacts evidence and **61** carry evidence of ply itself against Artifacts.
 
 | area | behaviours | verified | implemented | unsupported |
 |---|---:|---:|---:|---:|
-| refs | 8 | 7 | 0 | 1 |
+| refs | 9 | 8 | 0 | 1 |
 | caps | 9 | 6 | 0 | 3 |
 | fetch | 20 | 19 | 0 | 1 |
 | pack | 18 | 18 | 0 | 0 |
 | push | 19 | 18 | 0 | 1 |
 | concurrency | 7 | 7 | 0 | 0 |
-| tags | 5 | 5 | 0 | 0 |
+| tags | 6 | 6 | 0 | 0 |
 | ancestry | 7 | 6 | 1 | 0 |
 | errors | 7 | 5 | 1 | 1 |
 | interrupted | 6 | 6 | 0 | 0 |
 | http | 10 | 7 | 0 | 3 |
-| **all** | **116** | **104** | **2** | **10** |
+| **all** | **118** | **106** | **2** | **10** |
 
 Verified behaviours by evidence kind (a behaviour counts once under each kind it has):
 
 | evidence kind | verified behaviours |
 |---|---:|
-| `ply_vs_reference_git` | 100 |
+| `ply_vs_reference_git` | 102 |
 | `ply_vs_artifacts` | 61 |
 | `native_git_vs_artifacts` | 54 |
 | `wire_probe_vs_artifacts` | 19 |
@@ -54,8 +54,9 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `ancestry.cut-graph`: A server that withholds ancestors without saying shallow: ply fails closed, nothing pushed.
 - `errors.not-git-response`: A 200 that is not git (HTML, wrong content type) is not_git, never parsed as protocol.
 
-### Verified against git http-backend only: no evidence of any kind from Artifacts (23)
+### Verified against git http-backend only: no evidence of any kind from Artifacts (25)
 
+- `refs.directory-file-conflict`: A ref cannot be both a name and a directory: creating refs/heads/a/b while refs/heads/a exists (or the reverse, or both in one push) is refused and leaves the existing ref as it was.
 - `refs.advertisement-shapes`: Unusual but legal listings (duplicate names, ordering, raw bytes in names) are read as git reads them.
 - `caps.required-capabilities`: A server missing a capability ply needs (ls-refs, fetch) is refused as unsupported before any operation.
 - `caps.object-format`: object-format=sha1 is accepted; any other object format is refused as unsupported.
@@ -74,6 +75,7 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `push.sideband-hook-output`: side-band-64k on receive-pack: the report on band 1, hook output on band 2.
 - `push.hook-rejection`: A pre-receive or update hook that declines: ng with the hook's reason, ref unchanged.
 - `concurrency.two-transfer-runners`: Two resumable transfers of one plan at once both finish with the planned head; each refused step is settled by reading refs.
+- `tags.move-existing-tag`: An existing tag ref moved with its current old id (a non-fast-forward lightweight move, or one annotated tag replaced by another) is an ordinary ref update.
 - `errors.err-pkt-line`: An ERR pkt-line anywhere in a response is a typed remote error carrying the scrubbed message.
 - `interrupted.abort-during-push`: An external AbortSignal during a push: aborted if the body was never pulled, ambiguous once sent; git decides what landed.
 - `interrupted.resumable-transfer`: A multi-step transfer paused or interrupted is resumed from refs, not from local state, and ends at the planned head.
@@ -124,13 +126,14 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 
 ## Behaviours
 
-### Ref advertisement and ls-refs (`refs`, 8)
+### Ref advertisement and ls-refs (`refs`, 9)
 
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
 | `refs.ls-refs-listing` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `lsRefs`, `listRefs` | 2 |
 | `refs.ref-prefix` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `lsRefs`, `listRefs` | 1 |
 | `refs.symref-head` | verified | ply↔git, ply↔Artifacts | `lsRefs` | 1 |
+| `refs.directory-file-conflict` | verified | ply↔git | `push` | 1 |
 | `refs.peeled-tags` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `lsRefs`, `listRefs` | 1 |
 | `refs.unborn-empty-repo` | verified | ply↔git, ply↔Artifacts | `lsRefs` | 2 |
 | `refs.advertisement-shapes` | verified | ply↔git | `lsRefs` | 2 |
@@ -190,6 +193,20 @@ Evidence:
 - ply↔Artifacts: loadgen-phase6-plyw-20261025: `refs/n4`
 
 > The Artifacts checks read a repository stock git pushed; no probe checks HEAD after a multi-branch push from ply itself.
+
+#### `refs.directory-file-conflict`
+
+A ref cannot be both a name and a directory: creating refs/heads/a/b while refs/heads/a exists (or the reverse, or both in one push) is refused and leaves the existing ref as it was.
+
+Ops: `src/push.ts` `push`.
+
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
 
 #### `refs.peeled-tags`
 
@@ -1683,13 +1700,14 @@ Evidence:
 
 > No Artifacts evidence.
 
-### Tags (lightweight and annotated) (`tags`, 5)
+### Tags (lightweight and annotated) (`tags`, 6)
 
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
 | `tags.lightweight-create` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `createTag` | 2 |
 | `tags.annotated-create` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `createTag` | 2 |
 | `tags.delete` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `deleteTag` | 2 |
+| `tags.move-existing-tag` | verified | ply↔git | `push` | 1 |
 | `tags.peel-chain` | verified | ply↔git, ply↔Artifacts | `readFile`, `createBranch` | 2 |
 | `tags.many-tags` | verified | git↔Artifacts | `lsRefs` | 0 |
 
@@ -1753,6 +1771,20 @@ Evidence:
 - git↔Artifacts: probes-20261114t2226-yyjq: `tags.delete#plain/art-git`
 
 > The stale half of the validate check is refused by ply-web from ls-refs, not by Artifacts.
+
+#### `tags.move-existing-tag`
+
+An existing tag ref moved with its current old id (a non-fast-forward lightweight move, or one annotated tag replaced by another) is an ordinary ref update.
+
+Ops: `src/push.ts` `push`.
+
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
 
 #### `tags.peel-chain`
 
