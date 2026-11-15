@@ -17,6 +17,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { createHash } from 'node:crypto';
+import { TYPE_ID } from '../../src/objects.js';
 import { buildSeed, gitEnv, observeEnd, run } from './runner.mjs';
 import { GitHttp } from '../../src/client.js';
 
@@ -55,13 +57,48 @@ export async function wireSeed(root) {
       p.stdin.end(`${next}\n^${base}\n`);
     }, reject);
   });
-  return { seed, dir, env, base, next, blob, blobSize, pack };
+  const list = (await must(run('git', ['rev-list', '--objects', '--no-object-names', next, '--not', base], { cwd: dir, env }), 'rev-list next')).stdout.trim().split('\n').filter(Boolean);
+  const batch = (await must(run('git', ['cat-file', '--batch'], { cwd: dir, env, input: `${list.join('\n')}\n` }), 'cat-file next')).out;
+  const objects = [];
+  for (let o = 0; o < batch.length;) {
+    const nl = batch.indexOf(10, o);
+    const [oid, type, size] = batch.subarray(o, nl).toString('latin1').split(' ');
+    const n = Number(size);
+    objects.push({ oid, type: TYPE_ID[type], data: new Uint8Array(batch.subarray(nl + 1, nl + 1 + n)) });
+    o = nl + 1 + n + 1;
+  }
+  return { seed, dir, env, base, next, blob, blobSize, pack, objects, many: null };
+}
+
+// The many-refs seed (wire-plans.ts WireSeedForm): branches alternately at base and next, tags at base, as refs in the
+// seed store so one glob push writes them all. Returns name -> id for every ref the target should then list.
+export async function manyRefs(ws, form) {
+  if (ws.many !== null && ws.many.form === `${form.heads}/${form.tags}`) return ws.many.refs;
+  const refs = { 'refs/heads/main': ws.base };
+  for (let i = 0; i < form.heads; i++) refs[`refs/heads/many/b${String(i).padStart(4, '0')}`] = i % 2 === 0 ? ws.base : ws.next;
+  for (let i = 0; i < form.tags; i++) refs[`refs/tags/many/t${String(i).padStart(4, '0')}`] = ws.base;
+  const input = Object.entries(refs).filter(([r]) => r !== 'refs/heads/main').map(([r, oid]) => `create ${r} ${oid}\n`).join('');
+  await must(run('git', ['update-ref', '--stdin'], { cwd: ws.dir, env: ws.env, input }), 'many refs');
+  ws.many = { form: `${form.heads}/${form.tags}`, refs };
+  return refs;
+}
+// The refspecs that seed a target for a plan, pushed from the seed store, and the refs it then holds.
+export async function seedOf(plan, ws) {
+  switch (plan.seed.tag) {
+    case 'base': return { specs: [`${ws.base}:refs/heads/main`], refs: { 'refs/heads/main': ws.base } };
+    case 'many-refs': return { specs: [`${ws.base}:refs/heads/main`, 'refs/heads/many/*:refs/heads/many/*', 'refs/tags/many/*:refs/tags/many/*'], refs: await manyRefs(ws, plan.seed) };
+  }
+  throw new Error(`unknown wire seed ${plan.seed.tag}`);
 }
 
 // ---- request bodies ----
 const pkt = s => { const b = Buffer.isBuffer(s) ? s : Buffer.from(s, 'latin1'); return Buffer.concat([Buffer.from((b.length + 4).toString(16).padStart(4, '0')), b]); };
 const FLUSH = Buffer.from('0000'), DELIM = Buffer.from('0001');
 export const wireRef = corner => `refs/heads/wire-${corner}`;
+export const refFor = (template, corner) => template.split('<c>').join(corner);
+const idOf = (ws, x) => (x === 'zero' ? ZERO : x === 'base' ? ws.base : ws.next);
+// A pack of no objects (a create or update to an object the server already holds still sends a pack).
+const EMPTY_PACK = (() => { const h = Buffer.from('PACK\0\0\0\x02\0\0\0\0', 'latin1'); return Buffer.concat([h, createHash('sha1').update(h).digest()]); })();
 export function bodyOf(body, ws, corner) {
   switch (body.tag) {
     case 'ls-refs': return Buffer.concat([pkt('command=ls-refs\n'), pkt('agent=ply-wire-probe\n'), DELIM, pkt('ref-prefix refs/heads/\n'), FLUSH]);
@@ -71,6 +108,12 @@ export function bodyOf(body, ws, corner) {
     case 'unknown-command': return Buffer.concat([pkt('command=frobnicate\n'), FLUSH]);
     case 'push-create': return Buffer.concat([pkt(`${ZERO} ${ws.next} ${wireRef(corner)}\0report-status agent=ply-wire-probe\n`), FLUSH, ws.pack]);
     case 'bytes': return Buffer.from(body.latin1, 'latin1');
+    case 'push-ref': {
+      const cmd = pkt(Buffer.concat([Buffer.from(`${idOf(ws, body.old)} ${idOf(ws, body.new)} `, 'latin1'), Buffer.from(refFor(body.ref, corner), 'utf8'), Buffer.from(`\0${body.caps} agent=ply-wire-probe\n`, 'latin1')]));
+      return Buffer.concat([cmd, FLUSH, ...(body.new === 'zero' ? [] : [body.new === 'next' ? ws.pack : EMPTY_PACK])]);
+    }
+    case 'v2': return Buffer.concat([pkt(`command=${body.command}\n`), ...body.capLines.map(l => pkt(`${l}\n`)), DELIM, ...body.argLines.map(l => pkt(`${l.split('<base>').join(ws.base)}\n`)), FLUSH]);
+    case 'ls-refs-all': return Buffer.concat([pkt('command=ls-refs\n'), pkt('agent=ply-wire-probe\n'), DELIM, pkt('peel\n'), pkt('symrefs\n'), FLUSH]);
   }
   throw new Error(`unknown wire body ${body.tag}`);
 }
@@ -95,6 +138,7 @@ export function requestOf(plan, ws, corner) {
   switch (r.tag) {
     case 'advertise': return { method: 'GET', suffix: `/info/refs?service=${r.service}`, headers: r.protocol === 'v2' ? { 'git-protocol': 'version=2' } : {}, body: null, framing: { tag: 'length' } };
     case 'credential': return { method: 'GET', suffix: '/info/refs?service=git-upload-pack', headers: { 'git-protocol': 'version=2' }, body: null, framing: { tag: 'length' } };
+    case 'get': return { method: 'GET', suffix: r.path, headers: {}, body: null, framing: { tag: 'length' } };
     case 'rpc': {
       const headers = { 'content-type': contentType(r, 'request'), accept: `application/x-${r.service}-result` };
       if (r.protocol === 'v2') headers['git-protocol'] = 'version=2';
@@ -208,9 +252,9 @@ export async function curlExchange(url, req, authFile, root) {
 }
 
 // ---- what an answer is ----
-function pktLinesOf(buf) {
+function pktLinesOf(buf, limit = 400) {
   const out = [];
-  for (let o = 0; o + 4 <= buf.length && out.length < 400;) {
+  for (let o = 0; o + 4 <= buf.length && out.length < limit;) {
     const h = buf.subarray(o, o + 4).toString('latin1');
     if (!/^[0-9a-f]{4}$/.test(h)) return { lines: out, clean: false };
     const n = parseInt(h, 16);
@@ -244,7 +288,35 @@ export function classOf(status, body, ws) {
   if (lines.includes('packfile\n')) return 'pack';
   return `text:${firstLine(body)}`;
 }
-const refusedClass = c => /^(status:4|status:5|err:|empty$|no-answer$)/.test(c) || (c.startsWith('report:') && !c.startsWith('report:unpack ok;ok ')) || c === 'refused';
+const refusedClass = c => /^(status:4|status:5|err:|empty$|no-answer$)/.test(c) || (c.startsWith('report:') && !c.startsWith('report:unpack ok;ok ')) || c === 'refused' || c === 'client-refused';
+
+// A listing as one class: `refs:<count>:<digest>` over the sorted `<id> <name>` pairs (HEAD and peeled lines left out),
+// from a v0 advertisement, a v2 ls-refs answer, git ls-remote's or ply's list.
+export const listingOf = pairs => {
+  const lines = pairs.filter(([, n]) => n !== 'HEAD' && !n.endsWith('^{}')).map(([o, n]) => `${o} ${n}`).sort();
+  return `refs:${lines.length}:${createHash('sha1').update(lines.join('\n')).digest('hex').slice(0, 12)}`;
+};
+const listingOfBody = (status, body) => {
+  if (status >= 400) return `status:${status}`;
+  if (status === 0) return 'no-answer';
+  const { lines } = pktLinesOf(body, Infinity);
+  return listingOf(lines.map(l => /^([0-9a-f]{40}) ([^\0\s]+)/.exec(l)).filter(m => m !== null).map(m => [m[1], m[2]]));
+};
+// A dumb-HTTP file as one class: dumb-refs:<main id> | dumb-head:<target> | dumb-packs:<n> | status:<n> | text:<first line>.
+const dumbOf = (path, status, body) => {
+  if (status >= 400) return `status:${status}`;
+  if (status === 0) return 'no-answer';
+  const t = body.toString('latin1');
+  const lines = t.split('\n').filter(Boolean);
+  switch (path) {
+    case '/info/refs': { const m = lines.map(l => /^([0-9a-f]{40})\trefs\/heads\/main$/.exec(l)).find(x => x !== null); return m ? `dumb-refs:${m[1]}` : `text:${firstLine(body)}`; }
+    case '/HEAD': return /^ref: (\S+)\n?$/.test(t) ? `dumb-head:${/^ref: (\S+)/.exec(t)[1]}` : `text:${firstLine(body)}`;
+    case '/objects/info/packs': return lines.every(l => /^P pack-[0-9a-f]{40}\.pack$/.test(l)) ? `dumb-packs:${lines.length}` : `text:${firstLine(body)}`;
+  }
+  return `text:${firstLine(body)}`;
+};
+// The class of a raw or curl answer for this plan.
+const answerClass = (plan, x, ws) => (plan.expect.tag === 'listing' ? listingOfBody(x.status, x.body) : plan.request.tag === 'get' ? dumbOf(plan.request.path, x.status, x.body) : fold(classOf(x.status, x.body, ws)));
 
 // The v2 advertisement's capabilities on the target (object-info's expectation depends on it).
 export async function v2Caps(url, auth) {
@@ -255,11 +327,19 @@ export async function v2Caps(url, auth) {
 }
 
 // Whether one sender's result meets the plan's stated answer. `end` is the judge's view after the plan.
-export function meets(plan, res, end, ws, caps) {
+export function meets(plan, res, end, ws, caps, seeded = { 'refs/heads/main': ws.base }) {
   const ref = end.refs[wireRef(res.corner)] ?? null;
   const clean = end.fsck.length === 0 && end.refs['refs/heads/main'] === ws.base;
   const a = plan.expect;
+  const asSeeded = () => JSON.stringify(Object.entries(end.refs).sort()) === JSON.stringify(Object.entries(seeded).sort()) && end.fsck.length === 0;
+  const landedRef = r => res.cls === 'landed' && end.refs[refFor(r, res.corner)] === ws.next && clean;
+  const refusedRef = r => refusedClass(res.cls) && !(refFor(r, res.corner) in end.refs) && clean;
   switch (a.tag) {
+    case 'ref-landed': return landedRef(a.ref);
+    case 'ref-refused': return refusedClass(res.cls) && asSeeded();
+    case 'ref-either': return landedRef(a.ref) || refusedRef(a.ref);
+    case 'dumb': return res.cls.startsWith('status:4') || res.cls === (a.path === '/info/refs' ? `dumb-refs:${ws.base}` : a.path === '/HEAD' ? 'dumb-head:refs/heads/main' : res.cls.startsWith('dumb-packs:') ? res.cls : 'dumb-packs');
+    case 'listing': return res.cls === listingOf(Object.entries(seeded).map(([n, o]) => [o, n])) && asSeeded();
     case 'v0-advertisement': return res.cls === `v0-adv:${ws.base}`;
     case 'ls-refs-main': return res.cls === `ls-refs:${ws.base}` && clean;
     case 'landed': return res.cls === 'landed' && ref === ws.next && end.fsck.length === 0;
@@ -270,7 +350,7 @@ export function meets(plan, res, end, ws, caps) {
   return false;
 }
 // A landed push's report class is folded to `landed` so senders compare; a plain refusal keeps its words.
-const fold = c => (c.startsWith('report:unpack ok;ok refs/heads/wire-') ? 'landed' : c);
+const fold = c => (c.startsWith('report:unpack ok;ok ') && !c.includes(';ng ') ? 'landed' : c);
 
 // ---- stock git and ply ----
 async function gitCorner(plan, target, ws, root) {
@@ -307,6 +387,27 @@ async function gitCorner(plan, target, ws, root) {
         cls = r.status === 0 ? 'listed' : /returned error: (\d{3})/.test(s) ? `status:${/returned error: (\d{3})/.exec(s)[1]}` : /could not read Username|Authentication failed|terminal prompts disabled/.test(s) ? 'status:401' : /not found/i.test(s) ? 'status:404' : `git-exit:${r.status}`;
         break;
       }
+      case 'push-ref': {
+        const ref = refFor(plan.expect.ref, 'git');
+        r = await run('git', [...pre, 'push', '--porcelain', url, `${ws.next}:${ref}`], { cwd: ws.dir, env });
+        let tr = '';
+        try { tr = readFileSync(env.GIT_TRACE_CURL, 'latin1'); } catch { tr = ''; }
+        const posted = /=> Send header: POST \S*git-receive-pack/.test(tr);
+        cls = r.status === 0 ? 'landed' : posted ? 'refused' : 'client-refused';
+        break;
+      }
+      case 'ls-remote-dumb': {
+        r = await run('git', [...pre, 'ls-remote', url], { cwd: root, env: { ...env, GIT_SMART_HTTP: '0' } });
+        const main = r.stdout.split('\n').find(l => l.endsWith('\trefs/heads/main'));
+        const s = r.stderr;
+        cls = r.status === 0 ? (main ? `dumb-refs:${main.slice(0, 40)}` : 'dumb-refs:no-main') : /returned error: (\d{3})/.test(s) ? `status:${/returned error: (\d{3})/.exec(s)[1]}` : /not found/i.test(s) ? 'status:404' : `git-exit:${r.status}`;
+        break;
+      }
+      case 'ls-remote-all': {
+        r = await run('git', [...pre, '-c', `protocol.version=${plan.git.protocol === 'v0' ? 0 : 2}`, 'ls-remote', url], { cwd: root, env });
+        cls = r.status === 0 ? listingOf(r.stdout.split('\n').filter(Boolean).map(l => l.split('\t'))) : `git-exit:${r.status}`;
+        break;
+      }
       default: throw new Error(`no git form ${plan.git.tag}`);
     }
     let trace = '';
@@ -322,7 +423,9 @@ async function gitCorner(plan, target, ws, root) {
 async function plyCorner(plan, target, ws, tracer) {
   const kind = credentialOf(plan);
   const rays = [];
+  let posts = 0;
   const fetchImpl = async (u, init = {}) => {
+    if (String(init.method ?? 'GET').toUpperCase() === 'POST' && String(u).endsWith('git-receive-pack')) posts++;
     const headers = new Headers(init.headers);
     const h = {};
     target.auth.headers(kind, h);
@@ -339,9 +442,17 @@ async function plyCorner(plan, target, ws, tracer) {
   switch (plan.ply.tag) {
     case 'ls-refs': r = await client.value.lsRefs(); break;
     case 'fetch-filter': r = await client.value.fetchPack({ wants: [ws.base], filter: `sparse:oid=${ws.blob}` }); break;
+    case 'push-ref': r = await client.value.push({ commands: [{ ref: refFor(plan.expect.ref, 'ply'), oldOid: ZERO, newOid: ws.next }], objects: ws.objects }); break;
+    case 'ls-refs-all': {
+      r = await client.value.lsRefs();
+      const ms = +(performance.now() - t0).toFixed(1);
+      if (r.ok) return { corner: 'ply', cls: listingOf([...r.value.refs.values()].map(x => [x.oid, x.name])), status: null, interim100: null, ms, rays, detail: `${r.value.refs.size} refs`, error: null };
+      return { corner: 'ply', cls: `ply:${r.error.code}`, status: null, interim100: null, ms, rays, detail: String(r.error.message).slice(0, 160), error: null };
+    }
     default: throw new Error(`no ply form ${plan.ply.tag}`);
   }
   const ms = +(performance.now() - t0).toFixed(1);
+  if (plan.ply.tag === 'push-ref') return { corner: 'ply', cls: r.ok ? 'landed' : posts === 0 ? 'client-refused' : 'refused', status: null, interim100: null, ms, rays, detail: r.ok ? 'ok' : `${r.error.code}: ${String(r.error.message).slice(0, 160)}`, error: null };
   if (r.ok) return { corner: 'ply', cls: plan.ply.tag === 'ls-refs' ? 'listed' : 'landed', status: null, interim100: null, ms, rays, detail: 'ok', error: null };
   const st = /"status":(\d{3})/.exec(JSON.stringify(r.error))?.[1] ?? null;
   const code = r.error.code;
@@ -363,12 +474,22 @@ export async function runWirePlan(plan, corners, target, ws, { root, tracer, cap
         try { x = await curlExchange(url, req, f, root); } finally { if (f !== null) rmSync(dirname(f), { recursive: true, force: true }); }
       }
       const ray = x.headers['cf-ray'] ?? null;
-      results.push({ corner, cls: fold(classOf(x.status, x.body, ws)), status: x.status, interim100: x.interim100, ms: x.ms, rays: ray === null ? [] : [ray], detail: x.error ?? firstLine(x.body), error: x.error });
+      results.push({ corner, cls: answerClass(plan, x, ws), status: x.status, interim100: x.interim100, ms: x.ms, rays: ray === null ? [] : [ray], detail: x.error ?? firstLine(x.body), error: x.error });
     } else if (corner === 'git') results.push(await gitCorner(plan, target, ws, root));
     else results.push(await plyCorner(plan, target, ws, tracer));
   }
-  const end = await observeEnd(target.judgeUrl, root, ws.env);
-  return { results: results.map(r => ({ ...r, meets: meets(plan, r, end, ws, caps) })), end: { refs: end.refs, fsck: end.fsck } };
+  const end = await judgeEnd(target.judgeUrl, root, ws.env);
+  const seeded = (await seedOf(plan, ws)).refs;
+  const many = Object.keys(end.refs).length > 50;
+  return { results: results.map(r => ({ ...r, meets: meets(plan, r, end, ws, caps, seeded) })), end: { refs: many ? { count: Object.keys(end.refs).length, main: end.refs['refs/heads/main'] ?? null } : end.refs, fsck: end.fsck, head: end.head } };
+}
+// The judge's view; a repository stock git cannot mirror (a ref name git refuses to write, say) is itself a problem.
+async function judgeEnd(url, root, env) {
+  try { return await observeEnd(url, root, env); } catch (e) {
+    const ls = await run('git', ['ls-remote', url], { cwd: root, env });
+    const refs = Object.fromEntries(ls.stdout.split('\n').filter(Boolean).map(l => l.split('\t')).filter(([, n]) => n !== 'HEAD' && !n.endsWith('^{}')).map(([o, n]) => [n, o]));
+    return { head: null, refs, fsck: [`judge failed: ${String(e?.message ?? e).slice(0, 200)}`] };
+  }
 }
 
 // Differences that matter, between two targets for the same sender, and between senders on one target.

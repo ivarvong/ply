@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { WIRE, WIRE_ALLOW, cornersOf, onReference } from '../test/probes/wire-plans.ts';
 import { REFERENCE_POLICY, gitEnv, newTracer, run } from '../test/probes/runner.mjs';
 import { startGitServer } from '../test/server.js';
-import { WIRE_REFERENCE_CONFIG, referenceAuth, runWirePlan, tempRoot, v2Caps, wireDiffs, wireSeed } from '../test/probes/wire.mjs';
+import { WIRE_REFERENCE_CONFIG, referenceAuth, runWirePlan, seedOf, tempRoot, v2Caps, wireDiffs, wireSeed } from '../test/probes/wire.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const arg = name => { const i = process.argv.indexOf(name); return i < 0 ? null : process.argv[i + 1] ?? null; };
@@ -47,14 +47,14 @@ mkdirSync(join(root, 'repos'));
 const srv = await startGitServer(join(root, 'repos'));
 const ws = await wireSeed(root);
 let n = 0;
-async function referenceRepo() {
+async function referenceRepo(plan) {
   const name = `w${n++}`;
   const dir = join(root, 'repos', `${name}.git`);
   const env = gitEnv(root);
   await run('git', ['init', '-q', '--bare', '-b', 'main', dir], { env });
   for (const [k, v] of [...REFERENCE_POLICY, ...WIRE_REFERENCE_CONFIG]) await run('git', ['config', k, v], { cwd: dir, env });
   const url = `${srv.url}/${name}.git`;
-  const p = await run('git', ['push', '-q', url, `${ws.base}:refs/heads/main`], { cwd: ws.dir, env: ws.env });
+  const p = await run('git', ['push', '-q', url, ...(await seedOf(plan, ws)).specs], { cwd: ws.dir, env: ws.env });
   if (p.status !== 0) throw new Error(`reference seed: ${p.stderr.trim().slice(0, 200)}`);
   return url;
 }
@@ -82,10 +82,10 @@ for (const plan of plans) {
       if (t === 'art') {
         open = art.open(`wire ${plan.id}`); handle = await open;
         const side = `${handle.proxy.url}/side${handle.repoPath}`;
-        const p = await run('git', ['push', '-q', side, `${ws.base}:refs/heads/main`], { cwd: ws.dir, env: ws.env });
+        const p = await run('git', ['push', '-q', side, ...(await seedOf(plan, ws)).specs], { cwd: ws.dir, env: ws.env });
         if (p.status !== 0) throw new Error(`artifacts seed: ${p.stderr.trim().slice(0, 200)}`);
         target = { name: 'art', url: handle.wireAuth.url('write'), judgeUrl: `${handle.proxy.url}/judge${handle.repoPath}`, auth: handle.wireAuth };
-      } else { const url = await referenceRepo(); target = { name: 'ref', url, judgeUrl: url, auth: referenceAuth(url) }; }
+      } else { const url = await referenceRepo(plan); target = { name: 'ref', url, judgeUrl: url, auth: referenceAuth(url) }; }
       const unrunnable = plan.request.tag === 'credential' && plan.request.credential === 'revoked' && !target.auth.hasRevoked();
       const corners = unrunnable ? [] : cornersOf(plan);
       const capsR = await v2Caps(target.url, target.auth);

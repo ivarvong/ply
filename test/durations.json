@@ -167,5 +167,5 @@
   "test/workflows.test.js": 1,
   "test/err-pkt-git.test.js": 1,
   "test/push-keepalive-git.test.js": 4,
-  "test/probes/wire.test.js": 4
+  "test/probes/wire.test.js": 36
 }

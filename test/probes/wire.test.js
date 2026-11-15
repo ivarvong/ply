@@ -10,7 +10,7 @@ import { startGitServer } from '../server.js';
 import { BEHAVIOURS } from '../behaviours/matrix.ts';
 import { WIRE, WIRE_ALLOW, cornersOf, onReference } from './wire-plans.ts';
 import { REFERENCE_POLICY, gitEnv, newTracer, run } from './runner.mjs';
-import { WIRE_REFERENCE_CONFIG, referenceAuth, runWirePlan, tempRoot, v2Caps, wireSeed } from './wire.mjs';
+import { WIRE_REFERENCE_CONFIG, referenceAuth, runWirePlan, seedOf, tempRoot, v2Caps, wireSeed } from './wire.mjs';
 
 let root, srv, ws, n = 0;
 before(async () => {
@@ -21,14 +21,14 @@ before(async () => {
 });
 after(async () => { await srv.close(); rmSync(root, { recursive: true, force: true }); });
 
-async function referenceRepo() {
+async function referenceRepo(plan) {
   const name = `w${n++}`;
   const dir = join(root, 'repos', `${name}.git`);
   const env = gitEnv(root);
   await run('git', ['init', '-q', '--bare', '-b', 'main', dir], { env });
   for (const [k, v] of [...REFERENCE_POLICY, ...WIRE_REFERENCE_CONFIG]) await run('git', ['config', k, v], { cwd: dir, env });
   const url = `${srv.url}/${name}.git`;
-  const p = await run('git', ['push', '-q', url, `${ws.base}:refs/heads/main`], { cwd: ws.dir, env: ws.env });
+  const p = await run('git', ['push', '-q', url, ...(await seedOf(plan, ws)).specs], { cwd: ws.dir, env: ws.env });
   assert.equal(p.status, 0, p.stderr);
   return url;
 }
@@ -54,7 +54,7 @@ test('every wire plan names a matrix behaviour, ids are unique, a sender that ca
 
 for (const plan of WIRE.filter(onReference)) {
   test(`reference: ${plan.id} meets its answer with every sender`, async () => {
-    const url = await referenceRepo();
+    const url = await referenceRepo(plan);
     const { tracer } = newTracer();
     const caps = (await v2Caps(url, referenceAuth(url))).caps;
     const r = await runWirePlan(plan, cornersOf(plan), { name: 'ref', url, judgeUrl: url, auth: referenceAuth(url) }, ws, { root, tracer, caps });
