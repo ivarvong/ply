@@ -4,7 +4,7 @@
 // (test/probes/runner.mjs here, ply-web's workbench in a Worker) seeds a fresh repository per target, runs the steps,
 // and a judge reads the result back.
 import { ABSENT } from './probe-types.js';
-import type { CommitSpec, Damage, Expectation, Fault, Timeouts, FileSpec, FinalRef, Move, NonEmpty, ObjRef, ObjectSpec, OidExpr, Outcome, Push, RefAt, Scenario, StepExpect, TagSpec, Update } from './probe-types.js';
+import type { CommitSpec, Damage, Expectation, Fault, Timeouts, FileSpec, FinalRef, GitForm, Move, NonEmpty, ObjRef, ObjectSpec, OidExpr, Outcome, PackDefect, Push, RawCommitSpec, RawTreeEntry, RawTreeSpec, RefAt, Scenario, Step, StepExpect, TagSpec, Update } from './probe-types.js';
 
 const text = (path: string, s: string): FileSpec => ({ path, content: { tag: 'text', text: s } });
 const noise = (path: string, seed: string, bytes: number): FileSpec => ({ path, content: { tag: 'noise', seed, bytes } });
@@ -85,6 +85,117 @@ const corrupt = (damage: Corruption): Scenario => ({
   final: [finalAt(MAIN, 'base')],
   ...PLAIN,
 });
+
+// ---- 2026-11-15: malformed packs and objects. Each is refused with an unpack or ng status, and the state after the
+// refusal is the invariant: main unmoved, the repository still served (a fetch of main lands), and fsck --strict of a
+// mirror clone clean. A defect in the pack's structure is written by the harness and sent by ply (pushPack); a
+// malformed object is seeded byte for byte (git hash-object --literally) and pushed by both clients, whose own pack
+// writers carry it unchecked.
+const REFUSED: StepExpect = one('rejected', 'push_rejected');
+// After the refused push: a fetch of main (still base) lands for the clients that ran the push.
+const fetchAfter = (git: GitForm): Step => ({ tag: 'fetch', ref: MAIN, want: 'base', fault: NO_FAULT, git, timeouts: null });
+const defectPush = (defect: PackDefect, updates: NonEmpty<Update> = [upd(MAIN, o('base'), o('ff'))]): Push => ({ ...pushOf(updates), pack: { tag: 'defect', defect } });
+const DEFECT_TEXT: Readonly<Record<PackDefect['tag'], string>> = {
+  signature: 'whose signature is PACX',
+  version: 'whose header says version 4',
+  count: 'whose header object count is off',
+  'size-header': 'whose first blob\'s header states one byte more than its zlib stream inflates to',
+  'bad-type': 'whose first blob\'s header carries object type 5 (reserved)',
+  'ofs-delta-before-start': 'whose first blob is an OFS_DELTA reaching before the pack\'s first byte',
+  'delta-size-mismatch': 'whose first blob is a REF_DELTA against base:f.txt stating a result one byte longer than it writes',
+  duplicate: 'holding every object twice',
+  'no-objects': 'with no objects',
+};
+// A pack-structure defect: ply only (stock git writes its own packs).
+const defectScenario = (behaviour: 'pack.push-bad-header-refused' | 'pack.push-bad-entry-refused', variant: string, defect: PackDefect, extra = ''): Scenario => ({
+  id: `${behaviour}#${variant}`,
+  description: `ply pushes base->ff in a pack ${DEFECT_TEXT[defect.tag]}${extra}: refused, main unchanged, main still fetchable, fsck clean.`,
+  seed: { objects: CORE, refs: [at(MAIN, 'base')] },
+  steps: [handStep(defectPush(defect)), fetchAfter(NO_GIT_PACK)],
+  expect: [{ tag: 'one', ply: REFUSED, git: null }, { tag: 'one', ply: one('landed', null), git: null }],
+  final: [finalAt(MAIN, 'base')],
+  ...PLAIN,
+});
+// Malformed objects, written byte for byte: trees over base's and ff's f.txt blobs, commits on base's tree.
+const BASE_F = blob('base', 'f.txt');
+const FF_F = blob('ff', 'f.txt');
+const entry = (mode: string, name: string, b: ObjRef): RawTreeEntry => ({ mode, name, blob: b });
+const rawTree = (name: string, entries: NonEmpty<RawTreeEntry>): RawTreeSpec => ({ tag: 'raw-tree', name, entries });
+const rawCommit = (name: string, tree: string, author: string): RawCommitSpec => ({ tag: 'raw-commit', name, tree, parents: ['base'], author, message: name });
+const PROBE_ID = 'ply probe <probe@ply.invalid>';
+// One malformed object pushed as main base->bad by both clients: refused (receive.fsckObjects), main unchanged.
+const fsckScenario = (behaviour: 'pack.push-fsck-tree-refused' | 'pack.push-fsck-commit-refused', variant: string, what: string, objects: readonly ObjectSpec[], fsckId: string): Scenario => ({
+  id: `${behaviour}#${variant}`,
+  description: `Both clients push main base->bad, where bad ${what} (git fsck: ${fsckId}): refused, main unchanged, main still fetchable, fsck clean.`,
+  seed: { objects: [...CORE, ...objects], refs: [at(MAIN, 'base')] },
+  steps: [step(pushOf([upd(MAIN, o('base'), o('bad'))])), fetchAfter(SAME)],
+  expect: [both(REFUSED), LANDED],
+  final: [finalAt(MAIN, 'base')],
+  ...PLAIN,
+});
+const treeCase = (variant: string, what: string, fsckId: string, entries: NonEmpty<RawTreeEntry>): Scenario =>
+  fsckScenario('pack.push-fsck-tree-refused', variant, `is a commit on base whose tree ${what}`, [rawTree('t', entries), rawCommit('bad', 't', `${PROBE_ID} 1700000000 +0000`)], fsckId);
+const commitCase = (variant: string, what: string, fsckId: string, author: string): Scenario =>
+  fsckScenario('pack.push-fsck-commit-refused', variant, `is a commit on base's tree whose author line ${what}`, [rawCommit('bad', 'base', author)], fsckId);
+// 16 MiB of one byte: deflates to about 16 KiB (about 1000:1), under a 32 MiB object cap and the 64 MiB pack cap.
+const RATIO = commit('ratio', ['base'], [{ path: 'zeros.bin', content: { tag: 'repeat', byte: 0, bytes: 16 * MIB } }]);
+
+const MALFORMED: readonly Scenario[] = [
+  {
+    id: 'fetch.want-unreachable-or-unknown#phantom',
+    description: 'ply fetches an id no one holds (want phantom): the server refuses it (ERR not our ref) and ply reports a typed remote error; main unchanged, fsck clean.',
+    seed: { objects: [...CORE, { tag: 'phantom', name: 'phantom', seed: 'want-unknown' }], refs: [at(MAIN, 'base')] },
+    steps: [{ tag: 'fetch', ref: MAIN, want: 'phantom', fault: NO_FAULT, git: { tag: 'none', why: 'the runner\'s git fetch names a ref; stock git\'s form, git fetch <url> <unknown id>, is loadgen-phase3 fake_sha' }, timeouts: null }],
+    expect: [{ tag: 'one', ply: one('rejected', 'remote_error'), git: null }],
+    final: [finalAt(MAIN, 'base')],
+    ...PLAIN,
+  },
+  defectScenario('pack.push-bad-header-refused', 'bad-signature', { tag: 'signature' }),
+  defectScenario('pack.push-bad-header-refused', 'bad-version', { tag: 'version', version: 4 }),
+  defectScenario('pack.push-bad-header-refused', 'count-more', { tag: 'count', by: 1 }, ' (one more than sent)'),
+  defectScenario('pack.push-bad-header-refused', 'count-fewer', { tag: 'count', by: -1 }, ' (one fewer than sent)'),
+  defectScenario('pack.push-bad-entry-refused', 'size-header-mismatch', { tag: 'size-header', by: 1 }),
+  defectScenario('pack.push-bad-entry-refused', 'bad-type', { tag: 'bad-type', type: 5 }),
+  defectScenario('pack.push-bad-entry-refused', 'ofs-delta-before-start', { tag: 'ofs-delta-before-start' }),
+  defectScenario('pack.push-bad-entry-refused', 'delta-size-mismatch', { tag: 'delta-size-mismatch', base: BASE_F }),
+  {
+    id: 'pack.push-duplicate-entries#every-object-twice',
+    // git http-backend with receive.fsckObjects (index-pack --strict) refuses a pack naming an object twice: unpacker error
+    description: 'ply pushes base->ff in a pack holding every object twice (count doubled): refused, main unchanged, main still fetchable, fsck clean.',
+    seed: { objects: CORE, refs: [at(MAIN, 'base')] },
+    steps: [handStep(defectPush({ tag: 'duplicate' })), fetchAfter(NO_GIT_PACK)],
+    expect: [{ tag: 'one', ply: REFUSED, git: null }, { tag: 'one', ply: one('landed', null), git: null }],
+    final: [finalAt(MAIN, 'base')],
+    ...PLAIN,
+  },
+  {
+    id: 'push.ref-to-missing-object-refused#not-in-pack-or-repo',
+    description: 'ply pushes main base->phantom (an id no one holds) with a well-formed pack of no objects: refused (missing necessary objects), main unchanged, still fetchable, fsck clean.',
+    seed: { objects: [...CORE, { tag: 'phantom', name: 'phantom', seed: 'not-in-pack-or-repo' }], refs: [at(MAIN, 'base')] },
+    steps: [{ ...handStep(defectPush({ tag: 'no-objects' }, [upd(MAIN, o('base'), o('phantom'))])), git: { tag: 'none', why: 'stock git refuses client side to push an object it does not have' } }, fetchAfter({ tag: 'none', why: 'stock git has no form of the push' })],
+    expect: [{ tag: 'one', ply: REFUSED, git: null }, { tag: 'one', ply: one('landed', null), git: null }],
+    final: [finalAt(MAIN, 'base')],
+    ...PLAIN,
+  },
+  treeCase('unsorted', 'lists g.txt before f.txt', 'treeNotSorted', [entry('100644', 'g.txt', FF_F), entry('100644', 'f.txt', BASE_F)]),
+  treeCase('duplicate-name', 'names f.txt twice', 'duplicateEntries', [entry('100644', 'f.txt', BASE_F), entry('100644', 'f.txt', FF_F)]),
+  treeCase('slash-in-name', 'has an entry named dir/x.txt', 'fullPathname', [entry('100644', 'dir/x.txt', BASE_F)]),
+  treeCase('dot-git', 'has an entry named .git', 'hasDotgit', [entry('100644', '.git', BASE_F)]),
+  treeCase('zero-padded-mode', 'has a file mode written 0100644', 'zeroPaddedFilemode', [entry('0100644', 'f.txt', BASE_F)]),
+  commitCase('bad-date', 'has the date notadate', 'badDate', `${PROBE_ID} notadate +0000`),
+  commitCase('missing-email', 'has no <email>', 'missingEmail', 'ply probe 1700000000 +0000'),
+  commitCase('bad-timezone', 'has the time zone +00x0', 'badTimezone', `${PROBE_ID} 1700000000 +00x0`),
+  commitCase('date-overflow', 'has a 20-digit date', 'badDateOverflow', `${PROBE_ID} 99999999999999999999 +0000`),
+  {
+    id: 'pack.push-decompression-ratio#zeros-16mib',
+    description: 'Both clients push main base->ratio, whose blob is 16 MiB of zero bytes (about 16 KiB deflated, about 1000:1): lands, fsck clean.',
+    seed: { objects: [...CORE, RATIO], refs: [at(MAIN, 'base')] },
+    steps: [step(pushOf([upd(MAIN, o('base'), o('ratio'))])), { tag: 'fetch', ref: MAIN, want: 'ratio', fault: NO_FAULT, git: SAME, timeouts: null }],
+    expect: [LANDED, LANDED],
+    final: [finalAt(MAIN, 'ratio')],
+    ...PLAIN,
+  },
+];
 
 export const SCENARIOS: readonly Scenario[] = [
   {
@@ -495,4 +606,5 @@ export const SCENARIOS: readonly Scenario[] = [
     final: [finalAt(MAIN, 'mid')],
     ...PLAIN,
   },
+  ...MALFORMED,
 ];

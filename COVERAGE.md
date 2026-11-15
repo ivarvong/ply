@@ -19,28 +19,28 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 
 ## Summary
 
-**109** behaviours: **94** verified, **5** implemented, **10** unsupported. Of the verified, **73** carry some Artifacts evidence and **52** carry evidence of ply itself against Artifacts.
+**116** behaviours: **102** verified, **4** implemented, **10** unsupported. Of the verified, **73** carry some Artifacts evidence and **52** carry evidence of ply itself against Artifacts.
 
 | area | behaviours | verified | implemented | unsupported |
 |---|---:|---:|---:|---:|
 | refs | 8 | 7 | 0 | 1 |
 | caps | 9 | 6 | 0 | 3 |
 | fetch | 20 | 19 | 0 | 1 |
-| pack | 12 | 12 | 0 | 0 |
-| push | 18 | 17 | 0 | 1 |
+| pack | 18 | 18 | 0 | 0 |
+| push | 19 | 18 | 0 | 1 |
 | concurrency | 7 | 7 | 0 | 0 |
 | tags | 5 | 5 | 0 | 0 |
 | ancestry | 7 | 6 | 1 | 0 |
-| errors | 7 | 3 | 3 | 1 |
+| errors | 7 | 4 | 2 | 1 |
 | interrupted | 6 | 6 | 0 | 0 |
 | http | 10 | 6 | 1 | 3 |
-| **all** | **109** | **94** | **5** | **10** |
+| **all** | **116** | **102** | **4** | **10** |
 
 Verified behaviours by evidence kind (a behaviour counts once under each kind it has):
 
 | evidence kind | verified behaviours |
 |---|---:|
-| `ply_vs_reference_git` | 90 |
+| `ply_vs_reference_git` | 99 |
 | `ply_vs_artifacts` | 52 |
 | `native_git_vs_artifacts` | 50 |
 | `wire_probe_vs_artifacts` | 18 |
@@ -49,15 +49,14 @@ Verified behaviours by evidence kind (a behaviour counts once under each kind it
 
 Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed under the first of these classes that holds:
 
-### Exercised by ply, judged by nothing independent (5)
+### Exercised by ply, judged by nothing independent (4)
 
 - `ancestry.cut-graph`: A server that withholds ancestors without saying shallow: ply fails closed, nothing pushed.
 - `errors.http-status-classes`: Statuses 4xx/5xx/429 at each stage map to ply's typed classes, and a refused optional feature is not retried for them.
-- `errors.err-pkt-line`: An ERR pkt-line anywhere in a response is a typed remote error carrying the scrubbed message.
 - `errors.not-git-response`: A 200 that is not git (HTML, wrong content type) is not_git, never parsed as protocol.
 - `http.sideband-keepalive`: Empty band-1 keepalives while a hook runs do not end the push read.
 
-### Verified against git http-backend only: no evidence of any kind from Artifacts (21)
+### Verified against git http-backend only: no evidence of any kind from Artifacts (29)
 
 - `refs.advertisement-shapes`: Unusual but legal listings (duplicate names, ordering, raw bytes in names) are read as git reads them.
 - `caps.required-capabilities`: A server missing a capability ply needs (ls-refs, fetch) is refused as unsupported before any operation.
@@ -73,10 +72,18 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `pack.corrupt-served-pack`: A served pack with a corrupt header field, zlib member, delta or checksum is refused exactly where git index-pack --strict refuses it.
 - `pack.served-pack-limits`: Hostile sizes in a served pack (object size, delta result, chain depth, inflated total) are refused before allocation.
 - `pack.push-duplicate-object`: A pushed pack never names one object twice (a strict receiver refuses it).
+- `pack.push-bad-header-refused`: receive-pack refuses a pushed pack whose header is wrong (signature, version, object count more or fewer than sent), moves no ref, and still serves the repository fsck-clean.
+- `pack.push-bad-entry-refused`: receive-pack refuses a pushed pack with a bad entry (stated size not what the zlib stream inflates to, a reserved object type, an OFS_DELTA reaching before the pack, a delta whose stated result size it does not write), moves no ref, and still serves the repository fsck-clean.
+- `pack.push-duplicate-entries`: receive-pack with fsckObjects refuses a pushed pack that names every object twice (git index-pack --strict), moves no ref, and still serves the repository fsck-clean.
+- `pack.push-fsck-tree-refused`: receive-pack with fsckObjects refuses a pushed tree git fsck calls an error (unsorted, a name twice, a `/` in a name, `.git`, a zero-padded mode), moves no ref, and still serves the repository fsck-clean.
+- `pack.push-fsck-commit-refused`: receive-pack with fsckObjects refuses a pushed commit with a malformed author line (bad date, missing email, bad time zone, a date that overflows), moves no ref, and still serves the repository fsck-clean.
+- `pack.push-decompression-ratio`: receive-pack takes a pushed blob that inflates about a thousandfold (16 MiB of one byte in about 16 KiB), under its object and pack caps, and serves it back.
 - `push.report-status-v2`: report-status-v2: option lines after ok.
 - `push.sideband-hook-output`: side-band-64k on receive-pack: the report on band 1, hook output on band 2.
 - `push.hook-rejection`: A pre-receive or update hook that declines: ng with the hook's reason, ref unchanged.
+- `push.ref-to-missing-object-refused`: receive-pack refuses a command whose new id is in neither the pack nor the repository (missing necessary objects), moves no ref, and still serves the repository fsck-clean.
 - `concurrency.two-transfer-runners`: Two resumable transfers of one plan at once both finish with the planned head; each refused step is settled by reading refs.
+- `errors.err-pkt-line`: An ERR pkt-line anywhere in a response is a typed remote error carrying the scrubbed message.
 - `interrupted.abort-during-push`: An external AbortSignal during a push: aborted if the body was never pulled, ambiguous once sent; git decides what landed.
 - `interrupted.resumable-transfer`: A multi-step transfer paused or interrupted is resumed from refs, not from local state, and ends at the planned head.
 - `http.redirects`: A 3xx on the advertisement is followed as git follows it (within policy); a 3xx on a POST is never followed.
@@ -419,7 +426,7 @@ Observed:
 |---|---|---|---|---:|
 | `fetch.want-tip-full-pack` | verified | ply↔git, git↔Artifacts | `fetchPack` | 1 |
 | `fetch.want-non-tip-object` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `fetchPack`, `fetchObject`, `readFile` | 2 |
-| `fetch.want-unreachable-or-unknown` | verified | git↔Artifacts, wire↔Artifacts | `fetchPack` | 1 |
+| `fetch.want-unreachable-or-unknown` | verified | ply↔git, git↔Artifacts, wire↔Artifacts | `fetchPack` | 2 |
 | `fetch.want-have-line-syntax` | verified | ply↔git, wire↔Artifacts | `fetchRequest`, `negotiate` | 1 |
 | `fetch.have-negotiation` | verified | ply↔git, git↔Artifacts | `negotiate`, `fetchPack` | 2 |
 | `fetch.acknowledgments-ready-packfile` | verified | ply↔git | `fetchPack` | 2 |
@@ -488,6 +495,7 @@ Ops: `src/fetchpack.ts` `fetchPack`.
 Tests:
 
 - `test/mutant-kill-tree.test.js`: ERR upload-pack: not our ref x
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
 
@@ -495,8 +503,9 @@ Evidence:
 - git↔Artifacts: loadgen-phase3-20261025: `fake_sha/v2/artifacts`
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `proto/want_short_oid`
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `proto/want_nonhex_oid`
+- ply↔git: `test/probes/probes.test.js`
 
-> ply's side is tested only with a fake upload-pack; no test sends ply an unknown want against real git or Artifacts.
+> ply sends an unknown want against git http-backend in the probes (#phantom, an id no one holds); an unreachable but present id is not probed.
 
 #### `fetch.want-have-line-syntax`
 
@@ -775,7 +784,7 @@ Evidence:
 
 > Band 3 is only ever injected by a proxy; no server has been made to send ply a fatal band-3 line.
 
-### Packfiles: OFS/REF deltas, thin bases, malformed packs (served and pushed) (`pack`, 12)
+### Packfiles: OFS/REF deltas, thin bases, malformed packs (served and pushed) (`pack`, 18)
 
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
@@ -791,6 +800,12 @@ Evidence:
 | `pack.push-corrupt-pack-refused` | verified | ply↔git, ply↔Artifacts, wire↔Artifacts | `pushPack`, `classifyReport` | 4 |
 | `pack.push-duplicate-object` | verified | ply↔git | `push` | 1 |
 | `pack.push-malformed-object-refused` | verified | ply↔git, ply↔Artifacts, wire↔Artifacts | `pushPack` | 1 |
+| `pack.push-bad-header-refused` | verified | ply↔git | `pushPack` | 1 |
+| `pack.push-bad-entry-refused` | verified | ply↔git | `pushPack` | 1 |
+| `pack.push-duplicate-entries` | verified | ply↔git | `pushPack` | 1 |
+| `pack.push-fsck-tree-refused` | verified | ply↔git | `push` | 1 |
+| `pack.push-fsck-commit-refused` | verified | ply↔git | `push` | 1 |
+| `pack.push-decompression-ratio` | verified | ply↔git | `push` | 1 |
 
 #### `pack.ofs-delta-resolve`
 
@@ -1000,7 +1015,97 @@ Evidence:
 
 > ply's encoders never write a malformed object (the encode-*-fsck tests); the probes carry one through pushPack: a commit naming a missing blob, a delta copying past its base.
 
-### Push and receive-pack (`push`, 18)
+#### `pack.push-bad-header-refused`
+
+receive-pack refuses a pushed pack whose header is wrong (signature, version, object count more or fewer than sent), moves no ref, and still serves the repository fsck-clean.
+
+Ops: `src/receivecaps.ts` `pushPack`.
+
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
+
+> Probe packs are written by the harness with the trailer recomputed, so only the header is wrong; ply sends them through pushPack.
+
+#### `pack.push-bad-entry-refused`
+
+receive-pack refuses a pushed pack with a bad entry (stated size not what the zlib stream inflates to, a reserved object type, an OFS_DELTA reaching before the pack, a delta whose stated result size it does not write), moves no ref, and still serves the repository fsck-clean.
+
+Ops: `src/receivecaps.ts` `pushPack`.
+
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
+
+#### `pack.push-duplicate-entries`
+
+receive-pack with fsckObjects refuses a pushed pack that names every object twice (git index-pack --strict), moves no ref, and still serves the repository fsck-clean.
+
+Ops: `src/receivecaps.ts` `pushPack`.
+
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
+
+> pack.push-duplicate-object is ply's side (it never sends one object twice); this is the server's answer to a pack that does.
+
+#### `pack.push-fsck-tree-refused`
+
+receive-pack with fsckObjects refuses a pushed tree git fsck calls an error (unsorted, a name twice, a `/` in a name, `.git`, a zero-padded mode), moves no ref, and still serves the repository fsck-clean.
+
+Ops: `src/push.ts` `push`.
+
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
+
+> Seeded byte for byte with git hash-object --literally and pushed by both ply and stock git, whose pack writers carry the object unchecked. A tree with mode 100664 (badFilemode) is only a warning to receive.fsckObjects and is not probed.
+
+#### `pack.push-fsck-commit-refused`
+
+receive-pack with fsckObjects refuses a pushed commit with a malformed author line (bad date, missing email, bad time zone, a date that overflows), moves no ref, and still serves the repository fsck-clean.
+
+Ops: `src/push.ts` `push`.
+
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
+
+#### `pack.push-decompression-ratio`
+
+receive-pack takes a pushed blob that inflates about a thousandfold (16 MiB of one byte in about 16 KiB), under its object and pack caps, and serves it back.
+
+Ops: `src/push.ts` `push`.
+
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
+
+### Push and receive-pack (`push`, 19)
 
 | id | status | evidence | ply ops | tests |
 |---|---|---|---|---:|
@@ -1017,6 +1122,7 @@ Evidence:
 | `push.push-options` | verified | ply↔git, git↔Artifacts | `push`, `pushPack` | 2 |
 | `push.hook-rejection` | verified | ply↔git | `push` | 1 |
 | `push.ref-name-rules` | verified | ply↔git, git↔Artifacts, wire↔Artifacts | `push` | 1 |
+| `push.ref-to-missing-object-refused` | verified | ply↔git | `pushPack` | 1 |
 | `push.size-limits` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push`, `pushPack` | 2 |
 | `push.many-ref-updates` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push` | 1 |
 | `push.signed-push` | unsupported (observed) | git↔Artifacts | — | 0 |
@@ -1271,6 +1377,22 @@ Evidence:
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `ref/dotdot`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `ref/control_char`
 - wire↔Artifacts: loadgen-phase4-hostile-write-20261025: `ref/long_name`
+
+#### `push.ref-to-missing-object-refused`
+
+receive-pack refuses a command whose new id is in neither the pack nor the repository (missing necessary objects), moves no ref, and still serves the repository fsck-clean.
+
+Ops: `src/receivecaps.ts` `pushPack`.
+
+Tests:
+
+- `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
+
+Evidence:
+
+- ply↔git: `test/probes/probes.test.js`
+
+> Stock git refuses such a push client side, so only ply (pushPack with a pack of no objects) sends it.
 
 #### `push.size-limits`
 
@@ -1767,7 +1889,7 @@ Tests:
 | `errors.receive-pack-forbidden` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push` | 1 |
 | `errors.repository-not-found` | verified | ply↔Artifacts | `lsRefs`, `discover` | 1 |
 | `errors.http-status-classes` | implemented | — | `createTransport`, `fetchPack`, `push` | 2 |
-| `errors.err-pkt-line` | implemented | — | `lsRefs`, `fetchPack` | 2 |
+| `errors.err-pkt-line` | verified | ply↔git | `lsRefs`, `fetchPack` | 3 |
 | `errors.not-git-response` | implemented | — | `createTransport` | 2 |
 | `errors.malformed-requests-to-server` | unsupported (observed) | wire↔Artifacts | — | 0 |
 
@@ -1849,8 +1971,13 @@ Tests:
 
 - `test/mutant-kill-tree.test.js`: ERR upload-pack: not our ref x
 - `test/adversarial.test.js`: I6b a credential echoed by the server reaches no error (any field) and no span: ERR, band 2/3, ng, hook output × 4 auth forms
+- `test/err-pkt-git.test.js`: real git ERR on a fetch of an id no one holds: the bytes carry ERR, ply says remote_error not_our_ref
 
-> ERR lines are injected; the real ones git and Artifacts send are cited only under fetch.want-unreachable-or-unknown.
+Evidence:
+
+- ply↔git: `test/err-pkt-git.test.js`
+
+> Real ERR: git http-backend's `ERR upload-pack: not our ref &lt;id>` on a fetch of an unknown id (captured as written; also probe fetch.want-unreachable-or-unknown#phantom), which ply reports as remote_error, reason not_our_ref. ERR at other stages (advertisement, ls-refs) is injected only.
 
 #### `errors.not-git-response`
 
