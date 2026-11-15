@@ -15,7 +15,7 @@
   "test/concurrency.test.js": 4,
   "test/config-comment.test.js": 1,
   "test/behaviours/matrix.test.js": 1,
-  "test/probes/probes.test.js": 175,
+  "test/probes/probes.test.js": 181,
   "test/custom-exchange.test.js": 2,
   "test/deadline-scenarios.test.js": 1,
   "test/deadline.test.js": 4,
@@ -164,5 +164,7 @@
   "test/want-oracle.test.js": 1,
   "test/wide-limits.test.js": 26,
   "test/workerd.test.js": 12,
-  "test/workflows.test.js": 1
+  "test/workflows.test.js": 1,
+  "test/err-pkt-git.test.js": 1,
+  "test/push-keepalive-git.test.js": 4
 }
