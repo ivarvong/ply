@@ -229,12 +229,12 @@ const REF_SEMANTICS: readonly Scenario[] = [
   },
   {
     id: 'refs.directory-file-conflict#both-in-one-push',
-    description: 'One non-atomic push creating refs/heads/a and refs/heads/a/b: never both. git 2.47 applies each command alone, so a lands and a/b is refused (partial); git >= 2.51 checks the batch together and refuses both.',
+    description: 'One non-atomic push creating refs/heads/a and refs/heads/a/b: never both. git 2.47 applies each command alone, so a lands and a/b is refused (partial); git >= 2.51 checks the batch together, and the CI image\'s 2.56.1 was seen to land a/b and refuse a.',
     seed: { objects: CORE, refs: [at(MAIN, 'base')] },
     steps: [step(pushOf([upd('refs/heads/a', ZERO, o('ff')), upd('refs/heads/a/b', ZERO, o('diverged'))]))],
     expect: [DF_PARTIAL],
-    // which of the two git gives depends on its version (DF_WHY); never both refs
-    final: [finalAt(MAIN, 'base'), { tag: 'one-of', ref: 'refs/heads/a', names: ['ff', ABSENT] }, absent('refs/heads/a/b')],
+    // which ref survives depends on git's version (DF_WHY); a server that lands both reports `landed`, which DF_PARTIAL does not list
+    final: [finalAt(MAIN, 'base'), { tag: 'one-of', ref: 'refs/heads/a', names: ['ff', ABSENT] }, { tag: 'one-of', ref: 'refs/heads/a/b', names: ['diverged', ABSENT] }],
     ...PLAIN,
   },
   {
