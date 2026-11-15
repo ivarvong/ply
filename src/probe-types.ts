@@ -172,9 +172,13 @@ export type Outcome = (typeof OUTCOMES)[number];
 export type ErrorClass = string | null;
 
 export type StepExpect = { readonly outcome: Outcome; readonly error: ErrorClass };
-// A concurrent step is expected as a multiset of outcomes (sorted).
+// A concurrent step is expected as a multiset of outcomes (sorted). `either`: one step whose answer git words
+// differently across versions, so the class a client reads from it differs too (git 2.47 reports a directory/file
+// refusal as `failed to update ref`, a cas reason, and git >= 2.51 as `refname conflict`, a refusal); any listed
+// answer meets it, and `why` names the versions.
 export type Expectation =
   | { readonly tag: 'one'; readonly ply: StepExpect; readonly git: StepExpect | null }
+  | { readonly tag: 'either'; readonly ply: NonEmpty<StepExpect>; readonly git: NonEmpty<StepExpect> | null; readonly why: string }
   | { readonly tag: 'many'; readonly ply: readonly Outcome[]; readonly git: readonly Outcome[] | null };
 
 // The final value of a ref, as git http-backend is expected to hold it.

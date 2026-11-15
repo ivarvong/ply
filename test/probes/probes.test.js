@@ -176,6 +176,21 @@ for (const s of SCENARIOS) {
   });
 }
 
+test('either: any listed answer meets the step, as one outcome/error pair (a git-version-dependent refusal)', () => {
+  const df = SCENARIOS.find(s => s.id === 'refs.directory-file-conflict#file-then-dir');
+  assert.equal(df.expect[0].tag, 'either');
+  const steps = (outcome, error) => ({ steps: [{ outcomes: [{ outcome, error, detail: '' }] }], end: end({ 'refs/heads/main': 'a', 'refs/heads/a': 'a' }) });
+  const stepDiffs = o => soloDiffs(df, o, names).filter(x => x.field === 'outcome' || x.field === 'error').map(x => `${x.field} ${x.left} | ${x.right}`);
+  assert.deepEqual(stepDiffs(steps('conflict', 'cas_conflict')), [], 'git 2.47: failed to update ref');
+  assert.deepEqual(stepDiffs(steps('rejected', 'push_rejected')), [], 'git >= 2.51: refname conflict');
+  // a pair taken half from each listed answer meets neither
+  assert.deepEqual(stepDiffs(steps('conflict', 'push_rejected')), ['outcome s0=conflict | s0=conflict|rejected', 'error s0=push_rejected | s0=cas_conflict|push_rejected']);
+  assert.deepEqual(stepDiffs(steps('landed', null)), ['outcome s0=landed | s0=conflict|rejected', 'error s0=null | s0=cas_conflict|push_rejected']);
+  const ref = o => compareScenario(df, { 'ref-ply': o }, names).filter(x => x.pair === 'ref-ply~expect' && x.left.startsWith('s0=')).map(x => `${x.left} | ${x.right}`);
+  assert.deepEqual(ref(steps('rejected', 'push_rejected')), []);
+  assert.deepEqual(ref(steps('landed', null)), ['s0=landed/null | s0=conflict/cas_conflict|rejected/push_rejected']);
+});
+
 test('the proxy reads the per-command push report, inside side-band 1 or bare', () => {
   const pkt = (s) => { const b = Buffer.from(s, 'latin1'); return Buffer.concat([Buffer.from((b.length + 4).toString(16).padStart(4, '0')), b]); };
   const status = Buffer.concat([pkt('unpack ok\n'), pkt('ok refs/heads/a\n'), pkt('ng refs/heads/a/b failed to update ref\n'), Buffer.from('0000')]);

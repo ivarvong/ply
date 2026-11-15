@@ -92,6 +92,12 @@ const corrupt = (damage: Corruption): Scenario => ({
 // malformed object is seeded byte for byte (git hash-object --literally) and pushed by both clients, whose own pack
 // writers carry it unchecked.
 const REFUSED: StepExpect = one('rejected', 'push_rejected');
+// A directory/file refusal: git 2.47 words it `failed to update ref` (ply: cas_conflict; porcelain: conflict) and git
+// >= 2.51 `refname conflict` (push_rejected), so the reference's answer depends on the git it runs. Both in one push:
+// git 2.47 lands the first and refuses the second (partial); git >= 2.51 refuses both.
+const DF_WHY = "git 2.47 reports a directory/file refusal as 'failed to update ref', git >= 2.51 as 'refname conflict'";
+const DF_REFUSED: Expectation = { tag: 'either', ply: [one('conflict', 'cas_conflict'), REFUSED], git: [one('conflict', 'cas_conflict'), REFUSED], why: DF_WHY };
+const DF_PARTIAL: Expectation = { tag: 'either', ply: [one('partial', 'push_partial'), REFUSED], git: [one('partial', 'push_partial'), REFUSED], why: DF_WHY };
 // After the refused push: a fetch of main (still base) lands for the clients that ran the push.
 const fetchAfter = (git: GitForm): Step => ({ tag: 'fetch', ref: MAIN, want: 'base', fault: NO_FAULT, git, timeouts: null });
 const defectPush = (defect: PackDefect, updates: NonEmpty<Update> = [upd(MAIN, o('base'), o('ff'))]): Push => ({ ...pushOf(updates), pack: { tag: 'defect', defect } });
@@ -208,7 +214,7 @@ const REF_SEMANTICS: readonly Scenario[] = [
     description: 'refs/heads/a exists; a create of refs/heads/a/b is refused (a ref cannot be both a name and a directory) and a is untouched.',
     seed: { objects: CORE, refs: [at(MAIN, 'base'), at('refs/heads/a', 'base')] },
     steps: [step(pushOf([upd('refs/heads/a/b', ZERO, o('ff'))]))],
-    expect: [both(one('conflict', 'cas_conflict'))],
+    expect: [DF_REFUSED],
     final: [finalAt(MAIN, 'base'), finalAt('refs/heads/a', 'base'), absent('refs/heads/a/b')],
     ...PLAIN,
   },
@@ -217,17 +223,18 @@ const REF_SEMANTICS: readonly Scenario[] = [
     description: 'refs/heads/a/b exists; a create of refs/heads/a is refused and a/b is untouched.',
     seed: { objects: CORE, refs: [at(MAIN, 'base'), at('refs/heads/a/b', 'base')] },
     steps: [step(pushOf([upd('refs/heads/a', ZERO, o('ff'))]))],
-    expect: [both(one('conflict', 'cas_conflict'))],
+    expect: [DF_REFUSED],
     final: [finalAt(MAIN, 'base'), finalAt('refs/heads/a/b', 'base'), absent('refs/heads/a')],
     ...PLAIN,
   },
   {
     id: 'refs.directory-file-conflict#both-in-one-push',
-    description: 'One non-atomic push creating refs/heads/a and refs/heads/a/b: never both. receive-pack applies each command alone, so a lands and a/b is refused (partial).',
+    description: 'One non-atomic push creating refs/heads/a and refs/heads/a/b: never both. git 2.47 applies each command alone, so a lands and a/b is refused (partial); git >= 2.51 checks the batch together and refuses both.',
     seed: { objects: CORE, refs: [at(MAIN, 'base')] },
     steps: [step(pushOf([upd('refs/heads/a', ZERO, o('ff')), upd('refs/heads/a/b', ZERO, o('diverged'))]))],
-    expect: [both(one('partial', 'push_partial'))],
-    final: [finalAt(MAIN, 'base'), finalAt('refs/heads/a', 'ff'), absent('refs/heads/a/b')],
+    expect: [DF_PARTIAL],
+    // which of the two git gives depends on its version (DF_WHY); never both refs
+    final: [finalAt(MAIN, 'base'), { tag: 'one-of', ref: 'refs/heads/a', names: ['ff', ABSENT] }, absent('refs/heads/a/b')],
     ...PLAIN,
   },
   {

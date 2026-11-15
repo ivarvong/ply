@@ -69,15 +69,25 @@ const END_FIELDS = ['head', 'refs', 'objects', 'trees', 'ancestry', 'merge-bases
 
 // ---- expectation: a run against what the scenario says git http-backend does ----
 const oneOf = (x: StepExpect): string => `${x.outcome}/${String(x.error)}`;
-const expectedOf = (e: Expectation, c: Client): string | null => {
-  if (e.tag === 'one') {
-    const x = c === 'ply' ? e.ply : e.git;
-    return x === null ? null : oneOf(x);
+// Every answer that meets the step, rendered; null when the client is not run on it.
+function expectedOf(e: Expectation, c: Client): readonly string[] | null {
+  switch (e.tag) {
+    case 'one': {
+      const x = c === 'ply' ? e.ply : e.git;
+      return x === null ? null : [oneOf(x)];
+    }
+    case 'either': {
+      const xs = c === 'ply' ? e.ply : e.git;
+      return xs === null ? null : xs.map(x => oneOf(x));
+    }
+    case 'many': {
+      const xs = c === 'ply' ? e.ply : e.git;
+      return xs === null ? null : [xs.toSorted().join(',')];
+    }
   }
-  const xs = c === 'ply' ? e.ply : e.git;
-  return xs === null ? null : xs.toSorted().join(',');
-};
-const observedOf = (e: Expectation, s: StepObservation): string => (e.tag === 'one' ? oneOf(s.outcomes[0]) : s.outcomes.map(x => x.outcome).toSorted().join(','));
+  return assertNever(e);
+}
+const observedOf = (e: Expectation, s: StepObservation): string => (e.tag === 'many' ? s.outcomes.map(x => x.outcome).toSorted().join(',') : oneOf(s.outcomes[0]));
 
 // The stated end refs against the refs a judge read.
 const absentName = (f: FinalRef): string => (f.tag === 'one-of' ? ABSENT : 'absent');
@@ -120,7 +130,7 @@ export function expectationDiffs(s: Scenario, target: 'ref-ply' | 'ref-git', obs
     const step = at(obs.steps, i);
     if (want === null || step.tag === 'none') continue;
     const got = observedOf(e, step.value);
-    if (got !== want) out.push({ scenario: s.id, pair, field: 'expectation', left: `s${i}=${got}`, right: `s${i}=${want}` });
+    if (!want.includes(got)) out.push({ scenario: s.id, pair, field: 'expectation', left: `s${i}=${got}`, right: `s${i}=${want.join('|')}` });
   }
   out.push(...finalDiffs(s, pair, obs, names));
   if (obs.end.fsck.length > 0) out.push({ scenario: s.id, pair, field: 'fsck', left: obs.end.fsck.join('|'), right: 'clean' });
@@ -226,18 +236,28 @@ export function compareScenario(s: Scenario, runs: Runs, names: Names): Differen
 // art-ply~ref-ply entries apply to it unchanged. A concurrent step's errors are not stated, so not compared. A judge in
 // a Worker has no fsck, so fsck is not compared; the end refs and every landed claim are.
 // A concurrent step states only its outcomes (sorted), so its errors are not compared here.
-const expectRender = (e: Expectation, f: 'outcome' | 'error'): string => {
-  if (e.tag === 'many') return e.ply.toSorted().join(',');
-  return f === 'outcome' ? e.ply.outcome : String(e.ply.error);
-};
+// ply's stated answers for one field of a step: one for `one` and `many`, each listed one for `either`.
+function expectRenders(e: Expectation, f: 'outcome' | 'error'): readonly string[] {
+  switch (e.tag) {
+    case 'many': return [e.ply.toSorted().join(',')];
+    case 'one': return [f === 'outcome' ? e.ply.outcome : String(e.ply.error)];
+    case 'either': return [...new Set(e.ply.map(x => (f === 'outcome' ? x.outcome : String(x.error))))];
+  }
+  return assertNever(e);
+}
+const eitherMet = (e: Extract<Expectation, { readonly tag: 'either' }>, seen: Option<StepObservation>): boolean =>
+  seen.tag === 'some' && e.ply.some(p => oneOf(p) === oneOf(seen.value.outcomes[0]));
 export function soloDiffs(s: Scenario, obs: Observation, names: Names): Difference[] {
   const out: Difference[] = [];
   for (const f of ['outcome', 'error'] as const) {
     // a concurrent step's errors are not stated, only its outcomes
-    const steps = s.expect.map((e, i) => ({ e, i, seen: at(obs.steps, i) })).filter(x => f === 'outcome' || x.e.tag === 'one');
-    const left = steps.map(x => `s${x.i}=${x.seen.tag === 'some' ? renderStep(x.seen.value, f) : '(not run)'}`).join(';');
-    const right = steps.map(x => `s${x.i}=${expectRender(x.e, f)}`).join(';');
-    if (left !== right) out.push({ scenario: s.id, pair: 'art-ply~expect', field: f, left, right });
+    const steps = s.expect.map((e, i) => ({ e, i, seen: at(obs.steps, i) })).filter(x => f === 'outcome' || x.e.tag !== 'many');
+    const seenOf = (x: (typeof steps)[number]): string => (x.seen.tag === 'some' ? renderStep(x.seen.value, f) : '(not run)');
+    // an `either` step meets its field when the outcome and error seen are one listed pair, not each from a different one
+    const meets = (x: (typeof steps)[number]): boolean => (x.e.tag === 'either' ? eitherMet(x.e, x.seen) : expectRenders(x.e, f).includes(seenOf(x)));
+    const left = steps.map(x => `s${x.i}=${seenOf(x)}`).join(';');
+    const right = steps.map(x => `s${x.i}=${expectRenders(x.e, f).join('|')}`).join(';');
+    if (!steps.every(x => meets(x))) out.push({ scenario: s.id, pair: 'art-ply~expect', field: f, left, right });
   }
   out.push(...finalDiffs(s, 'art-ply~expect', obs, names), ...claimDiffs(s, 'art-ply', obs, names));
   return out;
