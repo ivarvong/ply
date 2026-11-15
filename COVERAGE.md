@@ -19,7 +19,7 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 
 ## Summary
 
-**116** behaviours: **103** verified, **3** implemented, **10** unsupported. Of the verified, **73** carry some Artifacts evidence and **52** carry evidence of ply itself against Artifacts.
+**116** behaviours: **103** verified, **3** implemented, **10** unsupported. Of the verified, **80** carry some Artifacts evidence and **60** carry evidence of ply itself against Artifacts.
 
 | area | behaviours | verified | implemented | unsupported |
 |---|---:|---:|---:|---:|
@@ -41,8 +41,8 @@ Verified behaviours by evidence kind (a behaviour counts once under each kind it
 | evidence kind | verified behaviours |
 |---|---:|
 | `ply_vs_reference_git` | 100 |
-| `ply_vs_artifacts` | 52 |
-| `native_git_vs_artifacts` | 50 |
+| `ply_vs_artifacts` | 60 |
+| `native_git_vs_artifacts` | 53 |
 | `wire_probe_vs_artifacts` | 18 |
 
 ## Gaps
@@ -55,7 +55,7 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `errors.http-status-classes`: Statuses 4xx/5xx/429 at each stage map to ply's typed classes, and a refused optional feature is not retried for them.
 - `errors.not-git-response`: A 200 that is not git (HTML, wrong content type) is not_git, never parsed as protocol.
 
-### Verified against git http-backend only: no evidence of any kind from Artifacts (30)
+### Verified against git http-backend only: no evidence of any kind from Artifacts (23)
 
 - `refs.advertisement-shapes`: Unusual but legal listings (duplicate names, ordering, raw bytes in names) are read as git reads them.
 - `caps.required-capabilities`: A server missing a capability ply needs (ls-refs, fetch) is refused as unsupported before any operation.
@@ -71,16 +71,9 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `pack.corrupt-served-pack`: A served pack with a corrupt header field, zlib member, delta or checksum is refused exactly where git index-pack --strict refuses it.
 - `pack.served-pack-limits`: Hostile sizes in a served pack (object size, delta result, chain depth, inflated total) are refused before allocation.
 - `pack.push-duplicate-object`: A pushed pack never names one object twice (a strict receiver refuses it).
-- `pack.push-bad-header-refused`: receive-pack refuses a pushed pack whose header is wrong (signature, version, object count more or fewer than sent), moves no ref, and still serves the repository fsck-clean.
-- `pack.push-bad-entry-refused`: receive-pack refuses a pushed pack with a bad entry (stated size not what the zlib stream inflates to, a reserved object type, an OFS_DELTA reaching before the pack, a delta whose stated result size it does not write), moves no ref, and still serves the repository fsck-clean.
-- `pack.push-duplicate-entries`: receive-pack with fsckObjects refuses a pushed pack that names every object twice (git index-pack --strict), moves no ref, and still serves the repository fsck-clean.
-- `pack.push-fsck-tree-refused`: receive-pack with fsckObjects refuses a pushed tree git fsck calls an error (unsorted, a name twice, a `/` in a name, `.git`, a zero-padded mode), moves no ref, and still serves the repository fsck-clean.
-- `pack.push-fsck-commit-refused`: receive-pack with fsckObjects refuses a pushed commit with a malformed author line (bad date, missing email, bad time zone, a date that overflows), moves no ref, and still serves the repository fsck-clean.
-- `pack.push-decompression-ratio`: receive-pack takes a pushed blob that inflates about a thousandfold (16 MiB of one byte in about 16 KiB), under its object and pack caps, and serves it back.
 - `push.report-status-v2`: report-status-v2: option lines after ok.
 - `push.sideband-hook-output`: side-band-64k on receive-pack: the report on band 1, hook output on band 2.
 - `push.hook-rejection`: A pre-receive or update hook that declines: ng with the hook's reason, ref unchanged.
-- `push.ref-to-missing-object-refused`: receive-pack refuses a command whose new id is in neither the pack nor the repository (missing necessary objects), moves no ref, and still serves the repository fsck-clean.
 - `concurrency.two-transfer-runners`: Two resumable transfers of one plan at once both finish with the planned head; each refused step is settled by reading refs.
 - `errors.err-pkt-line`: An ERR pkt-line anywhere in a response is a typed remote error carrying the scrubbed message.
 - `interrupted.abort-during-push`: An external AbortSignal during a push: aborted if the body was never pulled, ambiguous once sent; git decides what landed.
@@ -88,11 +81,10 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `http.redirects`: A 3xx on the advertisement is followed as git follows it (within policy); a 3xx on a POST is never followed.
 - `http.sideband-keepalive`: Empty band-1 keepalives while a hook runs do not end the push read.
 
-### Artifacts observed by stock git or wire probes, never by ply (21)
+### Artifacts observed by stock git or wire probes, never by ply (20)
 
 - `caps.receive-pack-capabilities`: receive-pack capabilities (report-status, report-status-v2, side-band-64k, atomic, push-options, delete-refs, ofs-delta, object-format) are read and checked before the POST.
 - `fetch.want-tip-full-pack`: want of a tip with done and no filter: the pack holds exactly what pack-objects sends.
-- `fetch.want-unreachable-or-unknown`: want of an unreachable or nonexistent id: the server refuses (ERR not our ref), and ply reports a typed remote_error.
 - `fetch.want-have-line-syntax`: want/have/shallow lines: upload-pack's verdict on each class of id, and ply refusing non-ids before the wire.
 - `fetch.have-negotiation`: Multi-round have/ACK negotiation, then done: the server stops at common commits and sends only what is missing.
 - `fetch.filter-tree-depth`: filter tree:&lt;depth> (tree:0 commit only, tree:1, tree:2).
@@ -426,7 +418,7 @@ Observed:
 |---|---|---|---|---:|
 | `fetch.want-tip-full-pack` | verified | ply↔git, git↔Artifacts | `fetchPack` | 1 |
 | `fetch.want-non-tip-object` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `fetchPack`, `fetchObject`, `readFile` | 2 |
-| `fetch.want-unreachable-or-unknown` | verified | ply↔git, git↔Artifacts, wire↔Artifacts | `fetchPack` | 2 |
+| `fetch.want-unreachable-or-unknown` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `fetchPack` | 2 |
 | `fetch.want-have-line-syntax` | verified | ply↔git, wire↔Artifacts | `fetchRequest`, `negotiate` | 1 |
 | `fetch.have-negotiation` | verified | ply↔git, git↔Artifacts | `negotiate`, `fetchPack` | 2 |
 | `fetch.acknowledgments-ready-packfile` | verified | ply↔git | `fetchPack` | 2 |
@@ -504,6 +496,7 @@ Evidence:
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `proto/want_short_oid`
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `proto/want_nonhex_oid`
 - ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `fetch.want-unreachable-or-unknown#phantom/art-ply`
 
 > ply sends an unknown want against git http-backend in the probes (#phantom, an id no one holds); an unreachable but present id is not probed.
 
@@ -800,12 +793,12 @@ Evidence:
 | `pack.push-corrupt-pack-refused` | verified | ply↔git, ply↔Artifacts, wire↔Artifacts | `pushPack`, `classifyReport` | 4 |
 | `pack.push-duplicate-object` | verified | ply↔git | `push` | 1 |
 | `pack.push-malformed-object-refused` | verified | ply↔git, ply↔Artifacts, wire↔Artifacts | `pushPack` | 1 |
-| `pack.push-bad-header-refused` | verified | ply↔git | `pushPack` | 1 |
-| `pack.push-bad-entry-refused` | verified | ply↔git | `pushPack` | 1 |
-| `pack.push-duplicate-entries` | verified | ply↔git | `pushPack` | 1 |
-| `pack.push-fsck-tree-refused` | verified | ply↔git | `push` | 1 |
-| `pack.push-fsck-commit-refused` | verified | ply↔git | `push` | 1 |
-| `pack.push-decompression-ratio` | verified | ply↔git | `push` | 1 |
+| `pack.push-bad-header-refused` | verified | ply↔git, ply↔Artifacts | `pushPack` | 1 |
+| `pack.push-bad-entry-refused` | verified | ply↔git, ply↔Artifacts | `pushPack` | 1 |
+| `pack.push-duplicate-entries` | verified | ply↔git, ply↔Artifacts | `pushPack` | 1 |
+| `pack.push-fsck-tree-refused` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push` | 1 |
+| `pack.push-fsck-commit-refused` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push` | 1 |
+| `pack.push-decompression-ratio` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push` | 1 |
 
 #### `pack.ofs-delta-resolve`
 
@@ -1028,6 +1021,10 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-bad-header-refused#bad-signature/art-ply`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-bad-header-refused#bad-version/art-ply`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-bad-header-refused#count-more/art-ply`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-bad-header-refused#count-fewer/art-ply`
 
 > Probe packs are written by the harness with the trailer recomputed, so only the header is wrong; ply sends them through pushPack.
 
@@ -1044,6 +1041,10 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-bad-entry-refused#size-header-mismatch/art-ply`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-bad-entry-refused#bad-type/art-ply`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-bad-entry-refused#ofs-delta-before-start/art-ply`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-bad-entry-refused#delta-size-mismatch/art-ply`
 
 #### `pack.push-duplicate-entries`
 
@@ -1058,6 +1059,7 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-duplicate-entries#every-object-twice/art-ply`
 
 > pack.push-duplicate-object is ply's side (it never sends one object twice); this is the server's answer to a pack that does.
 
@@ -1074,6 +1076,16 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-tree-refused#unsorted/art-ply`
+- git↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-tree-refused#unsorted/art-git`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-tree-refused#duplicate-name/art-ply`
+- git↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-tree-refused#duplicate-name/art-git`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-tree-refused#slash-in-name/art-ply`
+- git↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-tree-refused#slash-in-name/art-git`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-tree-refused#dot-git/art-ply`
+- git↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-tree-refused#dot-git/art-git`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-tree-refused#zero-padded-mode/art-ply`
+- git↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-tree-refused#zero-padded-mode/art-git`
 
 > Seeded byte for byte with git hash-object --literally and pushed by both ply and stock git, whose pack writers carry the object unchecked. A tree with mode 100664 (badFilemode) is only a warning to receive.fsckObjects and is not probed.
 
@@ -1090,6 +1102,14 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-commit-refused#bad-date/art-ply`
+- git↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-commit-refused#bad-date/art-git`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-commit-refused#missing-email/art-ply`
+- git↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-commit-refused#missing-email/art-git`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-commit-refused#bad-timezone/art-ply`
+- git↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-commit-refused#bad-timezone/art-git`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-commit-refused#date-overflow/art-ply`
+- git↔Artifacts: probes-20261115t1926-gfhc: `pack.push-fsck-commit-refused#date-overflow/art-git`
 
 #### `pack.push-decompression-ratio`
 
@@ -1104,6 +1124,8 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `pack.push-decompression-ratio#zeros-16mib/art-ply`
+- git↔Artifacts: probes-20261115t1926-gfhc: `pack.push-decompression-ratio#zeros-16mib/art-git`
 
 ### Push and receive-pack (`push`, 19)
 
@@ -1122,7 +1144,7 @@ Evidence:
 | `push.push-options` | verified | ply↔git, git↔Artifacts | `push`, `pushPack` | 2 |
 | `push.hook-rejection` | verified | ply↔git | `push` | 1 |
 | `push.ref-name-rules` | verified | ply↔git, git↔Artifacts, wire↔Artifacts | `push` | 1 |
-| `push.ref-to-missing-object-refused` | verified | ply↔git | `pushPack` | 1 |
+| `push.ref-to-missing-object-refused` | verified | ply↔git, ply↔Artifacts | `pushPack` | 1 |
 | `push.size-limits` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push`, `pushPack` | 2 |
 | `push.many-ref-updates` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `push` | 1 |
 | `push.signed-push` | unsupported (observed) | git↔Artifacts | — | 0 |
@@ -1391,6 +1413,7 @@ Tests:
 Evidence:
 
 - ply↔git: `test/probes/probes.test.js`
+- ply↔Artifacts: probes-20261115t1926-gfhc: `push.ref-to-missing-object-refused#not-in-pack-or-repo/art-ply`
 
 > Stock git refuses such a push client side, so only ply (pushPack with a pack of no objects) sends it.
 
@@ -2324,4 +2347,5 @@ Observed:
 | `probes-20261114t1837-53b4` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 10 | ply differential probes, days 5-6 batch A (scripts/probes.mjs --artifacts, probe code b55fa846fcd21188 on ply 06042f8): race shapes (delete against an update, create against a create, delete against an update at once), a create of a ref that exists, and a retry of every push that did not land under contention; same harness as probes-20261114t1745-5jxl, with the proxy also keeping the commands of each receive-pack request and the refs of each advertisement; stock git 2.47.3. |
 | `probes-20261114t1909-sl8l` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 30 | ply differential probes, days 5-6 batches B and C (scripts/probes.mjs --artifacts, probe code 7c155a159f2bda27 on ply 55205ae; since then one scenario comment reworded and, after ply c22b066, the stock git expectation dropped from the two response-stall scenarios because git's low-speed timer differs by build): hand-built packs sent through pushPack (a thin pack against a base the server has and one whose base it lacks, a commit naming a missing blob, a delta copying past its base, a bad trailer, bad zlib, a truncated pack), pushes from a shallow clone and from a blob:none partial clone, a push body cut halfway, request and response stalls on push and fetch against set client timeouts, and an upload-pack response dropped halfway; same harness as probes-20261114t1837-53b4, with the proxy also injecting request-side faults and recording the socket error of a failed upstream call; stock git git version 2.47.3. |
 | `probes-20261114t2226-yyjq` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 81 | ply differential probes, full matrix (t229u days 9-10; scripts/probes.mjs --artifacts, probe code 744e85097786a1b0 on ply a78ed24 plus the two harness fixes committed with this entry: the run's signal handler also closes a repository still being created, and a stock git update carries its lease without a forced refspec): every scenario in src/probe-scenarios.ts, ply and stock git 2.47.3 (node 24.22.1), each against git http-backend with Artifacts' known policy and against a fresh Artifacts repository per scenario and client (namespace ply-loadgen, one at a time); same recording proxy and stock git judge as probes-20261114t1909-sl8l; cf-ray kept for every Artifacts request; every token revoked and probed, every repository deleted and checked by listing. |
+| `probes-20261115t1926-gfhc` | 2026-11-15 | ply↔Artifacts, git↔Artifacts | 31 | ply differential probes, malformed packs and objects (scripts/probes.mjs --artifacts --only the 21 scenarios added in 24cafa1, probe code ca2eec66b288b4b2 on ply b9b33db): ply and, where it can send the input, stock git 2.47.3 (node 24.22.1), each against git http-backend with Artifacts' known policy and against a fresh Artifacts repository per scenario and client (namespace ply-loadgen, one at a time); same recording proxy and stock git judge as probes-20261114t2226-yyjq; cf-ray kept for every Artifacts request; every token revoked and probed, every repository deleted and checked by listing. |
 

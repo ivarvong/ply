@@ -35,6 +35,9 @@ const deltaWire = (check: CheckOf<'loadgen-phase5-delta-20261025'>): OtherEviden
 // for ply against Artifacts, `<scenario>/art-git` for stock git against it; the same plans run in CI against the reference.
 const probePly = (check: CheckOf<'probes-20261114t2226-yyjq'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t2226-yyjq', check } });
 const probeGit = (check: CheckOf<'probes-20261114t2226-yyjq'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261114t2226-yyjq', check } });
+// The malformed-pack run (probes-20261115t1926-gfhc): the 21 scenarios of 24cafa1 against Artifacts.
+const malPly = (check: CheckOf<'probes-20261115t1926-gfhc'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261115t1926-gfhc', check } });
+const malGit = (check: CheckOf<'probes-20261115t1926-gfhc'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261115t1926-gfhc', check } });
 
 const verified = (...evidence: NonEmpty<Evidence>): Extract<Status, { readonly tag: 'verified' }> => ({ tag: 'verified', evidence });
 const IMPLEMENTED: Extract<Status, { readonly tag: 'implemented' }> = { tag: 'implemented' };
@@ -259,7 +262,7 @@ const FETCH: readonly BehaviourIn<'fetch'>[] = [
     description: 'want of an unreachable or nonexistent id: the server refuses (ERR not our ref), and ply reports a typed remote_error.',
     ops: [FETCH_PACK],
     tests: [t('test/mutant-kill-tree.test.js', 'ERR upload-pack: not our ref x'), t('test/probes/probes.test.js', PROBES)],
-    status: verified(phase3Git('unreachable_local/v2/artifacts'), phase3Git('fake_sha/v2/artifacts'), hostile('proto/want_short_oid'), hostile('proto/want_nonhex_oid'), git('test/probes/probes.test.js', PROBES)),
+    status: verified(phase3Git('unreachable_local/v2/artifacts'), phase3Git('fake_sha/v2/artifacts'), hostile('proto/want_short_oid'), hostile('proto/want_nonhex_oid'), git('test/probes/probes.test.js', PROBES), malPly('fetch.want-unreachable-or-unknown#phantom/art-ply')),
     notes: ['ply sends an unknown want against git http-backend in the probes (#phantom, an id no one holds); an unreachable but present id is not probed.'],
   }),
   b({
@@ -503,7 +506,7 @@ const PACK: readonly BehaviourIn<'pack'>[] = [
     description: 'receive-pack refuses a pushed pack whose header is wrong (signature, version, object count more or fewer than sent), moves no ref, and still serves the repository fsck-clean.',
     ops: [PUSH_PACK],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES)),
+    status: verified(git('test/probes/probes.test.js', PROBES), malPly('pack.push-bad-header-refused#bad-signature/art-ply'), malPly('pack.push-bad-header-refused#bad-version/art-ply'), malPly('pack.push-bad-header-refused#count-more/art-ply'), malPly('pack.push-bad-header-refused#count-fewer/art-ply')),
     notes: ['Probe packs are written by the harness with the trailer recomputed, so only the header is wrong; ply sends them through pushPack.'],
   }),
   b({
@@ -511,7 +514,7 @@ const PACK: readonly BehaviourIn<'pack'>[] = [
     description: 'receive-pack refuses a pushed pack with a bad entry (stated size not what the zlib stream inflates to, a reserved object type, an OFS_DELTA reaching before the pack, a delta whose stated result size it does not write), moves no ref, and still serves the repository fsck-clean.',
     ops: [PUSH_PACK],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES)),
+    status: verified(git('test/probes/probes.test.js', PROBES), malPly('pack.push-bad-entry-refused#size-header-mismatch/art-ply'), malPly('pack.push-bad-entry-refused#bad-type/art-ply'), malPly('pack.push-bad-entry-refused#ofs-delta-before-start/art-ply'), malPly('pack.push-bad-entry-refused#delta-size-mismatch/art-ply')),
     notes: [],
   }),
   b({
@@ -519,7 +522,7 @@ const PACK: readonly BehaviourIn<'pack'>[] = [
     description: 'receive-pack with fsckObjects refuses a pushed pack that names every object twice (git index-pack --strict), moves no ref, and still serves the repository fsck-clean.',
     ops: [PUSH_PACK],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES)),
+    status: verified(git('test/probes/probes.test.js', PROBES), malPly('pack.push-duplicate-entries#every-object-twice/art-ply')),
     notes: ['pack.push-duplicate-object is ply\'s side (it never sends one object twice); this is the server\'s answer to a pack that does.'],
   }),
   b({
@@ -527,7 +530,7 @@ const PACK: readonly BehaviourIn<'pack'>[] = [
     description: 'receive-pack with fsckObjects refuses a pushed tree git fsck calls an error (unsorted, a name twice, a `/` in a name, `.git`, a zero-padded mode), moves no ref, and still serves the repository fsck-clean.',
     ops: [PUSH],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES)),
+    status: verified(git('test/probes/probes.test.js', PROBES), malPly('pack.push-fsck-tree-refused#unsorted/art-ply'), malGit('pack.push-fsck-tree-refused#unsorted/art-git'), malPly('pack.push-fsck-tree-refused#duplicate-name/art-ply'), malGit('pack.push-fsck-tree-refused#duplicate-name/art-git'), malPly('pack.push-fsck-tree-refused#slash-in-name/art-ply'), malGit('pack.push-fsck-tree-refused#slash-in-name/art-git'), malPly('pack.push-fsck-tree-refused#dot-git/art-ply'), malGit('pack.push-fsck-tree-refused#dot-git/art-git'), malPly('pack.push-fsck-tree-refused#zero-padded-mode/art-ply'), malGit('pack.push-fsck-tree-refused#zero-padded-mode/art-git')),
     notes: ['Seeded byte for byte with git hash-object --literally and pushed by both ply and stock git, whose pack writers carry the object unchecked. A tree with mode 100664 (badFilemode) is only a warning to receive.fsckObjects and is not probed.'],
   }),
   b({
@@ -535,7 +538,7 @@ const PACK: readonly BehaviourIn<'pack'>[] = [
     description: 'receive-pack with fsckObjects refuses a pushed commit with a malformed author line (bad date, missing email, bad time zone, a date that overflows), moves no ref, and still serves the repository fsck-clean.',
     ops: [PUSH],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES)),
+    status: verified(git('test/probes/probes.test.js', PROBES), malPly('pack.push-fsck-commit-refused#bad-date/art-ply'), malGit('pack.push-fsck-commit-refused#bad-date/art-git'), malPly('pack.push-fsck-commit-refused#missing-email/art-ply'), malGit('pack.push-fsck-commit-refused#missing-email/art-git'), malPly('pack.push-fsck-commit-refused#bad-timezone/art-ply'), malGit('pack.push-fsck-commit-refused#bad-timezone/art-git'), malPly('pack.push-fsck-commit-refused#date-overflow/art-ply'), malGit('pack.push-fsck-commit-refused#date-overflow/art-git')),
     notes: [],
   }),
   b({
@@ -543,7 +546,7 @@ const PACK: readonly BehaviourIn<'pack'>[] = [
     description: 'receive-pack takes a pushed blob that inflates about a thousandfold (16 MiB of one byte in about 16 KiB), under its object and pack caps, and serves it back.',
     ops: [PUSH],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES)),
+    status: verified(git('test/probes/probes.test.js', PROBES), malPly('pack.push-decompression-ratio#zeros-16mib/art-ply'), malGit('pack.push-decompression-ratio#zeros-16mib/art-git')),
     notes: [],
   }),
 ];
@@ -658,7 +661,7 @@ const PUSHES: readonly BehaviourIn<'push'>[] = [
     description: 'receive-pack refuses a command whose new id is in neither the pack nor the repository (missing necessary objects), moves no ref, and still serves the repository fsck-clean.',
     ops: [PUSH_PACK],
     tests: [t('test/probes/probes.test.js', PROBES)],
-    status: verified(git('test/probes/probes.test.js', PROBES)),
+    status: verified(git('test/probes/probes.test.js', PROBES), malPly('push.ref-to-missing-object-refused#not-in-pack-or-repo/art-ply')),
     notes: ['Stock git refuses such a push client side, so only ply (pushPack with a pack of no objects) sends it.'],
   }),
   b({
