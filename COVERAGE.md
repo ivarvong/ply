@@ -19,7 +19,7 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 
 ## Summary
 
-**116** behaviours: **103** verified, **3** implemented, **10** unsupported. Of the verified, **80** carry some Artifacts evidence and **60** carry evidence of ply itself against Artifacts.
+**116** behaviours: **104** verified, **2** implemented, **10** unsupported. Of the verified, **81** carry some Artifacts evidence and **61** carry evidence of ply itself against Artifacts.
 
 | area | behaviours | verified | implemented | unsupported |
 |---|---:|---:|---:|---:|
@@ -31,28 +31,27 @@ Only Artifacts evidence says anything about Artifacts; reference evidence says p
 | concurrency | 7 | 7 | 0 | 0 |
 | tags | 5 | 5 | 0 | 0 |
 | ancestry | 7 | 6 | 1 | 0 |
-| errors | 7 | 4 | 2 | 1 |
+| errors | 7 | 5 | 1 | 1 |
 | interrupted | 6 | 6 | 0 | 0 |
 | http | 10 | 7 | 0 | 3 |
-| **all** | **116** | **103** | **3** | **10** |
+| **all** | **116** | **104** | **2** | **10** |
 
 Verified behaviours by evidence kind (a behaviour counts once under each kind it has):
 
 | evidence kind | verified behaviours |
 |---|---:|
 | `ply_vs_reference_git` | 100 |
-| `ply_vs_artifacts` | 60 |
-| `native_git_vs_artifacts` | 53 |
-| `wire_probe_vs_artifacts` | 18 |
+| `ply_vs_artifacts` | 61 |
+| `native_git_vs_artifacts` | 54 |
+| `wire_probe_vs_artifacts` | 19 |
 
 ## Gaps
 
 Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed under the first of these classes that holds:
 
-### Exercised by ply, judged by nothing independent (3)
+### Exercised by ply, judged by nothing independent (2)
 
 - `ancestry.cut-graph`: A server that withholds ancestors without saying shallow: ply fails closed, nothing pushed.
-- `errors.http-status-classes`: Statuses 4xx/5xx/429 at each stage map to ply's typed classes, and a refused optional feature is not retried for them.
 - `errors.not-git-response`: A 200 that is not git (HTML, wrong content type) is not_git, never parsed as protocol.
 
 ### Verified against git http-backend only: no evidence of any kind from Artifacts (23)
@@ -104,10 +103,11 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `http.chunked-request-body`: A large push body streamed with chunked transfer-encoding (duplex half).
 - `http.large-request-body`: A large push request body (tens of MiB) reaches the server whole.
 
-### Verified on Artifacts, but ply's probe is not checked against git http-backend (2)
+### Verified on Artifacts, but ply's probe is not checked against git http-backend (3)
 
 - `concurrency.read-after-write`: A landed push is visible at once to ls-refs and to fetch (no stale advertisement after a push).
 - `errors.repository-not-found`: A repository that does not exist: the advertisement answers 404, typed not_found.
+- `errors.http-status-classes`: Statuses 4xx/5xx/429 at each stage map to ply's typed classes, and a refused optional feature is not retried for them.
 
 ### Not exercisable by ply (10)
 
@@ -134,7 +134,7 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 | `refs.peeled-tags` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `lsRefs`, `listRefs` | 1 |
 | `refs.unborn-empty-repo` | verified | ply↔git, ply↔Artifacts | `lsRefs` | 2 |
 | `refs.advertisement-shapes` | verified | ply↔git | `lsRefs` | 2 |
-| `refs.v0-upload-pack-advertisement` | unsupported (observed) | git↔Artifacts | — | 0 |
+| `refs.v0-upload-pack-advertisement` | unsupported (observed) | git↔Artifacts, wire↔Artifacts | — | 0 |
 | `refs.receive-pack-advertisement` | verified | ply↔git, ply↔Artifacts, wire↔Artifacts | `receiveCaps`, `push` | 2 |
 
 #### `refs.ls-refs-listing`
@@ -252,8 +252,11 @@ Observed:
 - git↔Artifacts: loadgen-compat-20261024: `ls_remote/small/v0`
 - git↔Artifacts: loadgen-compat-20261024: `clone_full/small/v0`
 - git↔Artifacts: loadgen-compat-20261024: `depth_1/small/v0`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `refs.v0-upload-pack-advertisement#no-protocol-header/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `refs.v0-upload-pack-advertisement#no-protocol-header/art-curl`
+- git↔Artifacts: wire-20261115t2038-ee4x: `refs.v0-upload-pack-advertisement#no-protocol-header/art-git`
 
-> Only stock git has probed v0/v1 on Artifacts.
+> Stock git, raw requests and curl have probed v0 on Artifacts; ply has not.
 
 #### `refs.receive-pack-advertisement`
 
@@ -411,6 +414,8 @@ Unsupported: No ply operation sends command=object-info.
 Observed:
 
 - wire↔Artifacts: loadgen-phase2-20261025: `object_info/artifacts`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `caps.object-info#size/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `caps.object-info#size/art-curl`
 
 ### Fetch: negotiation, filters, shallow, include-tag, thin packs (`fetch`, 20)
 
@@ -426,7 +431,7 @@ Observed:
 | `fetch.filter-tree-depth` | verified | ply↔git, git↔Artifacts | `fetchPack`, `readCommit` | 2 |
 | `fetch.filter-blob-limit` | verified | ply↔git, git↔Artifacts | `fetchPack` | 1 |
 | `fetch.filter-combine` | verified | ply↔git | `fetchPack`, `readFile` | 2 |
-| `fetch.filter-sparse-oid` | unsupported (observed) | git↔Artifacts | — | 0 |
+| `fetch.filter-sparse-oid` | unsupported (observed) | git↔Artifacts, wire↔Artifacts | — | 0 |
 | `fetch.filter-refusal-fallback` | verified | ply↔git, ply↔Artifacts | `learnFilter`, `fetchPack`, `readFile` | 2 |
 | `fetch.deepen-depth` | verified | ply↔git, git↔Artifacts | `fetchPack`, `fetchObject` | 3 |
 | `fetch.deepen-since` | verified | ply↔git, git↔Artifacts | `fetchPack` | 1 |
@@ -621,11 +626,14 @@ Evidence:
 
 filter sparse:oid=&lt;blob>.
 
-Unsupported: No ply operation builds a sparse:oid filter, and no test sends one.
+Unsupported: No ply operation builds a sparse:oid filter; the wire probe hands one to fetchPackFiltered only to watch it refused, which is not support.
 
 Observed:
 
 - git↔Artifacts: loadgen-compat-20261024: `filter_sparse_oid/wide/v2`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `fetch.filter-sparse-oid#refused/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `fetch.filter-sparse-oid#refused/art-curl`
+- git↔Artifacts: wire-20261115t2038-ee4x: `fetch.filter-sparse-oid#refused/art-git`
 
 #### `fetch.filter-refusal-fallback`
 
@@ -1911,7 +1919,7 @@ Tests:
 | `errors.auth-missing-or-wrong` | verified | ply↔git, ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `createTransport`, `lsRefs`, `push` | 2 |
 | `errors.receive-pack-forbidden` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push` | 1 |
 | `errors.repository-not-found` | verified | ply↔Artifacts | `lsRefs`, `discover` | 1 |
-| `errors.http-status-classes` | implemented | — | `createTransport`, `fetchPack`, `push` | 2 |
+| `errors.http-status-classes` | verified | ply↔Artifacts, git↔Artifacts, wire↔Artifacts | `createTransport`, `fetchPack`, `push` | 2 |
 | `errors.err-pkt-line` | verified | ply↔git | `lsRefs`, `fetchPack` | 3 |
 | `errors.not-git-response` | implemented | — | `createTransport` | 2 |
 | `errors.malformed-requests-to-server` | unsupported (observed) | wire↔Artifacts | — | 0 |
@@ -1982,7 +1990,26 @@ Tests:
 - `test/adversarial.test.js`: HTTP-level faults at every stage: statuses, non-git bodies, stall, drop, empty
 - `test/fetchobject-deepen-refusal.test.js`: never asked again: 401, 403, 404, 429 and 500 stand as they are, with no advertisement read
 
-> Judged against ply's own table. No recorded run checks what Artifacts sends under rate limiting or a 5xx.
+Evidence:
+
+- ply↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#no-credential/art-ply`
+- ply↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#bogus-token/art-ply`
+- ply↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#revoked-token/art-ply`
+- ply↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#missing-repo/art-ply`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#no-credential/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#no-credential/art-curl`
+- git↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#no-credential/art-git`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#bogus-token/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#bogus-token/art-curl`
+- git↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#bogus-token/art-git`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#revoked-token/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#revoked-token/art-curl`
+- git↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#revoked-token/art-git`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#missing-repo/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#missing-repo/art-curl`
+- git↔Artifacts: wire-20261115t2038-ee4x: `errors.http-status-classes#missing-repo/art-git`
+
+> The wire run checks the info/refs GET with no credential, an unminted token, a revoked token and a repository-scoped token on a path it does not cover, from ply, stock git, curl and a raw request. No recorded run checks what Artifacts sends under rate limiting or a 5xx.
 
 #### `errors.err-pkt-line`
 
@@ -2026,6 +2053,18 @@ Observed:
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `pkt/missing_flush`
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `proto/v2_unknown_command`
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `proto/unknown_capability`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#nonhex-length/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#nonhex-length/art-curl`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#oversized-length/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#oversized-length/art-curl`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#missing-flush/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#missing-flush/art-curl`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#unknown-command/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#unknown-command/art-curl`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#wrong-content-type/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#wrong-content-type/art-curl`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#bad-service/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `errors.malformed-requests-to-server#bad-service/art-curl`
 
 ### Interrupted operations (`interrupted`, 6)
 
@@ -2175,7 +2214,7 @@ Evidence:
 | `http.large-request-body` | verified | ply↔git, git↔Artifacts | `editFile`, `push` | 2 |
 | `http.sideband-keepalive` | verified | ply↔git | `push` | 2 |
 | `http.request-content-encoding` | unsupported (observed) | wire↔Artifacts | — | 0 |
-| `http.content-length-framing` | unsupported (observed) | wire↔Artifacts | — | 0 |
+| `http.content-length-framing` | unsupported (observed) | git↔Artifacts, wire↔Artifacts | — | 0 |
 | `http.expect-continue-and-dumb-http` | unsupported (observed) | wire↔Artifacts | — | 0 |
 
 #### `http.smart-http-discovery`
@@ -2308,6 +2347,12 @@ Observed:
 
 - wire↔Artifacts: loadgen-phase2-20261025: `gzip_request_body`
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `http/corrupt_gzip`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.request-content-encoding#gzip-ls-refs/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.request-content-encoding#gzip-ls-refs/art-curl`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.request-content-encoding#gzip-receive-pack/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.request-content-encoding#gzip-receive-pack/art-curl`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.request-content-encoding#corrupt-gzip/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.request-content-encoding#corrupt-gzip/art-curl`
 
 #### `http.content-length-framing`
 
@@ -2319,6 +2364,11 @@ Observed:
 
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `http/cl_smaller_than_body`
 - wire↔Artifacts: loadgen-phase4-hostile-20261025: `http/cl_larger_than_body`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.content-length-framing#chunked-receive-pack/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.content-length-framing#chunked-receive-pack/art-curl`
+- git↔Artifacts: wire-20261115t2038-ee4x: `http.content-length-framing#chunked-receive-pack/art-git`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.content-length-framing#length-short/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.content-length-framing#length-long/art-raw`
 
 #### `http.expect-continue-and-dumb-http`
 
@@ -2330,6 +2380,8 @@ Observed:
 
 - wire↔Artifacts: loadgen-phase2-20261025: `expect_100_continue`
 - wire↔Artifacts: loadgen-phase2-20261025: `dumb_http`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.expect-continue-and-dumb-http#expect-100-receive-pack/art-raw`
+- wire↔Artifacts: wire-20261115t2038-ee4x: `http.expect-continue-and-dumb-http#expect-100-receive-pack/art-curl`
 
 ## Recorded runs
 
@@ -2348,4 +2400,5 @@ Observed:
 | `probes-20261114t1909-sl8l` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 30 | ply differential probes, days 5-6 batches B and C (scripts/probes.mjs --artifacts, probe code 7c155a159f2bda27 on ply 55205ae; since then one scenario comment reworded and, after ply c22b066, the stock git expectation dropped from the two response-stall scenarios because git's low-speed timer differs by build): hand-built packs sent through pushPack (a thin pack against a base the server has and one whose base it lacks, a commit naming a missing blob, a delta copying past its base, a bad trailer, bad zlib, a truncated pack), pushes from a shallow clone and from a blob:none partial clone, a push body cut halfway, request and response stalls on push and fetch against set client timeouts, and an upload-pack response dropped halfway; same harness as probes-20261114t1837-53b4, with the proxy also injecting request-side faults and recording the socket error of a failed upstream call; stock git git version 2.47.3. |
 | `probes-20261114t2226-yyjq` | 2026-11-14 | ply↔Artifacts, git↔Artifacts | 81 | ply differential probes, full matrix (t229u days 9-10; scripts/probes.mjs --artifacts, probe code 744e85097786a1b0 on ply a78ed24 plus the two harness fixes committed with this entry: the run's signal handler also closes a repository still being created, and a stock git update carries its lease without a forced refspec): every scenario in src/probe-scenarios.ts, ply and stock git 2.47.3 (node 24.22.1), each against git http-backend with Artifacts' known policy and against a fresh Artifacts repository per scenario and client (namespace ply-loadgen, one at a time); same recording proxy and stock git judge as probes-20261114t1909-sl8l; cf-ray kept for every Artifacts request; every token revoked and probed, every repository deleted and checked by listing. |
 | `probes-20261115t1926-gfhc` | 2026-11-15 | ply↔Artifacts, git↔Artifacts | 31 | ply differential probes, malformed packs and objects (scripts/probes.mjs --artifacts --only the 21 scenarios added in 24cafa1, probe code ca2eec66b288b4b2 on ply b9b33db): ply and, where it can send the input, stock git 2.47.3 (node 24.22.1), each against git http-backend with Artifacts' known policy and against a fresh Artifacts repository per scenario and client (namespace ply-loadgen, one at a time); same recording proxy and stock git judge as probes-20261114t2226-yyjq; cf-ray kept for every Artifacts request; every token revoked and probed, every repository deleted and checked by listing. |
+| `wire-20261115t2038-ee4x` | 2026-11-15 | wire↔Artifacts, git↔Artifacts, ply↔Artifacts | 50 | ply HTTP-framing and malformed-request wire probes (scripts/wire-probes.mjs --artifacts, the 20 plans of test/probes/wire-plans.ts, probe code 19288b51af72a83f on ply 96b7a7d): each request sent directly to the target, without a proxy, from a raw socket (node net/tls, exact framing), curl 8.14.1, stock git 2.47.3 and ply where each can express it, against git http-backend with Artifacts' known policy and against a fresh Artifacts repository per plan (namespace ply-loadgen, one at a time, seeded and judged through the recording proxy's side and judge channels); credentials only from 0600 files (curl -H @file, git include.path); cf-ray kept for every Artifacts answer; every token revoked and probed, every repository deleted and checked by listing. |
 

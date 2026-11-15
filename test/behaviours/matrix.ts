@@ -39,6 +39,11 @@ const probeGit = (check: CheckOf<'probes-20261114t2226-yyjq'> & `${string}/art-g
 const malPly = (check: CheckOf<'probes-20261115t1926-gfhc'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'probes-20261115t1926-gfhc', check } });
 const malGit = (check: CheckOf<'probes-20261115t1926-gfhc'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'probes-20261115t1926-gfhc', check } });
 
+// The HTTP-framing wire run (wire-20261115t2038-ee4x): raw socket and curl (`/art-raw`, `/art-curl`), stock git (`/art-git`) and ply
+// (`/art-ply`) against Artifacts; the same plans run in CI against the reference (test/probes/wire.test.js).
+const wireArt = (check: CheckOf<'wire-20261115t2038-ee4x'> & (`${string}/art-raw` | `${string}/art-curl`)): OtherEvidence => ({ kind: 'wire_probe_vs_artifacts', ref: { tag: 'run', run: 'wire-20261115t2038-ee4x', check } });
+const wireGit = (check: CheckOf<'wire-20261115t2038-ee4x'> & `${string}/art-git`): OtherEvidence => ({ kind: 'native_git_vs_artifacts', ref: { tag: 'run', run: 'wire-20261115t2038-ee4x', check } });
+const wirePly = (check: CheckOf<'wire-20261115t2038-ee4x'> & `${string}/art-ply`): Evidence => ({ kind: 'ply_vs_artifacts', ref: { tag: 'run', run: 'wire-20261115t2038-ee4x', check } });
 const verified = (...evidence: NonEmpty<Evidence>): Extract<Status, { readonly tag: 'verified' }> => ({ tag: 'verified', evidence });
 const IMPLEMENTED: Extract<Status, { readonly tag: 'implemented' }> = { tag: 'implemented' };
 const unsupported = (why: string, ...observed: readonly OtherEvidence[]): Extract<Status, { readonly tag: 'unsupported' }> => ({ tag: 'unsupported', why, observed });
@@ -152,8 +157,8 @@ const REFS: readonly BehaviourIn<'refs'>[] = [
     description: 'The v0/v1 upload-pack advertisement (refs and capabilities on the info/refs GET, no Git-Protocol header).',
     ops: [],
     tests: [],
-    status: unsupported('ply asks for protocol v2 on upload-pack and refuses a server that answers otherwise (src/caps.ts).', compat('ls_remote/small/v0'), compat('clone_full/small/v0'), compat('depth_1/small/v0')),
-    notes: ['Only stock git has probed v0/v1 on Artifacts.'],
+    status: unsupported('ply asks for protocol v2 on upload-pack and refuses a server that answers otherwise (src/caps.ts).', compat('ls_remote/small/v0'), compat('clone_full/small/v0'), compat('depth_1/small/v0'), wireArt('refs.v0-upload-pack-advertisement#no-protocol-header/art-raw'), wireArt('refs.v0-upload-pack-advertisement#no-protocol-header/art-curl'), wireGit('refs.v0-upload-pack-advertisement#no-protocol-header/art-git')),
+    notes: ['Stock git, raw requests and curl have probed v0 on Artifacts; ply has not.'],
   }),
   b({
     id: 'refs.receive-pack-advertisement', area: 'refs',
@@ -235,7 +240,7 @@ const CAPS: readonly BehaviourIn<'caps'>[] = [
     description: 'The v2 `object-info` command (object sizes without a pack).',
     ops: [],
     tests: [],
-    status: unsupported('No ply operation sends command=object-info.', phase2Wire('object_info/artifacts')),
+    status: unsupported('No ply operation sends command=object-info.', phase2Wire('object_info/artifacts'), wireArt('caps.object-info#size/art-raw'), wireArt('caps.object-info#size/art-curl')),
     notes: [],
   }),
 ];
@@ -326,7 +331,7 @@ const FETCH: readonly BehaviourIn<'fetch'>[] = [
     description: 'filter sparse:oid=<blob>.',
     ops: [],
     tests: [],
-    status: unsupported('No ply operation builds a sparse:oid filter, and no test sends one.', compat('filter_sparse_oid/wide/v2')),
+    status: unsupported('No ply operation builds a sparse:oid filter; the wire probe hands one to fetchPackFiltered only to watch it refused, which is not support.', compat('filter_sparse_oid/wide/v2'), wireArt('fetch.filter-sparse-oid#refused/art-raw'), wireArt('fetch.filter-sparse-oid#refused/art-curl'), wireGit('fetch.filter-sparse-oid#refused/art-git')),
     notes: [],
   }),
   b({
@@ -901,8 +906,8 @@ const ERRORS: readonly BehaviourIn<'errors'>[] = [
     description: 'Statuses 4xx/5xx/429 at each stage map to ply\'s typed classes, and a refused optional feature is not retried for them.',
     ops: [CREATE_TRANSPORT, FETCH_PACK, PUSH],
     tests: [t('test/adversarial.test.js', 'HTTP-level faults at every stage: statuses, non-git bodies, stall, drop, empty'), t('test/fetchobject-deepen-refusal.test.js', 'never asked again: 401, 403, 404, 429 and 500 stand as they are, with no advertisement read')],
-    status: IMPLEMENTED,
-    notes: ['Judged against ply\'s own table. No recorded run checks what Artifacts sends under rate limiting or a 5xx.'],
+    status: verified(wirePly('errors.http-status-classes#no-credential/art-ply'), wirePly('errors.http-status-classes#bogus-token/art-ply'), wirePly('errors.http-status-classes#revoked-token/art-ply'), wirePly('errors.http-status-classes#missing-repo/art-ply'), wireArt('errors.http-status-classes#no-credential/art-raw'), wireArt('errors.http-status-classes#no-credential/art-curl'), wireGit('errors.http-status-classes#no-credential/art-git'), wireArt('errors.http-status-classes#bogus-token/art-raw'), wireArt('errors.http-status-classes#bogus-token/art-curl'), wireGit('errors.http-status-classes#bogus-token/art-git'), wireArt('errors.http-status-classes#revoked-token/art-raw'), wireArt('errors.http-status-classes#revoked-token/art-curl'), wireGit('errors.http-status-classes#revoked-token/art-git'), wireArt('errors.http-status-classes#missing-repo/art-raw'), wireArt('errors.http-status-classes#missing-repo/art-curl'), wireGit('errors.http-status-classes#missing-repo/art-git')),
+    notes: ['The wire run checks the info/refs GET with no credential, an unminted token, a revoked token and a repository-scoped token on a path it does not cover, from ply, stock git, curl and a raw request. No recorded run checks what Artifacts sends under rate limiting or a 5xx.'],
   }),
   b({
     id: 'errors.err-pkt-line', area: 'errors',
@@ -925,7 +930,7 @@ const ERRORS: readonly BehaviourIn<'errors'>[] = [
     description: 'How the server answers malformed requests (bad pkt-line lengths, misplaced delimiters, unknown commands and capabilities).',
     ops: [],
     tests: [],
-    status: unsupported('ply only writes well-formed requests; it has no mode that sends malformed ones.', hostile('pkt/nonhex_length'), hostile('pkt/giant_length_claim'), hostile('pkt/missing_flush'), hostile('proto/v2_unknown_command'), hostile('proto/unknown_capability')),
+    status: unsupported('ply only writes well-formed requests; it has no mode that sends malformed ones.', hostile('pkt/nonhex_length'), hostile('pkt/giant_length_claim'), hostile('pkt/missing_flush'), hostile('proto/v2_unknown_command'), hostile('proto/unknown_capability'), wireArt('errors.malformed-requests-to-server#nonhex-length/art-raw'), wireArt('errors.malformed-requests-to-server#nonhex-length/art-curl'), wireArt('errors.malformed-requests-to-server#oversized-length/art-raw'), wireArt('errors.malformed-requests-to-server#oversized-length/art-curl'), wireArt('errors.malformed-requests-to-server#missing-flush/art-raw'), wireArt('errors.malformed-requests-to-server#missing-flush/art-curl'), wireArt('errors.malformed-requests-to-server#unknown-command/art-raw'), wireArt('errors.malformed-requests-to-server#unknown-command/art-curl'), wireArt('errors.malformed-requests-to-server#wrong-content-type/art-raw'), wireArt('errors.malformed-requests-to-server#wrong-content-type/art-curl'), wireArt('errors.malformed-requests-to-server#bad-service/art-raw'), wireArt('errors.malformed-requests-to-server#bad-service/art-curl')),
     notes: [],
   }),
 ];
@@ -1043,7 +1048,7 @@ const HTTP: readonly BehaviourIn<'http'>[] = [
     description: 'A gzip-encoded request body.',
     ops: [],
     tests: [],
-    status: unsupported('ply never compresses a request body.', phase2Wire('gzip_request_body'), hostile('http/corrupt_gzip')),
+    status: unsupported('ply never compresses a request body.', phase2Wire('gzip_request_body'), hostile('http/corrupt_gzip'), wireArt('http.request-content-encoding#gzip-ls-refs/art-raw'), wireArt('http.request-content-encoding#gzip-ls-refs/art-curl'), wireArt('http.request-content-encoding#gzip-receive-pack/art-raw'), wireArt('http.request-content-encoding#gzip-receive-pack/art-curl'), wireArt('http.request-content-encoding#corrupt-gzip/art-raw'), wireArt('http.request-content-encoding#corrupt-gzip/art-curl')),
     notes: [],
   }),
   b({
@@ -1051,7 +1056,7 @@ const HTTP: readonly BehaviourIn<'http'>[] = [
     description: 'A request whose Content-Length disagrees with its body.',
     ops: [],
     tests: [],
-    status: unsupported('ply\'s fetch sets the length from the body; it cannot misframe one.', hostile('http/cl_smaller_than_body'), hostile('http/cl_larger_than_body')),
+    status: unsupported('ply\'s fetch sets the length from the body; it cannot misframe one.', hostile('http/cl_smaller_than_body'), hostile('http/cl_larger_than_body'), wireArt('http.content-length-framing#chunked-receive-pack/art-raw'), wireArt('http.content-length-framing#chunked-receive-pack/art-curl'), wireGit('http.content-length-framing#chunked-receive-pack/art-git'), wireArt('http.content-length-framing#length-short/art-raw'), wireArt('http.content-length-framing#length-long/art-raw')),
     notes: [],
   }),
   b({
@@ -1059,7 +1064,7 @@ const HTTP: readonly BehaviourIn<'http'>[] = [
     description: 'Expect: 100-continue, and the dumb HTTP protocol.',
     ops: [],
     tests: [],
-    status: unsupported('ply speaks only smart HTTP and never sends Expect.', phase2Wire('expect_100_continue'), phase2Wire('dumb_http')),
+    status: unsupported('ply speaks only smart HTTP and never sends Expect.', phase2Wire('expect_100_continue'), phase2Wire('dumb_http'), wireArt('http.expect-continue-and-dumb-http#expect-100-receive-pack/art-raw'), wireArt('http.expect-continue-and-dumb-http#expect-100-receive-pack/art-curl')),
     notes: [],
   }),
 ];
