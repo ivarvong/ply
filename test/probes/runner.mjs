@@ -62,7 +62,21 @@ export function noiseBytes(seed, n) {
   for (let o = 0, i = 0; o < n; i++) { const h = createHash('sha256').update(`${seed}:${i}`).digest(); h.copy(out, o, 0, Math.min(32, n - o)); o += 32; }
   return out;
 }
-const contentOf = c => (c.tag === 'text' ? Buffer.from(c.text, 'utf8') : noiseBytes(c.seed, c.bytes));
+function contentOf(c) {
+  switch (c.tag) {
+    case 'text': return Buffer.from(c.text, 'utf8');
+    case 'noise': return noiseBytes(c.seed, c.bytes);
+    case 'repeat': return Buffer.alloc(c.bytes, c.byte);
+  }
+  throw new Error(`unknown content ${c.tag}`);
+}
+// A raw tree's bytes: `<mode> <name>\0<20-byte id>` per entry, in the plan's order (types.ts RawTreeSpec).
+async function rawTreeBytes(seedSoFar, entries) {
+  const parts = [];
+  for (const e of entries) parts.push(Buffer.from(`${e.mode} ${e.name}\0`, 'utf8'), Buffer.from(await resolveRef(seedSoFar, e.blob), 'hex'));
+  return Buffer.concat(parts);
+}
+const writeLiteral = async (dir, env, type, input, what) => (await must(run('git', ['hash-object', '--literally', '-t', type, '-w', '--stdin'], { cwd: dir, env, input }), what)).stdout.trim();
 
 // A bare object store holding the scenario's objects: { dir, names (name -> oid), byOid (oid -> name) }.
 export async function buildSeed(root, seed) {
@@ -71,6 +85,21 @@ export async function buildSeed(root, seed) {
   await must(run('git', ['init', '-q', '--bare', '-b', 'main', dir], { env }), 'init seed store');
   const names = {}, trees = {};
   for (const o of seed.objects) {
+    if (o.tag === 'raw-tree') {
+      names[o.name] = await writeLiteral(dir, env, 'tree', await rawTreeBytes({ dir, env, names }, o.entries), `raw tree ${o.name}`);
+      continue;
+    }
+    if (o.tag === 'raw-commit') {
+      const tree = trees[o.tree] ?? names[o.tree];
+      const body = [`tree ${tree}`, ...o.parents.map(p => `parent ${names[p]}`), `author ${o.author}`, 'committer ply probe <probe@ply.invalid> 1700000000 +0000', '', o.message, ''].join('\n');
+      names[o.name] = await writeLiteral(dir, env, 'commit', Buffer.from(body, 'utf8'), `raw commit ${o.name}`);
+      continue;
+    }
+    if (o.tag === 'phantom') {
+      // an id nothing holds: never written to the seed store
+      names[o.name] = createHash('sha1').update(`probe phantom ${o.seed}`).digest('hex');
+      continue;
+    }
     if (o.tag === 'commit') {
       const ienv = { ...env, GIT_INDEX_FILE: join(root, `index-${o.name}`) };
       const first = o.parents[0];
@@ -112,6 +141,7 @@ async function catFile(seed, oids) {
 // The objects a push carries: reachable from its new ids, not from what the target was seeded with (the race's moves
 // may add objects the server has; sending them again is harmless), minus the plan's `omit`.
 async function objectsFor(seed, scenario, push) {
+  if (push.pack.tag === 'defect' && push.pack.defect.tag === 'no-objects') return [];
   const news = push.updates.map(u => oidOf(seed, u.new)).filter(o => o !== ZERO);
   if (news.length === 0) return [];
   const have = scenario.seed.refs.map(r => seed.names[r.at]);
@@ -168,6 +198,63 @@ export function damagePack({ pack, zlibEnds }, damage) {
     }
   }
   throw new Error(`unknown damage ${damage}`);
+}
+// git's OFS_DELTA base offset: big-endian 7-bit groups, each continuation adding one (pack-format.txt).
+function ofsEncode(n) {
+  const out = [n & 0x7f];
+  for (n = Math.floor(n / 128); n > 0; n = Math.floor(n / 128)) { n -= 1; out.unshift(0x80 | (n & 0x7f)); }
+  return Buffer.from(out);
+}
+const withTrailer = body => Buffer.concat([body, sha1(body)]);
+const bodyOf = pack => pack.subarray(0, pack.length - 20);
+// The first blob's index in `objects`, for a defect that rewrites it.
+const firstBlob = objects => { const i = objects.findIndex(o => o.type === TYPE_ID.blob); if (i < 0) throw new Error('defect pack: no blob'); return i; };
+// A pack with one structural defect (types.ts PackDefect), its trailer recomputed over the damaged bytes.
+export async function defectPack(seed, objects, defect) {
+  const plain = objects.map(o => ({ type: o.type, data: Buffer.from(o.data) }));
+  switch (defect.tag) {
+    case 'signature': { const b = Buffer.from(bodyOf(writePack(plain).pack)); b.write('PACX', 0, 'latin1'); return withTrailer(b); }
+    case 'version': { const b = Buffer.from(bodyOf(writePack(plain).pack)); b.writeUInt32BE(defect.version, 4); return withTrailer(b); }
+    case 'count': { const b = Buffer.from(bodyOf(writePack(plain).pack)); b.writeUInt32BE(plain.length + defect.by, 8); return withTrailer(b); }
+    case 'duplicate': return writePack([...plain, ...plain]).pack;
+    case 'no-objects': return writePack([]).pack;
+    case 'size-header': case 'bad-type': {
+      const i = firstBlob(objects);
+      const parts = [Buffer.from('PACK'), u32(2), u32(plain.length)];
+      plain.forEach((e, k) => {
+        const head = k !== i ? entryHeader(e.type, e.data.length) : defect.tag === 'bad-type' ? entryHeader(defect.type, e.data.length) : entryHeader(e.type, e.data.length + defect.by);
+        parts.push(head, deflateSync(e.data));
+      });
+      return withTrailer(Buffer.concat(parts));
+    }
+    case 'ofs-delta-before-start': {
+      const i = firstBlob(objects);
+      const parts = [Buffer.from('PACK'), u32(2), u32(plain.length)];
+      let at = 12;
+      plain.forEach((e, k) => {
+        let entry;
+        if (k === i) {
+          const delta = deltaFor(e.data.length, e.data, 'literal');
+          // a base `at + 4096` bytes back: before the pack's first byte
+          entry = Buffer.concat([entryHeader(6, delta.length), ofsEncode(at + 4096), deflateSync(delta)]);
+        } else entry = Buffer.concat([entryHeader(e.type, e.data.length), deflateSync(e.data)]);
+        parts.push(entry); at += entry.length;
+      });
+      return withTrailer(Buffer.concat(parts));
+    }
+    case 'delta-size-mismatch': {
+      const i = firstBlob(objects);
+      const base = await resolveRef(seed, defect.base);
+      const size = Number((await must(run('git', ['cat-file', '-s', base], { cwd: seed.dir, env: seed.env }), 'cat-file -s')).stdout.trim());
+      const target = plain[i].data;
+      const chunks = [];
+      for (let o = 0; o < target.length; o += 127) { const c = target.subarray(o, o + 127); chunks.push(Buffer.from([c.length]), c); }
+      // the header states one byte more than the inserts write
+      const delta = Buffer.concat([varint(size), varint(target.length + 1), ...chunks]);
+      return writePack(plain.map((e, k) => (k === i ? { refDelta: base, delta } : e))).pack;
+    }
+  }
+  throw new Error(`unknown pack defect ${defect.tag}`);
 }
 async function handPack(seed, objects, form) {
   let entries = objects.map(o => ({ type: o.type, data: Buffer.from(o.data) }));
@@ -341,8 +428,8 @@ async function plyPush(url, seed, scenario, push, tracer, parent, from = { tag: 
   const commands = push.updates.map(u => ({ ref: u.ref, oldOid: oidOf(seed, u.old), newOid: oidOf(seed, u.new) }));
   const atomic = push.atomic ? { atomic: true } : {};
   let r;
-  if (push.pack.tag === 'hand') {
-    const bytes = new Uint8Array(await handPack(seed, objects, push.pack));
+  if (push.pack.tag === 'hand' || push.pack.tag === 'defect') {
+    const bytes = new Uint8Array(push.pack.tag === 'hand' ? await handPack(seed, objects, push.pack) : await defectPack(seed, objects, push.pack.defect));
     const pack = new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } });
     r = await client.value.pushPack({ commands, pack, length: bytes.length, ...atomic });
   } else r = await client.value.push({ commands, objects, ...atomic });

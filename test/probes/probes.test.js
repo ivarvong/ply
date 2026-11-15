@@ -27,14 +27,23 @@ test('every scenario probes a matrix behaviour, ids are unique, plans are closed
     const defined = new Set(s.seed.objects.map(o => o.name));
     const refs = [
       ...s.seed.refs.map(r => r.at),
-      ...s.seed.objects.flatMap(o => (o.tag === 'commit' ? o.parents : [o.target])),
+      ...s.seed.objects.flatMap(o => {
+        switch (o.tag) {
+          case 'commit': return o.parents;
+          case 'annotated-tag': return [o.target];
+          case 'raw-commit': return [...o.parents, o.tree];
+          case 'raw-tree': return o.entries.map(e => e.blob.tag === 'blob' ? e.blob.of : e.blob.name);
+          case 'phantom': return [];
+        }
+        throw new Error(`unknown seed object ${o.tag}`);
+      }),
       ...s.steps.flatMap(st => (st.tag === 'push' ? [st.push] : st.tag === 'concurrent' ? st.pushes : []).flatMap(p => p.updates.flatMap(u => [u.old, u.new]))).filter(e => e.tag === 'obj').map(e => e.name),
       ...s.steps.flatMap(st => (st.tag === 'push' && st.fault.tag === 'race' ? st.fault.moves.map(m => m.to) : [])).filter(e => e.tag === 'obj').map(e => e.name),
       ...s.steps.flatMap(st => (st.tag === 'fetch' ? [st.want] : [])),
       ...s.final.flatMap(f => (f.tag === 'at' ? [f.at] : f.tag === 'one-of' ? f.names.filter(n => n !== ABSENT) : [])),
     ];
     for (const n of refs) assert.ok(defined.has(n), `${s.id}: ${n} is not a seed object`);
-    s.seed.objects.forEach((o, i) => { if (o.tag === 'commit') for (const p of o.parents) assert.ok(s.seed.objects.slice(0, i).some(x => x.name === p), `${s.id}: ${o.name}'s parent ${p} must come first`); });
+    s.seed.objects.forEach((o, i) => { if (o.tag === 'commit' || o.tag === 'raw-commit') for (const p of o.parents) assert.ok(s.seed.objects.slice(0, i).some(x => x.name === p), `${s.id}: ${o.name}'s parent ${p} must come first`); });
     s.expect.forEach((e, i) => assert.equal(e.tag === 'many', s.steps[i].tag === 'concurrent' || s.steps[i].tag === 'retry-unlanded', `${s.id}: step ${i}: a concurrent or retry step takes a multiset expectation`));
     s.steps.forEach((st, i) => { if (st.tag === 'retry-unlanded') assert.ok(st.of < i && s.steps[st.of].tag === 'concurrent', `${s.id}: step ${i} retries an earlier concurrent step`); });
   }

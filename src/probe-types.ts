@@ -24,12 +24,26 @@ export type ScenarioId = `${BehaviourId<Area>}#${string}`;
 // ---- seed: objects made locally by git plumbing (hash-object, mktree via an index, commit-tree, mktag) ----
 // Content is text or deterministic incompressible bytes (a SHA-256 counter stream from `seed`), so a size probe needs
 // no fixture file and every target receives identical blobs.
-export type Content = { readonly tag: 'text'; readonly text: string } | { readonly tag: 'noise'; readonly seed: string; readonly bytes: number };
+// `repeat` is `bytes` copies of one byte: a blob that deflates about a thousandfold, for a decompression-ratio probe.
+export type Content =
+  | { readonly tag: 'text'; readonly text: string }
+  | { readonly tag: 'noise'; readonly seed: string; readonly bytes: number }
+  | { readonly tag: 'repeat'; readonly byte: number; readonly bytes: number };
 export type FileSpec = { readonly path: string; readonly content: Content };
 // A commit's tree is its first parent's tree with `files` written over it (a root commit starts empty).
 export type CommitSpec = { readonly tag: 'commit'; readonly name: string; readonly parents: readonly string[]; readonly files: readonly FileSpec[]; readonly message: string };
 export type TagSpec = { readonly tag: 'annotated-tag'; readonly name: string; readonly target: string; readonly tagName: string; readonly message: string };
-export type ObjectSpec = CommitSpec | TagSpec;
+// A tree written byte for byte (`git hash-object --literally -t tree`): its entries in the order given, each a mode and
+// a name as written and the blob it names, so a tree git itself never writes (unsorted, a name twice, a `/` in a name,
+// `.git`, a zero-padded mode) can be seeded and pushed by either client.
+export type RawTreeEntry = { readonly mode: string; readonly name: string; readonly blob: ObjRef };
+export type RawTreeSpec = { readonly tag: 'raw-tree'; readonly name: string; readonly entries: NonEmpty<RawTreeEntry> };
+// A commit written byte for byte: `tree` names a raw tree or a commit (whose tree it takes), `author` is the author
+// line after `author ` verbatim (a missing email, a date that is not a number), the committer is the probe identity.
+export type RawCommitSpec = { readonly tag: 'raw-commit'; readonly name: string; readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly message: string };
+// An object id that no target and no client holds (the SHA-1 of `seed`), named so a command can point a ref at it.
+export type PhantomSpec = { readonly tag: 'phantom'; readonly name: string; readonly seed: string };
+export type ObjectSpec = CommitSpec | TagSpec | RawTreeSpec | RawCommitSpec | PhantomSpec;
 // What the target holds before the first step: refs pointing at named objects. Objects no ref names stay local, for a
 // step to push.
 export type RefAt = { readonly ref: string; readonly at: string };
@@ -88,9 +102,34 @@ export type Damage = (typeof DAMAGE)[number];
 // hand     the same objects as a pack the harness writes and ply sends as is (pushPack): the first blob sent as a
 //          REF_DELTA against `deltaBase` when it is set (a valid literal-only delta, or one whose copy reads past the end
 //          of its base), then damaged. Stock git cannot send such a pack, so a step carrying one has no native-git form.
+// defect   the same objects as a pack the harness writes with one structural defect (PackDefect), trailer recomputed:
+//          a pack git's own index-pack must refuse whole, or, for `duplicate`, a pack with every entry twice
 export type PackForm =
   | { readonly tag: 'objects' }
-  | { readonly tag: 'hand'; readonly deltaBase: ObjRef | null; readonly delta: 'literal' | 'copy-past-end'; readonly damage: Damage };
+  | { readonly tag: 'hand'; readonly deltaBase: ObjRef | null; readonly delta: 'literal' | 'copy-past-end'; readonly damage: Damage }
+  | { readonly tag: 'defect'; readonly defect: PackDefect };
+// One defect of a pack's structure (the trailer is recomputed over the damaged bytes, so only the defect is wrong):
+//   signature            the first four bytes are `PACX`
+//   version              the header's version is `version` (git reads 2 and 3)
+//   count                the header's object count is the real count plus `by` (more objects named than sent, or fewer)
+//   size-header          the first object's header states its size plus `by`, so its zlib stream inflates to a
+//                        different length than stated
+//   bad-type             the first object's header carries type `type` (0 and 5 are not object types)
+//   ofs-delta-before-start the first blob as an OFS_DELTA whose base offset reaches before the pack's first byte
+//   delta-size-mismatch  the first blob as a REF_DELTA against `base` (which the server holds) whose header states a
+//                        result one byte longer than its instructions write
+//   duplicate            every object twice (count doubled)
+//   no-objects           a well-formed pack with no object at all, for a command whose new id the pack does not carry
+export type PackDefect =
+  | { readonly tag: 'signature' }
+  | { readonly tag: 'version'; readonly version: number }
+  | { readonly tag: 'count'; readonly by: number }
+  | { readonly tag: 'size-header'; readonly by: number }
+  | { readonly tag: 'bad-type'; readonly type: number }
+  | { readonly tag: 'ofs-delta-before-start' }
+  | { readonly tag: 'delta-size-mismatch'; readonly base: ObjRef }
+  | { readonly tag: 'duplicate' }
+  | { readonly tag: 'no-objects' };
 export type Push = { readonly updates: NonEmpty<Update>; readonly atomic: boolean; readonly omit: readonly ObjRef[]; readonly pack: PackForm };
 // Where the pushing client's repository came from:
 //   full     the client holds every seed object (ply: the plan's objects; git: the seed store)
