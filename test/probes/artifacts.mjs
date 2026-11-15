@@ -6,7 +6,15 @@
 // It is never printed, written, put in argv or in a child's environment; every string this module returns goes through
 // scrub(). Every token minted, including the one `repos create` mints by itself, is revoked and proven dead (403)
 // before the repository is deleted, and the deletion is checked by listing.
+// HTTP-level probes (test/probes/wire.mjs) must reach the server with no proxy between (a proxy reframes requests), so
+// a handle also offers `wireAuth`: the header added in-process for a raw socket or ply's fetch, and for curl and stock
+// git a 0600 file in a 0700 temp directory (curl `-H @file`, git `-c include.path=<file>`), so the token is still in
+// no argv or environment; the caller removes the file after the one request.
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { startRecordingProxy } from './runner.mjs';
 
@@ -84,8 +92,26 @@ export function artifactsTarget({ cli, runId, log }) {
       tokens.push(token);
       const u = new URL(remote);
       const proxy = await startRecordingProxy({ upstream: u.origin, authorization: `Bearer ${plain}` });
+      // a bearer token never minted (random, same shape as nothing in particular), the revoked auto token, the write token
+      const bogus = keep(`bogus${randomBytes(20).toString('hex')}`);
+      const tokenFor = kind => (kind === 'write' || kind === 'missing-repo' ? plain : kind === 'bogus' ? bogus : kind === 'revoked' ? (autos[0] ?? null) : null);
+      const secretFile = (kind, text) => {
+        const t = tokenFor(kind);
+        if (t === null) return null;
+        const f = join(mkdtempSync(join(tmpdir(), 'ply-wire-auth-')), kind);
+        writeFileSync(f, text(t), { mode: 0o600 });
+        return f;
+      };
+      const missing = remote.replace(/\/?$/, '').replace(/\.git$/, '') + '-absent.git';
+      const wireAuth = {
+        headers: (kind, h) => { const t = tokenFor(kind); if (t !== null) h.authorization = `Bearer ${t}`; },
+        curlFile: kind => secretFile(kind, t => `Authorization: Bearer ${t}\n`),
+        gitFile: kind => secretFile(kind, t => `[http]\n\textraHeader = Authorization: Bearer ${t}\n`),
+        url: kind => (kind === 'missing-repo' ? missing : remote.replace(/\/$/, '')),
+        hasRevoked: () => autos.length > 0,
+      };
       return {
-        name, proxy, repoPath: u.pathname.replace(/\/$/, ''),
+        name, proxy, repoPath: u.pathname.replace(/\/$/, ''), wireAuth,
         async close() {
           await proxy.close();
           await revoke(token, remote, plain);
