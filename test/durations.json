@@ -32,7 +32,7 @@
   "test/encode-tree-error-bound.test.js": 1,
   "test/encode-tree-fsck.test.js": 18,
   "test/entry-internal.test.js": 2,
-  "test/examples.test.js": 4,
+  "test/examples.test.js": 8,
   "test/fetch-lying-server.test.js": 1,
   "test/fetchobject-deepen-paths.test.js": 3,
   "test/fetchobject-deepen-refusal.test.js": 4,
