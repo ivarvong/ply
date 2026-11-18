@@ -116,6 +116,7 @@
   "test/redirect.test.js": 2,
   "test/regex-linear.test.js": 4,
   "test/relay.test.js": 0,
+  "test/release-prepare.test.js": 18,
   "test/remote-text.test.js": 1,
   "test/resolve-memory.test.js": 8,
   "test/response-headers.test.js": 0,

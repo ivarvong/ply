@@ -6,3 +6,5 @@ reports/
 .DS_Store
 dist/
 .failsites/
+pack-out/
+release-out/

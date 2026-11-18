@@ -232,6 +232,10 @@ and `notify-ply-web` tells ply-web about a commit only after `ci` passed for tha
 npm run check             # typecheck + lint + registry test + dist check; run before every push
 ```
 
+Release preparation is separate from this gate: `npm run release:prepare` builds a versioned tarball, its checksum and
+provenance from a clean commit and runs the pack and dist checks on that file; it never publishes (docs/RELEASING.md,
+docs/COMPATIBILITY.md, CHANGELOG.md).
+
 A ratchet baseline (`scripts/throw-baseline.json`, `scripts/absence-baseline.json`, `test/space/ratchet.json`,
 `test/durations.json`) moves the unsafe way only in a commit whose message has the line
 `Ratchet-Change: <file>: <reason>`. CI's `node scripts/ratchet-guard.mjs` compares each baseline with the base

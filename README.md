@@ -32,6 +32,8 @@ The git install above needs the package manager to run ply's `prepare` script: `
 
 With no `dist/`, every import fails with `ERR_MODULE_NOT_FOUND`. So the git install works with npm and with pnpm 8, scripts on; it does not work with yarn 1 or bun 1.2, or with scripts off. pnpm, yarn and bun were given `github:ivarvong/ply#<sha>`, npm a local clone of the same commit (`git+file://`); pnpm 9 and later and yarn 2 and later were not measured. The packed tarball contains `dist/` and installs with scripts off (measured with npm; CI job `pack`). CI uploads it as the workflow artifact `ply-tarball`, which needs a GitHub login and expires; there is no install URL for it yet.
 
+A prepared release tarball installs the same way, without `prepare`: check it against its `.sha256`, then `npm install ./ply-<version>.tgz --ignore-scripts`. `npm run release:prepare` builds one from a clean commit with a checksum and a provenance file and runs the pack and dist checks on that file; it never publishes. Where releases will be published is not decided yet (#302). See [docs/RELEASING.md](docs/RELEASING.md) for verifying an artifact and the release checklist, and [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the versioning policy, supported runtimes and the telemetry commitment; user-visible changes are in [CHANGELOG.md](CHANGELOG.md).
+
 ## Beta
 
 ply is pre-1.0 (0.2.0). The API can change between commits without a deprecation period, and there are no tagged releases yet: pin a commit sha, read the commit log before moving the pin, and let your type checker or tests catch a changed signature. Span names and attributes are a stated contract (see [Telemetry contract](#telemetry-contract)).
