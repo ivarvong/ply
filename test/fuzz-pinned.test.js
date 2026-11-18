@@ -138,6 +138,7 @@ test('the pinned list is the same on every run; --random is a separate mode that
   assert.deepEqual(list(['--seed', m[1]]).filter(l => l.includes('test/fuzz/') && !l.startsWith('fuzz-pinned:')), cmds);
   // Fixed regression cases (--case) keep their case in every mode.
   assert.ok(cmds.some(c => c.includes('hostile.mjs --case 2366521731')));
+  assert.ok(cmds.some(c => c.includes('protocol.mjs --case 1911648345')), '#321 stays pinned');
 });
 
 test('a failing fuzzer stops the run and prints its seed and the exact command that replays it', async () => {

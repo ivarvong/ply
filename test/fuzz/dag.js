@@ -123,14 +123,21 @@ export function bitmapSupportsFilter(f) {
 }
 
 // Expected object set for a v2 fetch.
-//   mode 'bitmap'    : exact reachable(wants) \ reachable(haves)  — server has a bitmap, no deepen, supported filter
+//   mode 'bitmap'    : exact reachable(wants) \ reachable(haves)  — server has a bitmap, no graft, supported filter
 //   mode 'traversal' : git's revision walk with edge-based tree marking (aggressive when the request is shallow)
+// What turns the bitmap off is a graft, not the deepen argument: pack-objects clears use_bitmap_index for each
+// `--shallow <oid>` line on its stdin (builtin/pack-objects.c, read of the --revs input), and upload-pack writes one
+// such line per registered graft: every client shallow and every commit this request cuts at (upload-pack.c
+// send_shallow, send_unshallow, create_pack_file). A deepen that cuts nothing registers nothing, so the pack still
+// comes from the bitmap and a wanted tree that is a walked commit's root tree is sent under tree:0 (#321: wants
+// tag→c8, c11, c10's root tree; have the tag; deepen 5 over a history 4 deep from c8; git 2.43.0 and 2.56.1 sent the
+// tree. `git pack-objects --revs --filter=tree:0` on that input: tree sent; with pack.useBitmaps=false, or with any
+// `--shallow <oid>` line in front, tree omitted; the bare `--shallow` argument alone changes nothing).
 export function expectedObjects(model, { wants, haves = [], deepen, deepenSince, deepenNot = [], filter, shallow = [], bitmap = false, thinPack = false }) {
   const peel = o => (model.tags.has(o) ? model.tags.get(o) : o);
   const exclude = new Set();
   for (const r of deepenNot) { const o = model.refs.get(r); if (!o) continue; for (const c of reachableCommits(model, [peel(o)]).commits.keys()) exclude.add(c); }
   const deepening = deepen !== undefined || !!deepenSince || deepenNot.length > 0;
-  const mode = bitmap && !deepening && bitmapSupportsFilter(filter) ? 'bitmap' : 'traversal';
   const eff = effectiveHaves(model, haves);
   const knownHaves = eff.map(peel).filter(h => model.commits.has(h));
   const nonCommitHaves = eff.filter(h => !model.commits.has(h) && !model.tags.has(h));
@@ -145,6 +152,7 @@ export function expectedObjects(model, { wants, haves = [], deepen, deepenSince,
   // the shallow set was computed before the parents were added: they get no fresh depth budget (they lie inside the window)
   const { commits: inDepth, boundary } = walk0;
   const cut = new Set([...clientShallow, ...walk0.boundary]);
+  const mode = bitmap && cut.size === 0 && bitmapSupportsFilter(filter) ? 'bitmap' : 'traversal';
 
   // 2. have closure: ancestors of haves, not descending past cut commits. An unshallowed client commit is an
   //    extra edge (uninteresting): the client has it, only its parents are new.
@@ -233,7 +241,7 @@ export function userGiven(model, w, wants, walkedCommits, filter) {
 export function requiredAndHad(model, { wants, haves = [], deepen, deepenSince, deepenNot = [], filter, shallow = [], bitmap = false }) {
   const exp = expectedObjects(model, { wants, haves, deepen, deepenSince, deepenNot, filter, shallow, bitmap: true });
   const bitmapMode = bitmap && exp.mode === 'bitmap';
-  // expectedObjects in bitmap mode == precise set, except deepen forces traversal mode; recompute precisely here
+  // expectedObjects in bitmap mode == precise set, except a graft forces traversal mode; recompute precisely here
   const peel = o => (model.tags.has(o) ? model.tags.get(o) : o);
   const exclude = new Set();
   for (const r of deepenNot) { const o = model.refs.get(r); if (!o) continue; for (const c of reachableCommits(model, [peel(o)]).commits.keys()) exclude.add(c); }
