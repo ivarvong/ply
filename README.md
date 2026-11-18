@@ -632,16 +632,16 @@ SSH transport removed 2026-10-31; history on branch archive/ssh.
 ## Layers
 
 ```
-operations   edit · push tree · merge · rebase · cherry-pick · revert        operation.js: root span, transport, outcome, verify rule
+operations   edit · push tree · merge · rebase · cherry-pick · revert        operation.ts: root span, transport, outcome, verify rule
 commands     lsRefs · packStream/fetchObject · fetchPack/negotiate · push · discover · receiveCaps   free functions over a transport
-transport    the contract (transport.js): t.frames(service, body, span, hints) · t.advertise(service, span)
-             implementation: http.js (one POST per command)
+transport    the contract (transport.ts): t.frames(service, body, span, hints) · t.advertise(service, span)
+             implementation: http.ts (one POST per command)
 protocol     pure step functions: pktStep · v2Step · spStep · scanStep · streamStep · reportStep · threeWay · decideHead
 codecs       pktline · inflate · sha1 · objects · pack (delta/build) · validate
-errors       errors.js: every code, its retry policy; errors-doc.js: what each means
+errors       errors.ts: every code, its retry policy; errors-doc.ts: what each means
 ```
 
-Each layer is testable without the one below it, and `test/bundle.test.js` asserts the dependency direction. Transport hints are neutral (`{ bypassCache }`), not headers; transport-specific detail goes under `http.*`, the neutral facts under `git.transport`, `git.request.bytes`, `git.response.bytes`, `git.response.cache`.
+`test/import-graph.test.js` asserts that `src/` has no value-import cycle and `test/bundle.test.js` asserts what each entry's bundle carries; the layer order itself is not tested. Transport hints are neutral (`{ bypassCache }`), not headers; transport-specific detail goes under `http.*`, the neutral facts under `git.transport`, `git.request.bytes`, `git.response.bytes`, `git.response.cache`.
 
 ## Telemetry conventions (enforced by `test/pure.test.js` and `test/span-contract.test.js`)
 
@@ -819,16 +819,4 @@ After each case the spans are bucketized (`buckets()` in `run.mjs`): inflate blo
 
 ## Layout
 
-```
-src/sha1.js      streaming SHA-1 (subtle.digest can't stream)
-src/inflate.js   zlib/deflate inflate that returns bytes consumed (packs have no length prefix)
-src/pktline.js   pkt-line encode; decoder as pure (state, chunk) → {state, frames}
-src/pack.js      pack parse/resolve, delta apply/generate, thin pack build
-src/objects.js   blob/tree/commit codecs, tree sort (dir-as-slash)
-src/client.js    v2 ls-refs/fetch (streamed sideband), v0 receive-pack; request bodies & response state machine are pure
-src/edit.js      the pipeline; single-object pack stream + find/replace scanner as pure step functions
-src/otel.js      OTLP/JSON tracer, one ExportTraceServiceRequest per line
-src/bytes.js     alloc accounting (Mem), concat, indexOf
-```
-
-Prod lib is ~1100 lines. Tests are the rest.
+The module map, one read and one edit traced from the public call to the wire, where bytes are streamed or held and which limit bounds each, and the recorded tradeoffs are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
