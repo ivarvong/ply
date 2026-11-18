@@ -431,8 +431,10 @@ export function renderMarkdown(r) {
     ['wall time of the run', `${(r.durationMs / 1000).toFixed(0)} s`],
   ]), '');
   L.push('## Read this first', '');
-  const load = Math.max(r.environment.loadavg.before[0], r.environment.loadavg.after[0], r.environment.loadavg.max1m ?? 0);
-  if (load > r.environment.cpus.count / 2) L.push(`- **This run was measured under load**: the 1-minute load average reached ${load.toFixed(2)} on ${r.environment.cpus.count} CPUs, from work that is not part of the benchmark. Elapsed times here are inflated and noisy and are not quiet-machine figures; the request counts, byte totals and pack sizes do not depend on load.`);
+  // Load before the first sample is not the benchmark's own. During the run the harness cannot tell its own load (one
+  // client at a time, its server and the sampler) from other work's, so only the peak is stated.
+  const before = r.environment.loadavg.before[0], peakLoad = Math.max(before, r.environment.loadavg.after[0], r.environment.loadavg.max1m ?? 0);
+  if (before >= 1 || peakLoad > r.environment.cpus.count) L.push(`- **This run was not measured on a quiet machine**: the 1-minute load average was ${before.toFixed(2)} before the run began (work that is not the benchmark) and peaked at ${peakLoad.toFixed(2)} on ${r.environment.cpus.count} CPUs. Elapsed times here are noisy and may be inflated; do not quote them as quiet-machine figures. The request counts, byte totals and pack sizes do not depend on load.`);
   for (const c of r.caveats) L.push(`- ${c}`);
   L.push('');
   L.push('Cells show the **median** of the accepted samples; `[min–max]` follows when the samples differ. Byte and request counts are exact per sample and usually identical across repetitions. A sample is accepted only after the harness has checked the resulting bytes, the commit\'s parent and `git fsck --strict` on the server repository; failed samples are counted in the `ok/n` column and listed below, never averaged in.', '');
@@ -466,12 +468,21 @@ export function renderMarkdown(r) {
 
   const headline = ['elapsedMs', 'peakRssSumBytes', 'peakPssBytes', 'requests', 'requestBytes', 'responseBytes'];
   const name = k => METRICS.find(m => m.key === k).label;
-  const line = c => `${c.cell} ${c.task}/${c.mode}: ${name(c.metric)} ${fmtOf(METRICS.find(m => m.key === c.metric).unit)(c.ply)} vs ${fmtOf(METRICS.find(m => m.key === c.metric).unit)(c.other)} for ${label(c.against)} (×${c.ratio === null ? '∞' : c.ratio.toFixed(2)}${c.separated ? '' : ', ranges overlap'})`;
+  const line = c => {
+    const m = METRICS.find(x => x.key === c.metric), f = fmtOf(m.unit);
+    // medians that print alike are shown exactly, so a "lower" of a few bytes is not read as a real difference
+    const both = f(c.ply) === f(c.other) ? `${Math.round(c.ply)} vs ${Math.round(c.other)} ${m.unit}` : `${f(c.ply)} vs ${f(c.other)}`;
+    return `${c.cell} ${c.task}/${c.mode}: ${name(c.metric)} ${both} for ${label(c.against)} (×${c.ratio === null ? '∞' : c.ratio.toFixed(c.ratio > 0.995 && c.ratio < 1.005 ? 4 : 2)}${c.separated ? '' : ', ranges overlap'})`;
+  };
   const leanest = r.comparisons.filter(c => c.against === 'git-shallow-partial' && headline.includes(c.metric));
   L.push('## Where ply loses', '');
   L.push('Every cell where ply\'s median is higher (worse) than the median of the leanest native strategy measured (`git shallow + blobless`), for elapsed time, peak memory (both sums), requests and HTTP bytes. "ranges overlap" means the two min–max ranges intersect, so the difference is not established by this run. The full list against every strategy and metric is `comparisons` in the JSON.', '');
   const losses = leanest.filter(c => c.verdict === 'ply-higher');
   if (losses.length) for (const c of losses) L.push(`- ${line(c)}`); else L.push(leanest.length ? '- None in this run.' : '- No comparison available (the leanest strategy has no accepted samples).');
+  L.push('');
+  L.push('## Where ply is lower', '', 'The same comparison, the other way: cells where ply\'s median is lower than the leanest native strategy\'s.', '');
+  const wins = leanest.filter(c => c.verdict === 'ply-lower');
+  if (wins.length) for (const c of wins) L.push(`- ${line(c)}`); else L.push('- None in this run.');
   L.push('');
   const counts = id => { const cs = r.comparisons.filter(c => c.against === id && headline.includes(c.metric)); return [label(id), ...headline.map(k => { const m = cs.filter(c => c.metric === k); return `${m.filter(c => c.verdict === 'ply-lower').length} / ${m.filter(c => c.verdict === 'tie').length} / ${m.filter(c => c.verdict === 'ply-higher').length}`; })]; };
   L.push('## Score by strategy', '', 'Cells (cell × task × mode) where ply\'s median is lower / equal / higher than the strategy\'s. Lower is better for every metric.', '');
