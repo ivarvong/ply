@@ -87,8 +87,18 @@ Every pack ply builds is checked by git: `git index-pack --strict` and `receive-
 ([SAFETY.md](../SAFETY.md) I12, [test/fuzz/packgen.mjs](../test/fuzz/packgen.mjs); `index-pack --fix-thin` on thin
 packs in [test/oracle.test.js](../test/oracle.test.js)).
 
-**Not established here.** How ply's push bytes and memory compare with native Git doing the same task: tracked in
-#323 (`npm run bench:compare`, documents under `bench/`). Recovery from a lost or ambiguous push: tracked in #324.
+**Compared with native Git.** `npm run bench:compare` ([bench/compare/README.md](../bench/compare/README.md), #323) runs
+one read and one single-file edit, commit and push with ply and with four native Git strategies against the same
+git http-backend, and verifies every sample (content, parentage, `git fsck --strict`). One recorded run, on a loaded
+shared machine, is in [bench/compare/results](../bench/compare/results/README.md): a measured result on loopback, which
+does not predict WAN latency and says nothing about Workers memory. Against the leanest Git strategy measured (a
+depth-1 blobless clone), ply's process memory in that run was higher in every cell except the 32 MiB edit, and its
+fresh-process elapsed time was higher on reads and on edits up to 64 KiB; ply was lower on the 32 MiB edit and on edits
+from a warm process, whose timing excludes process start-up.
+
+**Recovery from a lost or ambiguous push.** [examples/recover-push.mjs](../examples/recover-push.mjs) (#324) is a tested
+recipe, run by [test/examples.test.js](../test/examples.test.js); what refs and history cannot settle is listed in
+[examples/README.md](../examples/README.md).
 
 **Known gaps.** #298 (an unpinned `commitChanges` that loses a race is re-applied on the winner's tip; transfer arms
 without tests), #302 (a buffered push whose `fetchImpl` rejects without sending is still `ambiguous`).

@@ -10,8 +10,9 @@ repository records. It points to the documents that own the details instead of r
 - [docs/STACK.md](STACK.md): rules for code in `src/` (errors are values, pure steps with I/O at the edges, bounds
   before allocation, absence).
 - [README.md](../README.md): the public API, limits, timers, telemetry.
-- [docs/EVIDENCE.md](EVIDENCE.md): the claims-to-evidence index (#322). The native-git benchmark lives under
-  `bench/` (#323) and the recovery example under `examples/` (#324).
+- [docs/EVIDENCE.md](EVIDENCE.md): the claims-to-evidence index (#322). The native-git benchmark is
+  [bench/compare](../bench/compare/README.md) (#323) and the recovery example is
+  [examples/recover-push.mjs](../examples/recover-push.mjs) (#324).
 
 History (campaigns, run logs, one-off experiments) is in [process/](../process/README.md) and CONTEXT.md §4, not here.
 Names below are `src/` modules and the symbols they define; "internal" marks a function the module does not export.
