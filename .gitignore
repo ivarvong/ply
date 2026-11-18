@@ -8,3 +8,4 @@ dist/
 .failsites/
 pack-out/
 release-out/
+bench/compare/out/

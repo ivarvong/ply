@@ -14,6 +14,7 @@
   "test/compliance.test.js": 26,
   "test/concurrency.test.js": 4,
   "test/config-comment.test.js": 1,
+  "test/bench-compare.test.js": 9,
   "test/behaviours/matrix.test.js": 1,
   "test/probes/probes.test.js": 272,
   "test/custom-exchange.test.js": 2,
