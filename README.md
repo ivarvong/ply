@@ -1,8 +1,10 @@
 # ply
 
-Zero-dependency git smart-HTTP client that edits one file in a remote repo in **O(1) memory** and pushes the change **as a delta**. Runs anywhere with `fetch`, `CompressionStream`, `crypto.getRandomValues` and `Uint8Array` (Node ≥ 20, Workers, browsers behind a CORS proxy).
+Zero-dependency git smart-HTTP client that edits one file in a remote repo **without holding the file** (memory does not grow with its size; the commit and the trees on its path are held whole) and pushes the change **as a delta**. Runs anywhere with `fetch`, `CompressionStream`, `crypto.getRandomValues` and `Uint8Array` (Node ≥ 20, Workers, browsers behind a CORS proxy).
 
 Every byte and every roundtrip is recorded as an OTLP span. The test suite is a property/fuzz harness that uses real `git` as the oracle and the spans as the coverage map that steers generation.
+
+What each of these claims covers, the test or benchmark behind it, how to rerun it, and its known gaps: [docs/EVIDENCE.md](docs/EVIDENCE.md).
 
 The hosted HTTP API and the public repository viewer live in [ply-web](https://github.com/ivarvong/ply-web) (the Cloudflare Worker `ply`). This repository is the git client.
 
@@ -733,7 +735,7 @@ const r = await pushTree(url, spec, { limits: withLimits({ ...WORKER_LIMITS, max
 
 ## Memory
 
-Peak per invocation is one pkt-line (≤ 64 KB) + one inflate chunk (16 KB) + `|find|−1` carry + the replacement bytes. Measured over 446 fuzzed edits including 1.4 MB blobs: `mem.alloc.max_single` max = 16384. The blob is never resident; the delta is three ops computed from the match offset, and the new blob's oid comes from a streaming SHA-1 over the transformed stream (the exactly-one-match contract makes `newLen` known up front).
+An `editFile` holds the commit and every tree on its path whole (each within `maxObjectSize` and `maxTreeEntries`), and for the blob one pkt-line (≤ 64 KB) + one inflate chunk (16 KB) + `|find|−1` carry + the replacement bytes, whatever the blob's size. `mem.alloc.max_single` is ply's own count of the largest single allocation it made (`memAttrs`), not a heap measurement: `test/fuzz/run.mjs` asserts it is at most 70,000 + `|find|` + `|replace|` on every case, and `test/edges.test.js` at most 65,536 on a 24 MB blob. A run over 446 fuzzed edits including 1.4 MB blobs recorded a maximum of 16384 (historical: no commit or run record kept). Per-operation scope, measurements and gaps: [docs/EVIDENCE.md](docs/EVIDENCE.md). The blob is never resident; the delta is three ops computed from the match offset, and the new blob's oid comes from a streaming SHA-1 over the transformed stream (the exactly-one-match contract makes `newLen` known up front).
 
 Every fetch reads its pack as the band-1 bytes arrive, through one deflate decoder (`inflatePull`, of which `inflate()` is a collector): the pack's bytes and its zlib members are dropped once inflated, so a fetch holds what it keeps plus the decoder's hold, the 32 KiB window, one 16 KiB chunk and one pkt-line (114,672 B, `src/streambound.ts`). Measured (`test/stream-memory.test.js`, `node --expose-gc`, live `arrayBuffers` sampled every 256 KiB allocated): `fetchObject` through the blob:none fallback, a pack of 2,000 4 KiB trees, all retained (R = 8,192,000 B), peaks at R + 241,366 B where it peaked at R + 12,201,108 B with the pack joined first (`fetchPack` of the same pack: R + 241,345 B, was R + 12,201,108 B); with 62 256 KiB blobs in the pack too (an unfiltered fallback; a tree want drops them as their headers arrive) R + 257,434 B where it was R + 28,621,712 B. The response's own share of those figures (frames in flight, read with every chunk dropped) is 451,094 B. `inflate()` of a 64 MiB member in hand holds the output and 82,236 B.
 
@@ -809,7 +811,7 @@ An equivalent mutant stays only as `// Stryker disable next-line <Mutator>: <rea
 
 `test/fuzz/gen.js` draws from a product space of named classes: blob content (`empty tiny text random repetitive boundary big binaryish`), match position (`start end middle chunk16k chunk32k chunk64k random`), find/replace length classes (incl. >127 for insert-op chunking, 64K copy-op boundaries, empty), server `core.compression` 0…9/−1 (stored / fixed / dynamic Huffman blocks), path depth 1…10, sibling shape (`none few many sortedge`: names that sort differently as dir vs file, unicode, leading `-`), history depth (so `deepen 1` reports `shallow`), file mode, and intended outcome (`ok noop zero_matches two_matches missing_path not_a_file cas_conflict` — the CAS case injects a competing push between our `ls-refs` and our `receive-pack` via `fetchImpl`).
 
-Each case is checked against git: ref advanced to our commit, `cat-file` bytes equal the expected splice, `diff --name-only -z` touches exactly the path, parent/author/message, tree oid, mode preserved, `fsck --strict`, plus two efficiency properties — push bytes ≤ `220 + 80·depth + |replace| + ⌈|replace|/127⌉ + 5·⌈|replace|/16K⌉ + 16·⌈|blob|/64K⌉` and max single allocation ≤ 70 KB regardless of blob size — then a second edit that must hit the tree cache at every level. Failures write `fuzz-out/fail-<seed>.jsonl` and print `--case <seed>` to replay.
+Each case is checked against git: ref advanced to our commit, `cat-file` bytes equal the expected splice, `diff --name-only -z` touches exactly the path, parent/author/message, tree oid, mode preserved, `fsck --strict`, plus two efficiency properties — push bytes ≤ `220 + 80·depth + |replace| + ⌈|replace|/127⌉ + 5·⌈|replace|/16K⌉ + 16·⌈|blob|/64K⌉` and max single allocation (ply's own counter, `mem.alloc.max_single`) ≤ 70,000 B + `|find|` + `|replace|` regardless of blob size — then a second edit that must hit the tree cache at every level. Failures write `fuzz-out/fail-<seed>.jsonl` and print `--case <seed>` to replay.
 
 ### Steering
 
