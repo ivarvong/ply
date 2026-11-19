@@ -33,7 +33,7 @@ import { fetchObject, objectAt, treeEntries } from './fetch.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
 import { parseOid, type Oid } from './oid.js';
-import { operation, verifyRef } from './operation.js';
+import { operation, verifyPushed } from './operation.js';
 import { parseTree, encodeEntries, parseCommit, encodeCommitOf, hashObject, ident, TYPE, type Mode } from './objects.js';
 import { validateRef, validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
@@ -986,7 +986,7 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     const pushed = await push(t, { ref, oldOid: ours, newOid: oid, objects });
     if (!pushed.ok) return pushed;
     const r = pushed.value;
-    if (verify) { const seen = await verifyRef(t, root, 'git.merge', ref, oid); if (!seen.ok) return seen; }
+    if (verify) { const seen = await verifyPushed(t, root, { prefix: 'git.merge', ref, expected: oid }, r.readBack); if (!seen.ok) return seen; }
     return outcome('merge', { outcome: 'merge', ref, oid, tree: treeOid, ours, theirs, base, pushBytes: r.packBytes, newTrees, contentMerged: merged.contentMerged }, { 'git.merge.commit': oid, 'git.merge.tree': treeOid, 'git.merge.push.bytes': r.packBytes });
   });
 }

@@ -1611,7 +1611,7 @@ Evidence:
 | `concurrency.ref-created-between-read-and-push` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `createBranch`, `createTag`, `commitChanges` | 3 |
 | `concurrency.ref-deleted-between-read-and-push` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `commitChanges` | 2 |
 | `concurrency.read-after-write` | verified | ply↔Artifacts, git↔Artifacts | `lsRefs`, `readFile`, `readCommit` | 1 |
-| `concurrency.empty-report-under-contention` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `classifyReport` | 3 |
+| `concurrency.empty-report-under-contention` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `push`, `classifyReport` | 6 |
 | `concurrency.two-transfer-runners` | verified | ply↔git | `runTransfer` | 1 |
 
 #### `concurrency.stale-old-oid`
@@ -1734,6 +1734,9 @@ Tests:
 
 - `test/push-unpack-host.test.js`: an empty receive-pack report stays ambiguous (concurrent same-repo 200 with no unpack/ref lines)
 - `test/mutant-kill.test.js`: push outcome (SAFETY.md I36): the exact report shapes, the decision, and the fields the enumerator does not compare
+- `test/push-band3-settle.test.js`: the tip is what the command expected: ambiguous, never cas_conflict (the update can still be applied)
+- `test/push-band3-settle.test.js`: newOid is an ancestor of the tip: landed, the ref moved on (the defect: this was cas_conflict)
+- `test/push-band3-settle.test.js`: the ref moved and does not hold the commit: cas_conflict (a lost race, an overwrite, a deleted ref)
 - `test/probes/probes.test.js`: probe ${s.id}: ply and stock git against the reference meet the expectation and leave the same repository
 
 Evidence:
@@ -1751,6 +1754,8 @@ Evidence:
 > Observed shape on Artifacts (probes run probes-20261114t1745-5jxl): HTTP 200 whose body is a single band-3 fatal (busy) and no report-status, for distinct refs as well as one ref; the refs read back show none of those pushes applied. Stock git reports it as the remote hanging up (exit 128).
 
 > Retry probe (run probes-20261114t1837-53b4): each push that did not land is sent again alone with the same zero old id, which the server would refuse had the first attempt been applied; per-check outcomes are in the private run record.
+
+> A band 3 with no text on a single-ref update or create is settled by reading the ref (SAFETY.md I36): landed when the tip is the pushed commit or a descendant of it, cas_conflict when the ref moved and does not hold it, ambiguous otherwise (an unmoved ref included). That rule is judged against git http-backend with the answer replaced (test/push-band3-settle.test.js); it has not been run against Artifacts, whose busy refusal carries text and so is not read back at all.
 
 #### `concurrency.two-transfer-runners`
 

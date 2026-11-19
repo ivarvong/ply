@@ -98,7 +98,10 @@ from a warm process, whose timing excludes process start-up.
 
 **Recovery from a lost or ambiguous push.** [examples/recover-push.mjs](../examples/recover-push.mjs) (#324) is a tested
 recipe, run by [test/examples.test.js](../test/examples.test.js); what refs and history cannot settle is listed in
-[examples/README.md](../examples/README.md).
+[examples/README.md](../examples/README.md). The one ambiguous answer ply settles itself, an empty band 3 (SAFETY.md
+I36), is judged row by row against git http-backend in
+[test/push-band3-settle.test.js](../test/push-band3-settle.test.js): `cas_conflict` is never claimed for a push whose
+commit is in the ref. That rule has not been run against Cloudflare Artifacts.
 
 **Known gaps.** #298 (an unpinned `commitChanges` that loses a race is re-applied on the winner's tip; transfer arms
 without tests), #302 (a buffered push whose `fetchImpl` rejects without sending is still `ambiguous`).

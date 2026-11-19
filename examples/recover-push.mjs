@@ -72,7 +72,8 @@ async function settle(url, { id, pins }, opts, limit = 50) {
 }
 
 // Apply `op` exactly once. `trail` is every typed outcome on the way, `errors` the PlyError behind each failed attempt.
-//   cas_conflict  definite: nothing of ours moved the ref. Read again, apply to the new tip, pin to it.
+//   cas_conflict  definite: the ref is elsewhere and does not hold our commit. Read again, apply to the new tip, pin
+//                 to it.
 //   ambiguous     unknown: from then on the history is read (`settle`) before every further attempt.
 //   anything else is returned as it is.
 export async function applyOnce(url, op, opts = {}, maxAttempts = 3) {

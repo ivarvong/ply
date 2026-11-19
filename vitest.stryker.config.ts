@@ -49,6 +49,7 @@ const MUTATION_FILES = [
   'test/inflate-codesets.test.js',
   'test/inflate-pos.test.js',
   'test/transfer.test.js',
+  'test/push-band3-settle.test.js',
   'test/input-validation.test.js',
 ];
 // A test that hangs under a mutant fails at its own timeout, not at Stryker's per-mutant one. vitest.config.ts turns both

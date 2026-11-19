@@ -161,6 +161,7 @@ export const SPACES = [
   curated('encode-tag', ['test/encode-tag.test.js'], 'git hash-object -t tag --stdin (fsck_tag_standalone: same oid, same refusals) and git tag -a byte-for-byte where porcelain can write the cell (#103)'),
   curated('redirects', ['test/redirect.test.js'], 'opt-in redirects (followRedirects: initial), per case against git http.followRedirects=initial: hop counts, the suffix rule, origin change drops the credential, Location userinfo refused (#150)'),
   curated('parse-once', ['test/parse-once.test.js', 'test/want-oracle.test.js'], 'git upload-pack --stateless-rpc (protocol v2) on every class of want, have and shallow line: parse_want dies "expected to get oid", process_haves "expected SHA1 object", process_shallow "invalid shallow line" exactly where fetchRequest refuses, but for the two get_oid_hex reads past (an upper-case id, lowercased and answered with the same pack; text after the id, refused); a commit tree and parent id against git hash-object (fsck badTreeSha1, badParentSha1) and git commit-tree (the lowercase bytes it writes); the other edges against the refusal each made before the brand (#156)'),
+  curated('push-settle', ['test/push-band3-settle.test.js'], 'an empty band 3 settled by reading the ref, per case against git http-backend: the first receive-pack is applied or dropped and its answer replaced, another writer moves the ref with commit-tree / update-ref, and git judges it (rev-parse for the tip, merge-base --is-ancestor for the pushed commit, rev-list --count for how many commits the change became after the caller follows the retry class)'),
   curated('mutant-kill', ['test/mutant-kill.test.js', 'test/mutant-kill-tree.test.js', 'test/mutant-kill-packs.test.js'], 'stated values chosen to kill Stryker mutants'),
   curated('merge', ['test/merge.test.js', 'test/merge-renames.test.js', 'test/merge-renames-removal.test.js', 'test/rebase.test.js', 'test/linemerge.test.js', 'test/pick-empty.test.js'], 'git merge-tree --write-tree, git rebase, git cherry-pick, git revert'),
   curated('sign', ['test/sign.test.js'], 'git verify-commit / ssh-keygen -Y verify'),
@@ -638,9 +639,9 @@ export const DECISIONS = [
   { match: "src/push.ts#planPush:bad_request:push: unchecked atomic or push options", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/push.ts#send:limit_exceeded:push pack bytes", space: 'push-tree', axisTag: 'case' },
   { match: "src/push.ts#decide:ambiguous:<r.cause>", space: 'hostile-server', axisTag: 'case' },
-  // F34: empty band-3 tip read-back → typed cas_conflict (or landed); covered by mutant-kill + edit-race-f34
-  { match: 'src/push.ts#resolveAmbiguousByTip:cas_conflict:push rejected: stale ref', space: 'mutant-kill', axisTag: 'case' },
-  { match: "src/push.ts#resolveAmbiguousByTip:conditional=cas_conflict:span.set({ 'git.push.verify.ref': seen === null ? '' : s…", space: 'mutant-kill', axisTag: 'case' },
+  // F34: an empty band 3 settled by the read-back (landed, cas_conflict or still ambiguous): test/push-band3-settle.test.js
+  { match: 'src/push.ts#resolveAmbiguousByTip:cas_conflict:push rejected: stale ref', space: 'push-settle', axisTag: 'case' },
+  { match: "src/push.ts#settleByTip:conditional=cas_conflict:return { resolved: reach === 'absent' ? 'cas_conflict' :…", space: 'push-settle', axisTag: 'case' },
 
   { match: 'src/push.ts#decide:ambiguous:<cut>', space: 'push-stream', axisTag: 'case' },
   { match: 'src/packwrite.ts#refuse:*', space: 'push-stream', axisTag: 'case' },

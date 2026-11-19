@@ -21,7 +21,38 @@ User-visible changes to ply, newest first. The versioning and compatibility rule
 
 ## Unreleased
 
-_Nothing yet._
+### Fixed
+
+- A push answered with an empty side-band band 3 (Cloudflare Artifacts under a same-ref race) no longer comes back as
+  `cas_conflict` when it had landed. Since #225 ply read the ref after that answer and called every tip but the pushed
+  commit `cas_conflict` (`RETRY`: `fresh`), so a push that landed and was then built on by another writer was redone
+  by the caller, or by `editFile` / `commitChanges` / `pushTree` themselves, and the change was applied twice. The
+  outcome for the same answer is now: ok when the tip is the pushed commit or the pushed commit is an ancestor of the
+  tip; `cas_conflict` when the ref moved and does not hold the commit; `ambiguous` (`RETRY`: `read`) when the ref has
+  not moved (this was `cas_conflict` with `expected` equal to `actual`), when the push did not carry the commit itself
+  (a ref-only update or create, a tag, `pushPack`: these were `cas_conflict` whenever the tip was elsewhere), or when
+  at most `limits.maxPushSettleCommits` commits read from the tip do not settle it. SAFETY.md I36.
+  (#327; corrects #225)
+
+### Changed
+
+- An ok result of `push`, and of the operations that push a commit they built (`editFile`, `commitChanges`,
+  `pushTree`, `mergeBranch`), can now name a commit that is not the ref's tip: the push landed and another writer
+  moved the ref before ply read it (only after the empty band 3 above). With `verify: true` such a result is ok, not
+  `ambiguous`: the read that settled the push is the verification, recorded as `<op>.verify.ref`, and the ref is not
+  read again. (#327; corrects #225)
+
+### Added
+
+- `PushResult.readBack`: `null` for a push its report settled; the tip ply read for one settled after an empty band 3.
+  `limits.maxPushSettleCommits` (default 8, also in `WORKER_LIMITS`; 0 reads none): the commits read from that tip,
+  one fetch each. (#327; corrects #225)
+
+### Telemetry
+
+- `git.receive-pack`: `git.push.ambiguous.resolved` (set only after an empty band 3) gains the values `ancestor`
+  (landed, the ref moved on), `unchanged`, `unproven` and `unknown` (each still `ambiguous`), beside `landed`,
+  `cas_conflict` and `unread`. No key is added or retyped. (#327; corrects #225)
 
 ## 0.2.0
 

@@ -48,7 +48,7 @@ import { field, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchPack } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
-import { operation, verifyRef } from './operation.js';
+import { operation, verifyPushed } from './operation.js';
 import { createTransport, redactUrl } from './http.js';
 import { transportFrom, withParent } from './transport.js';
 import { parseCommit, parseTag, TYPE } from './objects.js';
@@ -171,7 +171,7 @@ async function transfer({ dstRef, force, shared }: Parsed, { t, d, root, to, fro
   const expected = from === null ? ZERO_OID : from;
   const pushed = await push(d, { ref: dstRef, oldOid: expected, newOid: to, objects: pack });
   if (!pushed.ok) return pushed.error.code === 'cas_conflict' ? lostRace(d, dstRef, expected, pushed) : pushed;
-  if (shared.verify) { const seen = await verifyRef(d, root, 'git.sync_ref', dstRef, to); if (!seen.ok) return seen; }
+  if (shared.verify) { const seen = await verifyPushed(d, root, { prefix: 'git.sync_ref', ref: dstRef, expected: to }, pushed.value.readBack); if (!seen.ok) return seen; }
   return ok({ outcome: from === null ? 'created' : 'updated', dstRef, from, to, forced: !fastForward, objects: pack.length, pushBytes: pushed.value.packBytes });
 }
 

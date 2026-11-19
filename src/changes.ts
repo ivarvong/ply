@@ -11,7 +11,7 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module */
 import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
-import { operation, verifyRef } from './operation.js';
+import { operation, verifyPushed } from './operation.js';
 import { lsRefs, parseUnbornLine } from './lsrefs.js';
 import type { LsRefsResult } from './lsrefs.js';
 import { discover } from './discover.js';
@@ -628,7 +628,7 @@ async function writeMem(job: MemJob): Promise<Result<MemOutcome, PlyError>> {
     return lostAt(await lsRefs(t, [target.ref]), target.ref, oldOid, pushed.error);
   }
   // the read-back's Err (ambiguous) is the commit's
-  if (verify) { const seen = await verifyRef(t, root, 'git.commit', target.ref, oid); if (!seen.ok) return seen; }
+  if (verify) { const seen = await verifyPushed(t, root, { prefix: 'git.commit', ref: target.ref, expected: oid }, pushed.value.readBack); if (!seen.ok) return seen; }
   return ok({ retry: false, objects: objects.length, done: resultOf(target.ref, parent, { tree: applied.value.tree, oid, pushBytes: pushed.value.packBytes, outcome: 'commit' }) });
 }
 type StreamTry = { readonly plan: Plan; readonly target: Tip; readonly parent: Parent; readonly opts: StreamOpts; readonly attempt: number };

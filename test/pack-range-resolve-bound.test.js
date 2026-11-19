@@ -139,6 +139,8 @@ test('withLimits(null) is the frozen defaults: null from an untyped caller is no
     heldTimeoutMs: 240_000,
     // README Limits: maxMergeWork 2^32 diff steps, maxReportReasonBytes 4096, maxReportProgressBytes 8 MiB
     maxMergeWork: 4_294_967_296, maxReportReasonBytes: 4096, maxReportProgressBytes: 8_388_608,
+    // README Limits: maxPushSettleCommits 8 commits read to settle an empty band 3
+    maxPushSettleCommits: 8,
   };
   const made = withLimits(null);
   assert.deepEqual({ ...made }, defaults);

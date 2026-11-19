@@ -28,6 +28,7 @@ export const PARAMS = [
   { key: 'maxReportLines', limit: DEFAULT_LIMITS.maxReportLines, probe: 'pushRepo of N branches (N + 1 report lines)', later: false },
   { key: 'maxReportReasonBytes', limit: DEFAULT_LIMITS.maxReportReasonBytes, probe: 'pushRepo under a limit of 0: the report is still read (a cap on what is kept, not on the outcome)', later: false },
   { key: 'maxReportProgressBytes', limit: DEFAULT_LIMITS.maxReportProgressBytes, probe: 'pushRepo under a limit of 0: band 2 is dropped, the report is still read', later: false },
+  { key: 'maxPushSettleCommits', limit: DEFAULT_LIMITS.maxPushSettleCommits, probe: 'pushRepo under a limit of 0: a push git reports on lands (the walk is only for an empty band 3; its bound is swept in test/push-band3-settle.test.js)', later: false },
   { key: 'maxCommitParents', limit: DEFAULT_LIMITS.maxCommitParents, probe: 'readLog of an octopus commit', later: false },
   { key: 'maxLsRefsBytes', limit: DEFAULT_LIMITS.maxLsRefsBytes, probe: 'lsRefs with the byte cap overridden', later: false },
   { key: 'requestTimeoutMs', limit: DEFAULT_LIMITS.requestTimeoutMs, probe: 'lsRefs and readFile through a delaying or stalling shim, with the opt-in total set', later: false },

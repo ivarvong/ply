@@ -423,7 +423,9 @@ function pass2(add) {
   // ---- maxReportReasonBytes, maxReportProgressBytes. Neither can refuse a push: they bound what is kept of the answer
   // (a reason's bytes, band 2's decoding), not whether the report is read. So the boundary is 0, and a push under it
   // lands as it does at the default: git's refs after the push are the oracle.
-  for (const key of ['maxReportReasonBytes', 'maxReportProgressBytes']) {
+  // maxPushSettleCommits is the same for a push git reports on: it bounds the commits read to settle an empty band 3,
+  // which git never sends. Where it decides (0, one short of the walk, the walk) is test/push-band3-settle.test.js.
+  for (const key of ['maxReportReasonBytes', 'maxReportProgressBytes', 'maxPushSettleCommits']) {
     add({
       id: `report.${key}.zero`, param: key, op: 'pushRepo', repo: 'empty', local: 'branches-8', spec: { all: true }, writes: true,
       bytes: 8 * 64, entries: 8, limits: { [key]: 0 }, expect: ok,

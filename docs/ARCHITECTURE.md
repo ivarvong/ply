@@ -157,8 +157,9 @@ sequenceDiagram
    `maxReportProgressBytes` of band 2. `decideOutcome` maps the shape to `landed`, `rejected` (`ngClass` per reason:
    `cas_conflict`, `not_fast_forward`, `push_rejected`, `limit_exceeded`), `partial` or `ambiguous`; `outcomeResult`
    turns it into the `Result`.
-10. **Verify (opt-in).** `verify: true` reads the ref back with `operation.ts` `verifyRef`; anything but the new
-    commit is `ambiguous` (SAFETY I25).
+10. **Verify (opt-in).** `verify: true` reads the ref back with `operation.ts` `verifyRef` (through `verifyPushed`);
+    anything but the new commit is `ambiguous` (SAFETY I25). A push that step 9 settled by reading the ref itself
+    (an empty band 3, below) is not read again.
 
 **Held during an edit:** the commit, every tree on the path (old bytes, new bytes, and the 20-byte-replacement
 delta), `find`, `replace`, the scanner's carry, one inflate chunk, the built objects (small: one commit, path-many
@@ -216,10 +217,15 @@ writes it; everything else is `ambiguous` (`RETRY.ambiguous` is `read`: read the
 `errors.ts` `ambiguousAfterPush`. That covers network failure, HTTP status, framing, band 3, a malformed or cut
 report, a limit hit while reading the report, a second deflate pass that refused, a caller callback that threw after
 the hand-over (`operation`), and a failed `verifyRef`. Exceptions, each definite: a 401/403/404 before any frame of the
-answer that the receive-pack advertisement repeats (`refusedBeforeReceivePack`); a streamed body the transport never
-pulled; and a single-ref push answered with an empty band 3 (Cloudflare Artifacts under a race), which
-`resolveAmbiguousByTip` (internal) settles by reading the ref (`landed`, or `cas_conflict`). SAFETY I2, I11, I36;
-the push outcome space is enumerated in [SPACE.md](../SPACE.md).
+answer that the receive-pack advertisement repeats (`refusedBeforeReceivePack`), and a streamed body the transport
+never pulled. One more is settled only where a read proves it: a single-ref update or create answered with an empty
+band 3 (Cloudflare Artifacts under a race). `resolveAmbiguousByTip` (internal) reads the ref and `settleByTip` names
+the push: landed when the tip is the pushed commit or (`reachFrom`: a walk of at most `maxPushSettleCommits` commits,
+one `objectAt` each) a descendant of it; `cas_conflict` when the ref moved and does not hold the commit; still
+`ambiguous` when the ref has not moved, the walk cannot finish, or the push did not carry the commit
+(`carriedParents`, whose answer is also where the walk stops). A push settled this way returns
+`PushResult.readBack` (the tip read), which `verifyPushed` takes as the verification. SAFETY I2, I11, I36; the push
+outcome space is enumerated in [SPACE.md](../SPACE.md).
 
 ## Who is responsible for what
 

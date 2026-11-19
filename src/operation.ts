@@ -141,3 +141,15 @@ export async function verifyRef(t: Transport, root: Span, prefix: string, ref: s
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ad-hoc error fields (errors.ts Extra); A3 moves them into Detail
   return fail('ambiguous', `push reported ok but ${ref} is ${getOrElse(seen, 'absent')}, not ${expected}`, { seen: getOrElse<string | null>(seen, null), expected } as Extra);
 }
+// verifyRef for a push that returned (`verify: true`). `readBack` is PushResult.readBack: null for a push its report
+// settled, which is verified by reading the ref. Otherwise it is the tip push itself read to settle an empty band-3
+// answer, and that read is the verification (the tip is `expected`, or a commit `expected` is an ancestor of,
+// hash-checked link by link): it is recorded and returned, and the ref is not read again, since a second read could
+// only call a ref that moved on 'ambiguous'.
+export type Verify = { readonly prefix: string; readonly ref: string; readonly expected: string };
+// oxlint-disable-next-line typescript/promise-function-async -- verifyRef's promise, or the answer already held
+export function verifyPushed(t: Transport, root: Span, { prefix, ref, expected }: Verify, readBack: string | null): Promise<Result<string, ErrorOf<'ambiguous'>>> {
+  if (readBack === null) return verifyRef(t, root, prefix, ref, expected);
+  root.set({ [`${prefix}.verify.ref`]: readBack });
+  return Promise.resolve(ok(readBack));
+}
