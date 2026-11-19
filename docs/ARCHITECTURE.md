@@ -5,8 +5,8 @@ and back, where bytes are streamed and where they are held, which limit bounds e
 repository records. It points to the documents that own the details instead of repeating them:
 
 - [SAFETY.md](../SAFETY.md): the invariants (I1, I2, …), each with the test that enforces it.
-- [CONTEXT.md](../CONTEXT.md) §5 "Decisions and why": each decision with its measurement. Its §2 module map and §7
-  numbers are dated 2026-10-20 (issue #301 tracks them).
+- [CONTEXT.md](../CONTEXT.md) §5 "Decisions and why": each decision with its measurement. Its dated sections (§4
+  timeline, §7 numbers, §8 gaps) are a 2026-10-20 record, labelled as such.
 - [docs/STACK.md](STACK.md): rules for code in `src/` (errors are values, pure steps with I/O at the edges, bounds
   before allocation, absence).
 - [README.md](../README.md): the public API, limits, timers, telemetry.
@@ -263,4 +263,4 @@ the push outcome space is enumerated in [SPACE.md](../SPACE.md).
 - The tree `cache` a caller passes grows with every new tree ply adds to it; ply does not evict.
 - After the push is handed over, `ambiguous` is an outcome ply cannot resolve except in the one empty-band-3 case:
   the caller reads the ref back. A lost race leaves unreferenced objects on the server.
-- What SAFETY.md "Explicitly not proven here" lists (for example GitHub push, SHA-256) applies here too.
+- What SAFETY.md "Explicitly not tested here" lists (for example GitHub push, SHA-256) applies here too.

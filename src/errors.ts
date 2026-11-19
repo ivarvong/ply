@@ -115,7 +115,7 @@ type Payload<C extends Code> = unknown extends DetailOf<C> ? [] | [extra: Extra]
 export const isPlyCode = (code: unknown): code is Code => typeof code === 'string' && code in RETRY;
 // A PlyError is the Error plyError builds. A thrown number, a string, or an Error with no code is not one.
 export const isPlyError = (e: unknown): e is PlyError => e instanceof Error && 'code' in e && isPlyCode(e.code);
-// Accepts a thrown value too (the public API throws until the Result cut-over; see docs/STACK.md). Any value is read
+// Accepts a thrown value too (a caller's own catch, a foreign error; the public API returns Result, docs/STACK.md). Any value is read
 // loosely, through absent.ts `field`: a primitive, null, or an object without a code has none, and that is 'no'.
 export const retryPolicy = (e: unknown): Retry => {
   const code = field(e, 'code');

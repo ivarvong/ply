@@ -125,7 +125,7 @@ those tests enumerate or generate, on the git versions they run against.
 | Decision spaces (each decision's axes enumerated and judged by git) | real git per cell | [SPACES.md](../SPACES.md), [SPACE.md](../SPACE.md); gate [test/space/registry.test.js](../test/space/registry.test.js) | tested invariant; SPACES.md reports 26 unregistered decision points and 30 unreached fail sites |
 | Server behaviours (Cloudflare Artifacts and git http-backend) | git http-backend in the suite; recorded Artifacts runs | [COVERAGE.md](../COVERAGE.md) (generated; [test/behaviours/matrix.test.js](../test/behaviours/matrix.test.js) fails on drift): 118 behaviours, 106 verified, 2 implemented, 10 unsupported | tested invariant for the git http-backend column; the Artifacts column rests on recorded runs whose verdicts are private ([test/behaviours/runs.ts](../test/behaviours/runs.ts)) |
 
-**Preconditions and exclusions** (from [SAFETY.md](../SAFETY.md) "Explicitly not proven here" and README
+**Preconditions and exclusions** (from [SAFETY.md](../SAFETY.md) "Explicitly not tested here" and README
 "Requirements"): SHA-1 repositories only (SHA-256 is `unsupported`); protocol v2 for reads; criss-cross merges are
 refused; rename detection is not ported, so rename shapes are conflicts; server-side attribute sources and custom merge
 drivers are not visible; GitHub's receive-pack policy layer was not exercised. CI uses the runner image's git, which
@@ -135,8 +135,7 @@ drivers are not visible; GitHub's receive-pack policy layer was not exercised. C
 used), #289 (`v2Step` accepts `ACK junk`), #302 (git's rename pairing and `patch-id` not ported), #292 (checks only CI
 runs), #293 (fuzz, sweep and bench git calls outside the git shim), #287 (mutation gate scope), #291 (line-merge step
 counts depend on git's rediff mode), #318 (`pack_corrupt` retryability), #296 and #319 (entry points that throw on
-`null` instead of returning `bad_request`), #300 (smaller API correctness findings), #301 (SAFETY.md names git 2.43 as
-the installed end-to-end oracle, which is out of date).
+`null` instead of returning `bad_request`), #300 (smaller API correctness findings).
 
 **Reproduce.**
 
@@ -163,10 +162,9 @@ exist: Node 20 and later, Cloudflare Workers, and browsers behind a CORS proxy (
 | Cloudflare Workers (deployed) | streaming cells inside a 128 MB isolate | [bench/worker-mem](../bench/worker-mem/README.md), manual | limited claim: no committed result; see section 1 |
 | Browsers | the shipped `.d.ts` compiles under the `DOM` lib | [test/dist-types.test.js](../test/dist-types.test.js), `npm run check:dist` | types only; no browser runtime test in the repository |
 | TypeScript consumers | `.d.ts` compiles with `@types/node` 20, 22, 24, `DOM`, `@cloudflare/workers-types` | [test/dist-types.test.js](../test/dist-types.test.js) | tested invariant |
-| Workers-safe entries carry no Node builtins | the `ply` (full), edit, read, log, tree, checkout and merge bundles contain no `node:` import; `node:fs` lives only in [src/tree-node.ts](../src/tree-node.ts), [src/checkout-node.ts](../src/checkout-node.ts), [src/repo-node.ts](../src/repo-node.ts) | [test/bundle.test.js](../test/bundle.test.js) | tested invariant; the bundle sizes quoted in README are tracked as wrong in #301 and are not repeated here |
+| Workers-safe entries carry no Node builtins | the `ply` (full), edit, read, log, tree, checkout and merge bundles contain no `node:` import; `node:fs` lives only in [src/tree-node.ts](../src/tree-node.ts), [src/checkout-node.ts](../src/checkout-node.ts), [src/repo-node.ts](../src/repo-node.ts) | [test/bundle.test.js](../test/bundle.test.js) | tested invariant; the test prints each bundle's size and does not gate it (#301), and README quotes no sizes |
 
-**Known gaps.** #326 (no versioned release artifact or compatibility policy yet), #301 (SAFETY.md's "not proven" list
-predates the current oracles and does not name Node 20 behaviour as unproven). No issue owns a browser runtime test.
+**Known gaps.** #326 (no versioned release artifact or compatibility policy yet). No issue owns a browser runtime test.
 
 **Reproduce.**
 
@@ -196,15 +194,15 @@ printed (one run each; not a basis for a scaling claim):
 
 ## Conflicts with other documents
 
-Statements elsewhere in the repository that say more than the evidence above. README.md was corrected in the commit
-that added this page; the others are listed here and left to their owners.
+Statements elsewhere in the repository that said more than the evidence above, kept as the record of what was
+narrowed. README.md was corrected in the commit that added this page; the other rows were corrected for #301.
 
 | File | Statement | Why it is narrower here |
 |---|---|---|
 | README.md, first line (corrected) | "edits one file in a remote repo in **O(1) memory**" | the edit holds the commit and the trees on its path whole; the bound is in the blob's size only |
 | README.md "Memory" (corrected) | "Peak per invocation is one pkt-line + one inflate chunk + carry + replacement … `mem.alloc.max_single` max = 16384" | the commit and trees were left out of the peak; `mem.alloc.max_single` is the largest single allocation ply counts, not a peak; the 446-edit run has no commit or record |
 | README.md "The fuzzer" (corrected) | "max single allocation ≤ 70 KB regardless of blob size" | [test/fuzz/run.mjs](../test/fuzz/run.mjs) allows 70,000 + \|find\| + \|replace\| |
-| [SAFETY.md](../SAFETY.md) I7 | "Memory is O(1) in blob size and repo size" | `editFile` holds the trees on its path whole; index, resolve and plan memory grow with object count (#298, #299); the cited evidence is ply's allocation counter, not a heap measurement |
-| [SAFETY.md](../SAFETY.md) | "Invariants and where they are proven" | the checks are empirical tests, not proofs |
-| [CONTEXT.md](../CONTEXT.md) sections 1 and 4 | "Edit one file in a huge repository in O(1) memory" | as SAFETY.md I7; CONTEXT.md is a 2026-10-20 snapshot (#301) |
-| [bench/worker-mem/README.md](../bench/worker-mem/README.md) | "A manual harness that proves ply's streaming paths stay inside real Cloudflare Workers limits" | platform survival on the cells run, with no committed report, and an outcome join that drops killed invocations (#301) |
+| [SAFETY.md](../SAFETY.md) I7 (corrected) | "Memory is O(1) in blob size and repo size" | `editFile` holds the trees on its path whole; index, resolve and plan memory grow with object count (#298, #299); the cited evidence is ply's allocation counter, not a heap measurement |
+| [SAFETY.md](../SAFETY.md) (corrected) | "Invariants and where they are proven" | the checks are empirical tests, not proofs |
+| [CONTEXT.md](../CONTEXT.md) sections 1 and 4 (corrected; §4 labelled historical) | "Edit one file in a huge repository in O(1) memory" | as SAFETY.md I7 |
+| [bench/worker-mem/README.md](../bench/worker-mem/README.md) (corrected) | "A manual harness that proves ply's streaming paths stay inside real Cloudflare Workers limits" | platform survival on the cells run, with no committed report, and an outcome join that drops killed invocations (#301) |
