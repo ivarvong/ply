@@ -31,6 +31,9 @@ export const PINNED = [
   { fuzzer: 'liar', args: ['--n', '60'], seed: 1 },
   { fuzzer: 'liar', args: ['--op', 'mergebase', '--n', '40'], seed: 1 },
   { fuzzer: 'protocol', args: ['--n', '100'], seed: 1 },
+  // #321: a deepen that cuts nothing leaves the bitmap on, so a wanted tree that is a walked commit's root tree is
+  // sent under tree:0 (the rule is at expectedObjects in dag.js).
+  { fuzzer: 'protocol', args: ['--case', '1911648345'], fixed: true },
   { fuzzer: 'packs', args: ['--n', '40'], seed: 1 },
   { fuzzer: 'packgen', args: ['--n', '60'], seed: 1 },
   { fuzzer: 'codec', args: ['--n', '20000'], seed: 1 },

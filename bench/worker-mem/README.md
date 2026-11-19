@@ -1,7 +1,9 @@
 # worker-mem: ply's streaming paths inside a real Worker
 
-A manual harness that proves ply's streaming paths stay inside real Cloudflare Workers limits (128 MB isolate memory,
-the configured CPU limit) on inputs far larger than isolate memory. It deploys a scratch Worker, `ply-memlab`, bundled
+A manual harness that runs ply's streaming paths inside a deployed Cloudflare Worker (128 MB isolate memory, the
+configured CPU limit) on inputs far larger than isolate memory. What it gives is platform survival on the cells run: an
+outcome other than `exceededMemory` / `exceededCpu`, not a measured peak. No report is committed (reports are
+gitignored), so the repository holds no result from it. It deploys a scratch Worker, `ply-memlab`, bundled
 from this checkout's `dist/`, and drives it from the laptop. Nothing here ships: the package publishes `dist/` only,
 the harness has no dependencies beyond the repo's dev tooling, and CI never runs it (it needs network and an account).
 
@@ -19,11 +21,15 @@ the harness has no dependencies beyond the repo's dev tooling, and CI never runs
 | `pushpack` | one request per seed commit: `packStream` of that commit (previous commit as a have) piped as a `ReadableStream` into `pushPack` (#234), under a 64 MiB − 64 KiB `maxPackBytes`, into a throwaway `ply-loadgen` repo | every report line `ok`; afterwards a stock `git clone --mirror` of the destination passes `git fsck --strict` with the seed's head and object count; the destination and its tokens are then removed |
 
 Each request's CPU time, wall time and outcome come from Workers Observability, joined to the cell by the request id
-of the Worker's `memlab` log line. In-Worker `Date.now()` only advances on I/O, so in-Worker wall times are I/O time,
+of the Worker's `memlab` log line. That line is written after the cell has finished (`worker.mjs`), and `run.mjs` keeps
+only invocations that carry it, so an invocation the platform killed (`exceededMemory`, `exceededCpu`, `canceled`) is
+dropped from the join: the outcomes, CPU and platform wall columns cannot show a kill (#301). Compare `telemetryJoined`
+with `n` in the report's JSON. In-Worker `Date.now()` only advances on I/O, so in-Worker wall times are I/O time,
 not CPU. Heap profiles (`cf workers versions profile --profile-type heap`) are captured while a scan runs. They are
 allocation sampling (`alloc_objects`, `alloc_space` over the capture window), not in-use memory, so they show where
-bytes are allocated, not the peak; the evidence for bounded memory is the outcome (no `exceededMemory`) on a pack many
-times the isolate's 128 MB. Each report records the Worker version, the ply commit it was built from (`/health`
+bytes are allocated, not the peak; the survival evidence is the `ok / n` column on a pack many times the
+isolate's 128 MB: a request whose stream ends without its final line (as one the platform kills would) counts as not ok
+(`truncated` in the JSON), though the report does not say why. Each report records the Worker version, the ply commit it was built from (`/health`
 `x-memlab-ply`) and the configured CPU limit (`x-memlab-cpu-limit-ms`, 300,000 ms).
 
 ## Run

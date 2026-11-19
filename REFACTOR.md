@@ -1,5 +1,8 @@
 # The refactor: target and gates
 
+Finished: the cut-over landed in 0.2.0 (7b0d5ba, 2026-11-01). Kept as the record of the plan and of its visible
+changes; the "Today" column and the step notes are as of the plan and were not rerun.
+
 The rules are `docs/STACK.md` ("Rules for code in src/", "Absence", "Public API policy"). This file is the finish
 line in numbers, and the order the work lands in. Pre-1.0 and breaking by design: no compat shims.
 
@@ -10,7 +13,7 @@ line in numbers, and the order the work lands in. Pre-1.0 and breaking by design
 | 1 | No platform absence outside `src/absent.ts`: no `undefined`, `?:`, `?.`, `??` | `scripts/absence-ratchet.mjs` (in `npm run typecheck`) | **met** (a7982c0): 308/375/146/260 → 0/0/0/0 |
 | 2 | Errors are values: `throw` only for `assertNever`, an `internal` invariant, a stream's own protocol, and a caller's callback's value passed back | `scripts/throw-ratchet.mjs` (in `npm run typecheck`) | **met**: 377 → 23 (every one of those four kinds; no throwing wrapper is left) |
 | 3 | Every switch or tag chain over a closed union ends in `assertNever` | `scripts/exhaustive.mjs` (in `npm run lint`) | holds |
-| 4 | The public API returns `Result` (0.2.0), ply-web updated in the same window | the bundle and type tests on `dist/` | **met** in ply (rounds A–D); ply-web must switch before this lands on main |
+| 4 | The public API returns `Result` (0.2.0), ply-web updated in the same window | the bundle and type tests on `dist/` | **met** in ply (rounds A–D), on main since 7b0d5ba; the plan required ply-web to switch first |
 | 5 | Every gate CI runs is green on every commit to main | `.github/workflows/ci.yml`, all 26 jobs | the rewrite left 23 red. Locally on ef29502 every gate passes but `push-ng` (local git 2.43; fails identically on the untouched pre-rewrite tag; CI runs 2.56) |
 
 ## The one edge
@@ -42,8 +45,8 @@ tagged unions.
 4. **Leftovers**: LsRef total, OrMissing deleted, honest Result/wrapper names (ec02ad6, 3814e4a). Done.
 5. **Cut-over** (STACK.md step 3), bottom-up so a function's callers convert after it: round A codecs and validation;
    round B protocol, transport and `operation()`; round C the entries (write, read, merge in parallel); round D
-   delete `thrown`/`orThrow`, 0.2.0, docs. Tests keep their assertions through `test/unwrap.js`. Done. ply-web
-   switches `catch` for an exhaustive `switch (r.error.code)` before this lands on main.
+   delete `thrown`/`orThrow`, 0.2.0, docs. Tests keep their assertions through `test/unwrap.js`. Done (7b0d5ba).
+   The plan had ply-web switch `catch` for an exhaustive `switch (r.error.code)` before this landed on main.
 
 ## Visible changes so far (callers can observe these)
 

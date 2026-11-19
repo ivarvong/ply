@@ -15,7 +15,7 @@
 // Decisions and the public functions (fileEntries, buildTree, validateTreeSpec, pushTree) return Result.
 import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
-import { operation, verifyRef } from './operation.js';
+import { operation, verifyPushed } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { objectAt, treeEntries } from './fetch.js';
 import { push, ZERO_OID } from './push.js';
@@ -416,7 +416,7 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions &
     if (!sent.ok) return sent;
     const pushed = sent.value;
     for (const tr of s.built.trees.values()) cache.set(tr.oid, tr.data);
-    if (verify) { const seen = await verifyRef(t, root, 'git.push_tree', s.ref, newCommit); if (!seen.ok) return seen; }
+    if (verify) { const seen = await verifyPushed(t, root, { prefix: 'git.push_tree', ref: s.ref, expected: newCommit }, pushed.readBack); if (!seen.ok) return seen; }
     return outcome('ok', summarize({ s, parent, oldTree, hint, attempt }, { newCommit, sel, pushed, treesRead: known.read }), { 'git.push_tree.push.bytes': pushed.packBytes, 'git.push_tree.push.objects': pushed.entries.length });
     })();
     if (!done.ok) tagAttempt(done.error, attempt, hint);

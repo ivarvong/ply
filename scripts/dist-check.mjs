@@ -18,11 +18,16 @@
 // tsc is the judge: the declarations may name only types every one of these environments declares. The type packages
 // are exact-pinned devDependencies (types-node-20 and types-node-22 are npm aliases of @types/node, named outside
 // @types so no tsconfig picks them up by accident). No variant can be skipped: a missing package is an error.
+//
+// `--tarball <file>` judges a packed tarball instead of a fresh build: it is installed with `npm install
+// --ignore-scripts` (scripts/pack-check.mjs installTarball) and the installed node_modules/ply is what the load and
+// every variant see (scripts/release-prepare.mjs runs this on the release artifact).
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, cpSync, symlinkSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { installTarball } from './pack-check.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TSC = join(REPO, 'node_modules', '.bin', 'tsc');
@@ -75,6 +80,12 @@ export function buildConsumer() {
   return { dir, ply, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
+// ply as a consumer installs it from a tarball, lifecycle scripts off; the same shape buildConsumer returns.
+export function tarballConsumer(tarball) {
+  const installed = installTarball(tarball);
+  return { dir: installed.dir, ply: join(installed.dir, 'node_modules', 'ply'), cleanup: installed.cleanup };
+}
+
 const LOAD = "const m = await import('ply'); if (!m.Tracer || !m.RETRY) { console.error('dist-check: the built ply does not export Tracer and RETRY'); process.exit(1); }";
 
 // Import the build the way a consumer does. Returns the exit status (0 when both exports are there).
@@ -124,7 +135,9 @@ export function compileVariant(consumer, variant) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const consumer = buildConsumer();
+  const given = process.argv.indexOf('--tarball');
+  const consumer = given > 0 ? tarballConsumer(resolve(String(process.argv[given + 1]))) : buildConsumer();
+  if (given > 0) console.log(`dist-check tarball ${resolve(String(process.argv[given + 1]))}`);
   let failed = false;
   try {
     const loaded = loadConsumer(consumer);

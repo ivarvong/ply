@@ -27,7 +27,7 @@ import { withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { push, ZERO_OID } from './push.js';
 import { parseOid } from './oid.js';
-import { operation, verifyRef } from './operation.js';
+import { operation, verifyPushed } from './operation.js';
 import { encodeTag, hashObject, ident, TYPE } from './objects.js';
 import { validatePushRef, validateMessage } from './validate.js';
 import { resolveCommit } from './read.js';
@@ -71,7 +71,7 @@ async function createRef({ t, root }: Pick<OpContext, 't' | 'root'>, { prefix, r
     const tip = refOid(now.value.refs, ref);
     return tip.tag === 'some' ? exists(ref, tip.value) : pushed;
   }
-  if (verify) { const seen = await verifyRef(t, root, prefix, ref, newOid); if (!seen.ok) return seen; }
+  if (verify) { const seen = await verifyPushed(t, root, { prefix, ref, expected: newOid }, pushed.value.readBack); if (!seen.ok) return seen; }
   return ok(pushed.value.packBytes);
 }
 

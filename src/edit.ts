@@ -8,7 +8,7 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
-import { operation, verifyRef } from './operation.js';
+import { operation, verifyPushed } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, objectAt, spInit, spStep, spFinish, treeEntries } from './fetch.js';
 import { push, ZERO_OID } from './push.js';
@@ -583,7 +583,7 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
     if (!pushed.ok) return pushed;
     // report-status is the only receipt git offers, and a middlebox can forge it. verify: re-read the ref (one ~100 B
     // roundtrip) and require it to be our commit; a mismatch is 'ambiguous' (the push was acknowledged but not observed).
-    if (verify) { const seen = await verifyRef(t, root, 'git.edit', s.ref, built.newCommit); if (!seen.ok) return seen; }
+    if (verify) { const seen = await verifyPushed(t, root, { prefix: 'git.edit', ref: s.ref, expected: built.newCommit }, pushed.value.readBack); if (!seen.ok) return seen; }
     const { packBytes } = pushed.value;
     return outcome('ok', summarize({ oldCommit, commit, blob, hint, attempt }, { newCommit: built.newCommit, newTree: built.newTree, trees: built.trees, pushBytes: packBytes }), { 'git.edit.push.bytes': packBytes, 'git.edit.push.ratio': packBytes / Math.max(1, blob.newLen) });
     })();

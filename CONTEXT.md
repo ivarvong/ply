@@ -2,10 +2,14 @@
 
 This is the hand-over document: what ply is, how it is put together, how it was built, every decision that matters and
 the evidence behind it, how to verify all of it again, and what is still open. README.md is the user-facing guide;
-SAFETY.md is the invariant ledger (each claim, the test that proves it, the findings and the run record). This file is the
+SAFETY.md is the invariant ledger (each claim, the test that checks it, the findings and the run record). This file is the
 map between them.
 
-As of 2026-10-20: 35 modules in `src/` (3,606 lines), 113 deterministic tests in 19 suites plus 16 fuzz stages in
+Parts of this file are a dated record and are kept as written: this paragraph, §4 (timeline), §7 (numbers), §8 (gaps)
+and §9 (export) describe the project on 2026-10-20. §5 and §6 have been updated since. The current module map is
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) "Layers".
+
+On 2026-10-20 (historical): 35 modules in `src/` (3,606 lines), 113 deterministic tests in 19 suites plus 16 fuzz stages in
 `npm test` (≈29 min, all green), 100% line coverage of `src/` (2,461 lines, `npm run coverage`, reproducible seeds).
 
 ---
@@ -28,7 +32,8 @@ HTTP (protocol v2 for fetch, v0 receive-pack for push) — with no clone, no wor
 
 What it does:
 
-- **Edit one file in a huge repository in O(1) memory**: ls-refs → fetch the commit (`tree:0`, depth 1) → one tree per
+- **Edit one file in a huge repository without holding the file** (memory does not grow with the blob's size; the
+  commit and every tree on the path are held whole: [docs/EVIDENCE.md](docs/EVIDENCE.md) §1): ls-refs → fetch the commit (`tree:0`, depth 1) → one tree per
   path level → stream the blob through inflate, find/replace and SHA-1 without holding it → push a thin pack whose blob is
   a delta against the old one (hundreds of bytes for a one-line change in a multi-GB repo). Compare-and-swap on the ref:
   a lost race is `cas_conflict`, never a clobber. Optional SSH commit signing, verification read-back, LFS-pointer guard.
@@ -36,59 +41,50 @@ What it does:
   cherry-pick, revert — all on one three-way tree merge plus a line merge ported from git's xdiff, so clean results are
   byte-for-byte what `git merge-tree` produces.
 - **A general client** (ls-refs, fetch/negotiate, push, discovery) for everything else, tree-shakeable so an edit-only
-  Worker carries ~42.6 KB minified.
+  Worker does not carry the general client (`test/bundle.test.js` asserts which modules each entry's bundle carries).
 - **Telemetry**: OTLP/JSON spans for every wire round trip and every operation, with bounded events, measured vs
   estimated CPU, cache status, retry links.
 
-Design constraints, held throughout: zero runtime dependencies; Web APIs only in `src/` (no `node:` imports — checked by
-the bundle test); pragmatic functional style (pure step functions and state machines, effects at the edges, free
-functions over classes so bundlers can drop what you do not import); every wire-sized allocation bounded by `limits.js`;
-every error typed (`errors.js`, one table with a retry policy).
+Design constraints, held throughout: zero runtime dependencies; Web APIs only in `src/` outside the three Node
+adapters (`tree-node.ts`, `checkout-node.ts`, `repo-node.ts`; checked by the bundle test); pragmatic functional style (pure step functions and state machines, effects at the edges, free
+functions over classes so bundlers can drop what you do not import); every wire-sized allocation bounded by `limits.ts`;
+every error typed (`errors.ts`, one table with a retry policy).
 
 ## 2. Map of the code
 
-Layers, bottom up (each depends only on the ones below):
-
-| Layer | Modules | Notes |
-|---|---|---|
-| Codecs (pure) | `bytes`, `pktline`, `inflate`, `sha1`, `objects`, `deltaenc`, `pack`, `packresolve`, `validate` | streaming where it matters (inflate reports bytes consumed; SHA-1 is incremental) |
-| Errors & limits | `errors`, `errors-doc`, `limits` | 27 codes, each with a retry policy (`yes`/`fresh`/`no`/`read`); docs kept apart so the edit bundle does not carry them |
-| Transport contract | `transport`, `http` | a transport is a plain record `{ frames(service, body, span, hints), advertise(service, span) }`; one implementation (HTTP), no dispatch |
-| Protocol | `lsrefs`, `fetch`, `fetchpack`, `negotiate`, `push`, `receivecaps`, `discover`, `packcache` | v2 fetch as a pure state machine (`v2Init`/`v2Step`); push report parsing pure |
-| Operations | `operation`, `edit`, `tree`, `checkout`, `log`, `merge`, `linemerge`, `attributes`, `rebase`, `sign` | `operation()` owns the root span, transport, outcome and the "after an acknowledged push, any read-back failure is `ambiguous`" rule |
-| Entry points | `edit.js` (edit-only bundle), `tree.js` (whole-tree push), `checkout.js` (whole-tree read), `index.js` (everything), `client.js` (`GitHttp` convenience wrapper); Node-only adapters outside every Workers bundle: `tree-node.js` and `checkout-node.js` (`node:fs`) | `sideEffects: false` |
-| Telemetry | `otel` | minimal OTLP/JSON tracer; exporters pluggable (`test/jsonl.mjs` for files) |
+The layer table is [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) "Layers" (this section's 2026-10-20 table was
+removed: its module names and counts no longer matched `src/`).
 
 Key operation modules:
 
-- `edit.js` — `editFile(url, spec, opts)`: find/replace in one path, create-on-branch (`ref` + `base`), head hint (ls-refs in
+- `edit.ts` — `editFile(url, spec, opts)`: find/replace in one path, create-on-branch (`ref` + `base`), head hint (ls-refs in
   parallel with a speculative commit fetch), pack cache, signing, verify, LFS guard.
-- `tree.js` — `pushTree(url, spec, opts)`: a caller-given file set (object, Map or iterable of `{ path, mode, data|oid }`,
+- `tree.ts` — `pushTree(url, spec, opts)`: a caller-given file set (object, Map or iterable of `{ path, mode, data|oid }`,
   symlinks 120000, gitlinks 160000) as one commit, with editFile's head hint, fresh `cas_conflict` retry, `strictHead`,
   `verify`/`ambiguous`, signing and tree cache. Thin repeat pushes: the parent's trees are read only where the new tree
-  differs, known blobs are not sent, changed trees go as `REF_DELTA`s. `tree-node.js` (`filesFromDir`, `pushDir`) is the
+  differs, known blobs are not sent, changed trees go as `REF_DELTA`s. `tree-node.ts` (`filesFromDir`, `pushDir`) is the
   Node directory walk. Issue #11.
-- `checkout.js` — `checkoutTree(url, { ref, path }, opts)`: the mirror of pushTree. ls-refs → one `blob:none` fetch of the
+- `checkout.ts` — `checkoutTree(url, { ref, path }, opts)`: the mirror of pushTree. ls-refs → one `blob:none` fetch of the
   commit (every tree) → blobs in `batch`-sized wants lists (buffered, delta-resolved, keyed by computed hash; an unwanted
-  object is `pack_corrupt`), a batch over a cap split in half down to single blobs that stream through read.js's
+  object is `pack_corrupt`), a batch over a cap split in half down to single blobs that stream through read.ts's
   `openBlob`; a host refusing many wants gets one per request (`quirks.blobWants`). Returns `entries` and a `files` async
-  iterator. `checkout-node.js` (`writeFiles`, `checkoutDir`) writes a directory as `git clone` lays it out and never
+  iterator. `checkout-node.ts` (`writeFiles`, `checkoutDir`) writes a directory as `git clone` lays it out and never
   writes through a symlink. Issue #12.
-- `log.js` — `readLog(url, { ref, limit }, opts)`: first-parent history (`git rev-list --first-parent -n`) from one
+- `log.ts` — `readLog(url, { ref, limit }, opts)`: first-parent history (`git rev-list --first-parent -n`) from one
   `deepen <limit>` fetch through `fetchPackTree0` (`tree:0`, else `blob:none` with the trees harvested). `logWindow` (pure)
   holds the window to the #37 deepen contract (the want present; every commit an ancestor; a missing parent only under a
   `shallow` line, else `pack_corrupt`) and sets `truncated` from the last commit's parents. No `path` filter. Issue #56.
-- `merge.js` — `mergeBranch`, `fastForward`, `deleteRef`, `mergeTrees` (trivial-merge rules per directory, only differing
+- `merge.ts` — `mergeBranch`, `fastForward`, `deleteRef`, `mergeTrees` (trivial-merge rules per directory, only differing
   subtrees fetched), `bestBases` (git's `merge-base --all` with a completeness check), rename guards, `blobMerger`,
   `attributeDrivers`/`attributeTree`.
-- `linemerge.js` — port of git's xdiff as merge-ort drives it: histogram diff (+ hash-chain limit), classic Myers fallback
+- `linemerge.ts` — port of git's xdiff as merge-ort drives it: histogram diff (+ hash-chain limit), classic Myers fallback
   (prepare-stage trim/cleanup, `xdl_split` heuristics), group compaction (+ git 2.54's shifted-group re-diff), build
   script, `xdl_do_merge`, conflict refinement and simplification, fill (clean and `merge=union`). Its diff work is
   counted (every inner-loop iteration of the histogram scan and the classic fallback, on the module's own counter)
   against `limits.maxMergeWork`, absolute per merged file: past it the file is a conflict with reason `too large to
   merge`, as one over `maxMergeBlobBytes` is, never a different merge.
-- `attributes.js` — `.gitattributes` as git reads them: parse, wildmatch, precedence, macros.
-- `rebase.js` — `rebaseBranch` (per-commit or squash), `cherryPick`, `revertCommit` on the same merge primitive.
+- `attributes.ts` — `.gitattributes` as git reads them: parse, wildmatch, precedence, macros.
+- `rebase.ts` — `rebaseBranch` (per-commit or squash), `cherryPick`, `revertCommit` on the same merge primitive.
 - `repo-node.ts` — `pushRepo(dir, url, { refspecs, all, tags, force, dryRun, thin }, opts)`: `git push` of a local
   repository with its history, no git binary (`ply/repo-node`, Node only). Reads `.git` itself (packs resolved in
   memory, loose objects hash-checked, packed and loose refs), one ls-refs, one receive-pack for every command; the pack is
@@ -107,7 +103,7 @@ Key operation modules:
 `verify-commit`, `ssh-keygen -Y verify`, `index-pack`, `pack-objects`. A second git (master, 2.56, built from source) is
 used wherever behaviour differs by version.
 
-**Evidence before claims.** A claim goes into SAFETY.md only with the test that proves it. When a test fails, the first
+**Evidence before claims.** A claim goes into SAFETY.md only with the test that checks it. When a test fails, the first
 question is whether the oracle or the code is wrong; several "failures" were the oracle (e.g. `git diff -U0` trims the
 common tail; a fast-forward merge where a merge commit was intended; a tie in parent order hiding a bug) and were fixed
 there, with the reason written down.
@@ -128,12 +124,16 @@ input (9 of about 36 000 calls with no ply code loaded, 0 of 13 000 from a file)
 files, merge-attribute conflicts, Myers heuristic splits, mxcost cutoffs), so a green run is known not to be vacuous.
 A first run with zero differences is treated with suspicion until the counters show the hard paths ran.
 
-**Tree-shaking is asserted** (`test/bundle.test.js`: esbuild metafile module lists, symbol greps, byte budgets).
+**Tree-shaking is asserted** (`test/bundle.test.js`: esbuild metafile module lists and symbol greps; byte sizes are
+printed, not gated).
 
 **Constraints in force**: nothing was ever pushed to GitHub (the push side against GitHub is unexercised by design, pending
 real keys); the user's email address is used only to identify the user and is not written into the project.
 
 ## 4. Timeline
+
+A dated record (to 2026-10-20), kept as written. "O(1) memory" in item 1 is the edit's bound in the blob's size only;
+the commit and the trees on the path are held whole ([docs/EVIDENCE.md](docs/EVIDENCE.md) §1).
 
 Earlier sessions (summarised; details in SAFETY.md):
 
@@ -183,6 +183,7 @@ This session (2026-10-19 → 20):
 | Transport = plain record with two methods; HTTP implements it | operations never branch on transport; an SSH transport was added (and removed 2026-10-31, archive/ssh) with zero changes above the contract |
 | Errors: one table, codes validated at throw | retry policy is data; tests check docs ↔ table ↔ literals in source stay aligned |
 | After an acknowledged push, any read-back failure → `ambiguous` | the push may have landed; a transport code would invite a wrong retry (I25) |
+| An empty band 3 (Artifacts under a same-ref race, F34 / #225) is settled from the ref only where the read proves it: tip = pushed commit, or pushed commit an ancestor of the tip → landed; ref moved and does not hold it → `cas_conflict`; ref unmoved, or the walk (≤ `maxPushSettleCommits` commits) cannot finish → `ambiguous` | #225 called every tip but the pushed commit `cas_conflict`: a push that landed and was then built on by another writer came back as a conflict, and the `fresh` retry applied the change twice. An unmoved ref is not a refusal either (the update can still be applied). The walk reads commits one at a time with `objectAt` so the edit and tree bundles carry no buffered fetch. SAFETY I36, `test/push-band3-settle.test.js` |
 | Pack cache keyed by sha256(url, credential, body), wants-only | measured against GitHub: wants-only fetches are deterministic; the store side is verified while streaming (O(chunk) state: framing, no ERR, pack trailer SHA-1), a HIT is served unparsed and the client's parse is the check: poison → bust + one retry |
 | Merge = tree merge + ported line merge, never "close enough" | clean results must equal `git merge-tree` byte for byte; anything uncertain is a conflict (superset) |
 | Line merge work is budgeted: `maxMergeWork` steps per merged file (2^32 default, 2^26 in `WORKER_LIMITS`) | git's histogram diff is O(n²) on inputs well under the byte cap; over the budget is a conflict (`too large to merge`), the one place we conflict where git merges cleanly (I27). Default: what git merges in about 5 s here, pair swaps and bulk edits both (2^31 refused a 130,000-line bulk edit git merges in 4.1 s); Worker: about 1 s of counted work |
@@ -190,9 +191,9 @@ This session (2026-10-19 → 20):
 | `rediff` option, default `myers` | git changed behaviour in 2.54; both are git; default follows current git, `skip`/`undecided` documented |
 | Merge base = git's best common ancestors, deepen until complete; criss-cross refused | the old "closest" rule produced wrong merges (shown); a single base cannot reproduce git's virtual base |
 | `attributes` option, default `null` | measured: git 2.43 bare repos read HEAD's attributes, 2.46+ read none — there is no single "git's answer"; the caller names the source |
-| Merge bundle budget 66 KB (edit bundle 44 KB) | line merge ≈ 10.4 KB and attributes ≈ 5.5 KB are deliberate; the edit path carries neither (asserted) |
+| Merge bundle budget 66 KB (edit bundle 44 KB) (2026-10-20; sizes are now printed, not gated: `test/bundle.test.js`) | line merge ≈ 10.4 KB and attributes ≈ 5.5 KB are deliberate; the edit path carries neither (asserted) |
 | Git's GPL test vectors (t3070) run once, not shipped | licence; the result (380/380) is recorded in SAFETY.md |
-| pushTree takes files as data; the directory walk is a separate Node module (`ply/tree-node`); likewise checkoutTree yields streams and `ply/checkout-node` writes them | `src/` stays Web-APIs-only for Workers; the bundle test asserts `node:` appears only in `tree-node.js` and `checkout-node.js` |
+| pushTree takes files as data; the directory walk is a separate Node module (`ply/tree-node`); likewise checkoutTree yields streams and `ply/checkout-node` writes them | `src/` stays Web-APIs-only for Workers; the bundle test asserts `node:` appears only in `tree-node.ts`, `checkout-node.ts` and `repo-node.ts` |
 | pushTree's "server has it" set = oids named by the parent's trees it read | exact for one-commit deploys (push 2 == `git rev-list --objects new ^old`, 7 objects / 1,176 B on a 208-entry tree); objects only in older history are resent — correct, not minimal, no history walk |
 | checkoutTree fetches every tree in one `blob:none` pack, then blobs by wants list | 3 requests for a 22-entry fixture vs 72 for readCommit → listTree → readFile per file; `blob:none` is the one filter Artifacts serves, so the same 3 there. A `path` still fetches the whole commit's trees (one round trip beats a tree:0 walk; bounded by `maxPackBytes`) |
 | blob:none fallback: the caller's limits bind what it asked for; an extra over a limit is dropped, a malformed one fails the fetch | a tree:0 server never sends the extras, so failing on an honest big sibling directory made the answer depend on the host (#46: curl on Artifacts, 2,135-entry tests/data vs a 2,000 limit, 413 on every page); a malformed object means the response is untrusted (#18). Dropped extras are refetched as wanted objects if ever read. SAFETY I30 |
@@ -219,7 +220,7 @@ This session (2026-10-19 → 20):
 
 ## 6. Verification — how to rerun everything
 
-Requirements: Node ≥ 22, git ≥ 2.43 on PATH, OpenSSH `ssh-keygen` for the signing suites, `workerd` (npm,
+Requirements: Node 22 (what CI runs the suites on; the package declares `engines.node` `>=20`), git ≥ 2.43 on PATH, OpenSSH `ssh-keygen` for the signing suites, `workerd` (npm,
 pinned) for the Workers suite (skipped if absent).
 
 Before every push, run the fast gate. It is what CI's `lint + fuzz` job and the registry test reject first:
@@ -231,6 +232,10 @@ and `notify-ply-web` tells ply-web about a commit only after `ci` passed for tha
 ```sh
 npm run check             # typecheck + lint + registry test + dist check; run before every push
 ```
+
+Release preparation is separate from this gate: `npm run release:prepare` builds a versioned tarball, its checksum and
+provenance from a clean commit and runs the pack and dist checks on that file; it never publishes (docs/RELEASING.md,
+docs/COMPATIBILITY.md, CHANGELOG.md).
 
 A ratchet baseline (`scripts/throw-baseline.json`, `scripts/absence-baseline.json`, `test/space/ratchet.json`,
 `test/durations.json`) moves the unsafe way only in a commit whose message has the line
@@ -264,10 +269,10 @@ verdicts.
 
 ```sh
 npm ci
-npm test                  # 113 deterministic tests + 16 fuzz stages (≈29 min)
-npm run coverage          # line coverage of src/, seeds pinned (expects 100%)
+npm test                  # every vitest file under the fail-site recorder, the fail-site gate, the pinned fuzz stages
+npm run coverage          # line coverage of src/, seeds pinned (prints the percentage; does not fail on it)
 npm run fuzz:long         # the long campaigns
-npm run test:push-full    # the full push matrix (1,400 cells)
+npm run test:push-full    # every cell of the push matrix (npm test samples 1 in 8)
 ```
 
 Individual oracles (each prints a repro on failure):
@@ -381,6 +386,8 @@ that did not hold at real sizes.
 
 ## 7. Numbers (2026-10-20)
 
+Historical, kept as written. The bundle sizes are superseded: `test/bundle.test.js` prints the current ones.
+
 - Bundles (esbuild, minified): edit 42.6 KB (16.5 KB gz); merge 63.9 KB; full 116 KB.
 - Line merge: 0 wrong across >40,000 random merges against 2.43 and 2.56; union 5,280 byte-identical; diff hunks identical
   on >1,400 diffs incl. 947 Myers heuristic splits and 160+ mxcost cutoffs.
@@ -389,6 +396,10 @@ that did not hold at real sizes.
 - Coverage: 100% of 2,461 lines.
 
 ## 8. Open gaps and next steps
+
+As of 2026-10-20, kept as written; open work is tracked in the repository's issues. Since then, annotated tags
+(`createTag`, `src/refops.ts`) and multi-file edits on the parent tree (`commitChanges`, `src/changes.ts`) were
+built.
 
 In order of value:
 
@@ -408,6 +419,8 @@ In order of value:
    trees, and checkout into a non-empty directory.
 
 ## 9. What is in this export
+
+The 2026-10-20 export, kept as written.
 
 ```
 ply-export/

@@ -3,6 +3,9 @@
 // environment behind Basic auth. git is only the judge: push → checkout must give back the source directory byte for
 // byte with its modes and symlinks; `git clone` of the remote must equal the source; a repeat with nothing changed is a
 // noop and a one-file change sends one blob, the trees on its path and the commit.
+// examples/recover-push.mjs is run the same way with git added to its PATH: it starts its own `git http-backend`, injects
+// its own races and lost answers, and asserts every case itself (file bytes, parents, one application), so here it has
+// to exit 0 and print each case's typed outcomes.
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join, dirname } from 'node:path';
@@ -134,4 +137,19 @@ test('examples: push-repo with only node on PATH: first push, incremental, up to
   assert.equal(git(bare, ['cat-file', '-t', 'v1']).trim(), 'tag');
   fsckBare();
   for (const ref of ['refs/heads/main', 'refs/heads/rewound', 'refs/tags/v1']) assert.equal(rev(bare, ref), rev(local, ref.replace('rewound', 'main')), ref);
+});
+
+test('examples: recover-push holds every recovery case (pinned conflict, lost answer, moved tip, and the two it cannot establish)', async () => {
+  // git is this example's server and judge, so its PATH has git too; the pushes are still ply's
+  const out = await run('recover-push.mjs', [], { PATH: `${bin}:${process.env.PATH}` });
+  const cases = out.trimEnd().split('\n').filter(l => !l.startsWith('   ')).map(l => l.split(':')[0]);
+  assert.deepEqual(cases, ['1  pinned writers', '1b unpinned writer (contrast)', '2  answer lost, push landed', '2b answer lost, push did not land', '3  answer lost, push landed, ref moved on', '3b answer lost, ref rewritten', '3c answer lost, push landed, merged in as a second parent', 'all cases hold']);
+  assert.deepEqual(out.split('\n').filter(l => l.startsWith('   ')).map(l => l.trim()), [
+    'outcomes: cas_conflict -> ok; state: landed',
+    'outcomes: ambiguous -> settle:landed; state: landed',
+    'outcomes: ambiguous -> settle:not_landed -> ok; state: landed',
+    'outcomes: ambiguous -> settle:landed; state: landed',
+    'outcomes: ambiguous -> settle:unknown; state: unknown',
+    'outcomes: ambiguous -> settle:unknown; state: unknown',
+  ]);
 });

@@ -15,7 +15,7 @@ import { measurePack, streamPack, streamSource } from './packwrite.js';
 import type { MeasuredPack, StreamedPack } from './packwrite.js';
 import { frames, coded, clientSpan, spanned, wrapNet, UA } from './transport.js';
 import { limitExceeded, parseLimits } from './limits.js';
-import type { LimitsInput } from './limits.js';
+import type { CheckedLimits, LimitsInput } from './limits.js';
 // oxlint-disable-next-line import/max-dependencies -- the push path: framing, pack writer, transport, limits, validation, the parsed brands, Result
 import { validatePushRef, validateWire } from './validate.js';
 import type { WireField } from './validate.js';
@@ -78,11 +78,12 @@ import type { Frame, RequestBody, Scrub, SpanOpts, Transport } from './transport
 import type { PktState } from './pktline.js';
 import type { PackInput, BuiltEntry } from './pack.js';
 import { WHOLE, inputBase, typeNameOf } from './pack.js';
-import { hashObject } from './objects.js';
+import { hashObject, parseCommit, TYPE } from './objects.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
 import { at, atOr, field, fromNullish, isMissing, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
+import { objectAt } from './fetch.js';
 import type { LsRefsResult } from './lsrefs.js';
 
 // local sideband parser to reduce dependencies
@@ -518,7 +519,10 @@ export type PushConfig = {
 };
 export type PushOptions = Input<PushConfig>;
 const pushDefaults = (): { -readonly [K in keyof PushConfig]: PushConfig[K] } => ({ ref: null, oldOid: '', newOid: '', objects: [], commands: null, sideband: true, reportV2: false, checked: null });
-export type PushResult = { readonly report: PushReport | null; readonly packBytes: number; readonly entries: readonly PackEntry[]; readonly hookOutput: string };
+// `readBack`: null for a push its report settled. A push answered with an empty band 3 and settled by reading the ref
+// (resolveAmbiguousByTip) carries the tip that was read: newOid itself, or a commit newOid is an ancestor of (the ref
+// moved on after the push landed). verifyRef takes it as the read-back already made.
+export type PushResult = { readonly report: PushReport | null; readonly packBytes: number; readonly entries: readonly PackEntry[]; readonly hookOutput: string; readonly readBack: string | null };
 
 // The request, planned before anything is built or sent (pure): every refusal here happens with nothing on the wire.
 export type PushPlan = { readonly commands: ParsedCommands; readonly caps: readonly string[]; readonly checked: CheckedCaps | null; readonly pushOptions: readonly WireField[]; readonly needPack: boolean; readonly maxReportLines: number; readonly maxReportReason: number; readonly maxReportProgress: number; readonly maxPack: number; readonly objects: readonly PackObject[]; readonly sideband: boolean };
@@ -820,12 +824,97 @@ const bodyOf = (plan: PushPlan, packed: MeasuredPack | null): Result<Body, Error
   return ok({ body: streamed, streamed });
 };
 
-// After a sideband band-3 report (often empty under Artifacts), a single-ref update can still be named: read the tip.
-// At our newOid → the push landed (report lost). Anywhere else → cas_conflict (lost the CAS / refused).
-// Multi-ref and deletes stay ambiguous: the tip alone does not name which command acted. Observed 2026-11-08 on
-// Cloudflare Artifacts under a same-ref race (phase6 F34): band 3 + empty report → was HTTP 502 `ambiguous`.
-// finishPush gates on isEmptyBand3Ambiguous so non-empty band 3 / cut / drop / verify stay ambiguous.
-async function resolveAmbiguousByTip(t: PushTransport, span: Span, plan: PushPlan, ambiguous: PlyError): Promise<Result<PushReport, PlyError> | null> {
+// ---- an empty side-band band 3, settled by reading the ref (F34) ----
+// Cloudflare Artifacts answers a push that lost a same-ref race with band 3 and no report (observed 2026-11-08). The
+// answer itself says nothing I36 can read, so the ref is read back and the push is named only where the read proves it:
+//
+//   the tip is newOid                                  landed (the report was lost)
+//   the tip is what the command expected (oldOid, or   ambiguous: the ref has not moved, so the update can still be
+//   no ref for a create)                               applied; nothing read here says it will not be
+//   the ref is gone (an update)                        cas_conflict: no ref holds the commit
+//   the tip is another commit T                        the commits from T are read, one at a time, until each line
+//                                                      of history ends at newOid, at a parent of newOid or at a root:
+//     newOid is an ancestor of T                       landed: the push was applied and the ref moved on after it
+//     every line ends, none at newOid                  cas_conflict: the ref moved and does not hold the commit, so
+//                                                      doing the change again on T applies it once
+//     anything else                                    ambiguous
+//
+// The walk answers only for a commit this push carried (carriedParents): newOid is then new with this push, so finding it
+// under T is this push (or an earlier send of the same commit) having landed, never history the ref already had, and
+// its parents are known without asking. A line of history that reaches a parent of newOid cannot reach newOid (a commit
+// is not its own ancestor), which is what lets the walk stop there instead of at a root. For an update one more thing
+// is asked before cas_conflict: that the walk met oldOid, so T is a tip that came after the one the push was made on.
+// A T that never meets it (a read that lags, a ref set back) says nothing about a push made on oldOid. Every commit
+// read is hash-checked against the id asked for (objectAt), so a line of history cannot be forged, only withheld, and
+// a commit that cannot be read leaves the answer ambiguous.
+// cas_conflict here is "the ref moved and does not hold newOid": a lost race, or a push that landed and was then
+// overwritten. The ref cannot tell those apart, and the retry is the same (`fresh`) and applies the change once.
+// Bounded: at most limits.maxPushSettleCommits commits read (each one fetch of one commit, under the transport's own
+// limits, timers and signal); past it, or on any failed read, the outcome stays ambiguous.
+// Multi-ref pushes and deletes stay ambiguous (one tip does not say which command acted), and so does every other
+// ambiguous answer: finishPush gates on isEmptyBand3Ambiguous.
+// null: not established (the bound, a commit that could not be read).
+type Reach = 'ancestor' | 'absent' | null;
+// The parents of the commit this push carries whole under the id `newOid`; null when it carries none (a pack the
+// caller built, a ref moved to an object the server already has, a tag, tree or blob).
+function carriedParents(plan: PushPlan, newOid: Oid, limits: CheckedLimits): readonly string[] | null {
+  for (const o of plan.objects) {
+    // the pack was built from these entries before the request (send), so each one's data is bytes
+    if (o.type !== TYPE.COMMIT || inputBase(o).tag !== 'none' || hashObject('commit', o.data) !== newOid) continue;
+    const commit = parseCommit(o.data, limits);
+    return commit.ok ? commit.value.parents : null;
+  }
+  return null;
+}
+// Stryker disable next-line ObjectLiteral: asked for as a commit or as any object, a tip that is not a commit ends the walk (objectAt refuses it, or parseCommit does)
+const AS_COMMIT = { expectType: TYPE.COMMIT };
+// Effect: is newOid an ancestor of `tip`? Reads commits from `tip` breadth-first, never past a parent of newOid
+// (`stops`). 'absent' for an update also needs oldOid met on the way (see above).
+async function reachFrom(t: PushTransport, tip: Oid, cmd: PushCommand, stops: ReadonlySet<string>): Promise<Reach> {
+  const max = t.limits.maxPushSettleCommits;
+  // Stryker disable next-line ArrayDeclaration: no commit under the tip names the tip (a commit is not its own ancestor)
+  const queued = new Set<string>([tip]);
+  const queue: Oid[] = stops.has(tip) ? [] : [tip];
+  let metOld = cmd.oldOid === ZERO_OID;
+  // the queue grows while it is read: every commit named by one already read, once
+  for (const [i, oid] of queue.entries()) {
+    if (i >= max) return null;
+    // An Err, or anything a transport of the caller's raises (objectAt reads the transport before its first await, so
+    // the call is made inside the promise): either is a commit that could not be read.
+    // oxlint-disable-next-line no-await-in-loop, typescript/promise-function-async -- one commit names the next: the walk is sequential; objectAt's promise, passed through
+    const got: Result<{ readonly data: Uint8Array }, unknown> = await Promise.resolve().then(() => objectAt(t, oid, AS_COMMIT)).then(r => r, (e: unknown) => err(e));
+    if (!got.ok) return null;
+    const commit = parseCommit(got.value.data, t.limits);
+    // Stryker disable next-line ConditionalExpression: unreachable, objectAt checked the commit it returned (assertFetched)
+    if (!commit.ok) return null;
+    for (const p of commit.value.parents) {
+      if (p === cmd.newOid) return 'ancestor';
+      if (p === cmd.oldOid) metOld = true;
+      if (!stops.has(p) && !queued.has(p)) { queued.add(p); queue.push(p); }
+    }
+  }
+  return metOld ? 'absent' : null;
+}
+// How the read-back settled it, for the span: `git.push.ambiguous.resolved`.
+//   landed, ancestor: the push landed (the tip is newOid; newOid is an ancestor of the tip)
+//   cas_conflict:     the ref moved and does not hold newOid
+//   unread, unchanged, unproven, unknown: still ambiguous (the ref could not be read; it has not moved; this push
+//                     carries no commit the walk could answer for; the walk could not be finished)
+type Settled = { readonly resolved: 'landed' | 'ancestor'; readonly tip: string } | { readonly resolved: 'cas_conflict' | 'unchanged' | 'unproven' | 'unknown'; readonly tip: string | null };
+async function settleByTip(t: PushTransport, plan: PushPlan, cmd: PushCommand, seen: string | null): Promise<Settled> {
+  if (seen === cmd.newOid) return { resolved: 'landed', tip: seen };
+  const expected = cmd.oldOid === ZERO_OID ? null : cmd.oldOid;
+  if (seen === expected) return { resolved: 'unchanged', tip: seen };
+  if (seen === null) return { resolved: 'cas_conflict', tip: seen };
+  const tip = parseOid(seen);
+  const parents = carriedParents(plan, cmd.newOid, t.limits);
+  if (!tip.ok || parents === null) return { resolved: 'unproven', tip: seen };
+  const reach = await reachFrom(t, tip.value, cmd, new Set(parents));
+  if (reach === 'ancestor') return { resolved: 'ancestor', tip: seen };
+  return { resolved: reach === 'absent' ? 'cas_conflict' : 'unknown', tip: seen };
+}
+// The push as the read-back names it; null leaves it ambiguous. An Ok carries the tip that was read (PushResult.readBack).
+async function resolveAmbiguousByTip(t: PushTransport, span: Span, plan: PushPlan, ambiguous: PlyError): Promise<Result<{ readonly report: PushReport; readonly readBack: string }, PlyError> | null> {
   if (plan.commands.length !== 1) return null;
   const [cmd] = plan.commands;
   if (cmd.newOid === ZERO_OID) return null;
@@ -835,15 +924,23 @@ async function resolveAmbiguousByTip(t: PushTransport, span: Span, plan: PushPla
     return null;
   }
   const tip = mapGet(read.value.refs, String(cmd.ref));
-  const seen = tip.tag === 'some' ? tip.value.oid : null;
-  const landed = seen === cmd.newOid;
-  span.set({ 'git.push.verify.ref': seen === null ? '' : seen, 'git.push.ambiguous.resolved': landed ? 'landed' : 'cas_conflict' });
-  if (landed) {
-    span.set({ 'git.push.ok': true, 'git.push.outcome': 'landed', 'git.push.ng.reason': '' });
-    return ok({ tag: 'statuses', refs: [{ ref: String(cmd.ref), ok: true as const, reason: '' as const }] });
+  const settled = await settleByTip(t, plan, cmd, tip.tag === 'some' ? tip.value.oid : null);
+  span.set({ 'git.push.verify.ref': getOrElse(fromNullish(settled.tip), ''), 'git.push.ambiguous.resolved': settled.resolved });
+  switch (settled.resolved) {
+    case 'landed':
+    case 'ancestor':
+      span.set({ 'git.push.ok': true, 'git.push.outcome': 'landed', 'git.push.ng.reason': '' });
+      return ok({ report: { tag: 'statuses', refs: [{ ref: String(cmd.ref), ok: true as const, reason: '' as const }] }, readBack: settled.tip });
+    case 'cas_conflict':
+      span.set({ 'git.push.ok': false, 'git.push.outcome': 'rejected', 'git.push.ng.reason': 'stale ref' });
+      return fail('cas_conflict', 'push rejected: stale ref', { expected: cmd.oldOid === ZERO_OID ? null : cmd.oldOid, actual: settled.tip, cause: ambiguous, original: 'ambiguous' });
+    case 'unchanged':
+    case 'unproven':
+    case 'unknown':
+      return null;
   }
-  span.set({ 'git.push.ok': false, 'git.push.outcome': 'rejected', 'git.push.ng.reason': 'stale ref' });
-  return fail('cas_conflict', 'push rejected: stale ref', { expected: cmd.oldOid === ZERO_OID ? null : cmd.oldOid, actual: seen, cause: ambiguous, original: 'ambiguous' });
+  // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(settled);
 }
 
 type FinishPush = {
@@ -857,7 +954,7 @@ type FinishPush = {
 
 // Tip read-back is only for empty sideband band 3 (Artifacts race: no report-status lines).
 // Band 3 with a remote message (credential echo, fatal text), cuts, drops, and forged-ok verify
-// stay ambiguous: cas_conflict would trigger edit's one retry and mis-name those outcomes.
+// stay ambiguous: nothing observed says what those answers mean for the ref.
 function isEmptyBand3Ambiguous(e: PlyError): boolean {
   // outcomeResult embeds why as: `push outcome unknown: remote: ${remote}: band 3`
   // empty remote (Artifacts) → trailing `remote: : band 3`.
@@ -866,11 +963,11 @@ function isEmptyBand3Ambiguous(e: PlyError): boolean {
 
 async function finishPush(ctx: FinishPush, res: Result<PushReport | null, PlyError>): Promise<Result<PushResult, PlyError>> {
   const { t, span, plan, packBytes, entries, hookOutput } = ctx;
-  if (res.ok) return ok({ report: res.value, packBytes, entries, hookOutput });
+  if (res.ok) return ok({ report: res.value, packBytes, entries, hookOutput, readBack: null });
   if (!isEmptyBand3Ambiguous(res.error)) return res;
   const resolved = await resolveAmbiguousByTip(t, span, plan, res.error);
   if (resolved === null) return res;
-  if (resolved.ok) return ok({ report: resolved.value, packBytes, entries, hookOutput });
+  if (resolved.ok) return ok({ ...resolved.value, packBytes, entries, hookOutput });
   return resolved;
 }
 

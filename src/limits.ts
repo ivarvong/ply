@@ -131,6 +131,14 @@ export const LIMIT_REPORT_REASON_BYTES_WORKER = 1024;
  */
 export const LIMIT_REPORT_PROGRESS_BYTES = 8_388_608;
 /**
+ * Commits read from a ref's tip to settle a push answered with an empty band 3 (push.ts settleByTip): is the pushed
+ * commit an ancestor of the tip another writer left? Each is one fetch of one commit (on a host that answers only
+ * blob:none, with that commit's trees), so this is also the bound on the requests the walk makes. A race loser's tip is
+ * one or two commits past the one it pushed on; 8 covers a burst of writers, and past it the push stays `ambiguous`.
+ * 0 reads none: every moved tip is then `ambiguous`.
+ */
+export const LIMIT_PUSH_SETTLE_COMMITS = 8;
+/**
  * Parents on one commit. An octopus is a handful; a commit that lists more parents than the ref cap is not
  * a history bestBases will walk.
  */
@@ -229,6 +237,7 @@ export type Limits = {
   readonly maxReportLines: number;
   readonly maxReportReasonBytes: number;
   readonly maxReportProgressBytes: number;
+  readonly maxPushSettleCommits: number;
   readonly maxCommitParents: number;
   readonly maxLsRefsBytes: number;
   readonly requestTimeoutMs: number;
@@ -279,6 +288,7 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
   maxReportLines: LIMIT_REPORT_LINES,
   maxReportReasonBytes: LIMIT_REPORT_REASON_BYTES,
   maxReportProgressBytes: LIMIT_REPORT_PROGRESS_BYTES,
+  maxPushSettleCommits: LIMIT_PUSH_SETTLE_COMMITS,
   maxCommitParents: LIMIT_COMMIT_PARENTS,
   maxLsRefsBytes: LIMIT_LS_REFS_BYTES,
   requestTimeoutMs: LIMIT_REQUEST_TIMEOUT_MS,

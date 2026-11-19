@@ -1,6 +1,6 @@
 # Stack
 
-A fast, small, proven core. The shipped code is TypeScript compiled to plain ESM; the verification around it
+A fast, small, tested core. The shipped code is TypeScript compiled to plain ESM; the verification around it
 (tests, spaces, fuzzers, mutation) can be as heavy as it needs to be, because none of it ships.
 
 | | Version | Role |
@@ -9,7 +9,7 @@ A fast, small, proven core. The shipped code is TypeScript compiled to plain ESM
 | oxlint + oxlint-tsgolint | 1.90.0 + 7.0.2005 | lint, type-aware rules (tsgolint runs TypeScript 7) |
 | vitest | 5.0.5 | test runner |
 | Stryker + vitest runner | 10.1.1 | mutation testing of `src/**/*.{js,ts}` |
-| esbuild | 0.28.2 | bundle budgets (test/bundle.test.js), the workerd test worker (test/workerd/build.mjs) |
+| esbuild | 0.28.2 | bundle contents and the size report (test/bundle.test.js), the workerd test worker (test/workerd/build.mjs) |
 
 Runtime dependencies: none, ever. Node ≥ 22.18 runs `src/*.ts` directly (type stripping) for tests and fuzzers;
 consumers get `dist/` (plain `.js` + `.d.ts`), so `engines.node` stays `>=20`.
@@ -105,7 +105,7 @@ hot loops (inflate, sha1, delta, pkt-line, the pack parsers) keep their block su
 6. **Bounds before allocation**, as before: every wire-driven size is checked against a `limits.*` value
    (`checkLimit`/`parseLimits` return `Result`; a caller's limits record is parsed once at the entry into a
    `CheckedLimits`, and code past it reads plain numbers) before a buffer exists.
-7. **Bundle budgets hold.** Types cost nothing; runtime helpers do. Prefer a type to a runtime check when the value
+7. **Keep bundles small.** `test/bundle.test.js` prints each entry's size and does not gate it. Types cost nothing; runtime helpers do. Prefer a type to a runtime check when the value
    is already trusted; mark unused-but-exported module-level calls `/* @__PURE__ */` so esbuild drops them.
 8. **Absence is a value.** See Absence below. Do not write the platform missing value, an optional member, optional
    chaining, or nullish coalescing outside `src/absent.ts`.
@@ -132,10 +132,10 @@ four numbers to `scripts/absence-baseline.json`. A rise fails. A drop fails unti
 
 ## Public API policy
 
-Today every public function throws a `PlyError`-shaped `Error`. **Decision: the public API returns `Result`** —
-`Promise<Result<T, PlyError>>` from `editFile`, `readFile`, `readLog`, `pushTree`, `checkoutTree`, `merge`, `rebase`,
-`fetch*`/`push`, the client. We are 0.x; the break is allowed, and ply-web (the consumer we own) is updated in the
-same step. Why: an exhaustive `switch (r.error.code)` at the call site is the point of the closed union; a `catch`
+**The public API returns `Result`** (since 0.2.0, 7b0d5ba; before it, every public function threw a
+`PlyError`-shaped `Error`): `Promise<Result<T, PlyError>>` from `editFile`, `readFile`, `readLog`, `pushTree`,
+`checkoutTree`, `merge`, `rebase`, `fetch*`/`push`, the client. We are 0.x; the break was allowed, with ply-web (the
+consumer we own) to switch in the same window. Why: an exhaustive `switch (r.error.code)` at the call site is the point of the closed union; a `catch`
 gets `unknown`.
 
 Migration path:
@@ -209,7 +209,7 @@ Gate, all green before opening the PR (paste the numbers into the PR body):
 - `npx vitest run <the test files that cover the cluster>`, then the full `npx vitest run`.
 - The fuzzers that exercise the cluster (`node --import ./test/ts-resolve.mjs test/fuzz/<f>.mjs …`, the same flags as
   `npm test`).
-- Bundle budgets: `npx vitest run test/bundle.test.js` passes, and the per-module bytes it prints for your files are
+- Bundle size: `npx vitest run test/bundle.test.js` passes, and the per-module bytes it prints for your files are
   ≤ before (types are free; a runtime helper must pay for itself).
 - Mutation on your files: `node scripts/mutate.mjs` (mutates only files changed against main) — no new survivors in a
   parser or bounds function; the score on your files does not drop.
