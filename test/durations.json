@@ -111,7 +111,7 @@
   "test/push-tree.test.js": 12,
   "test/push-unpack-host.test.js": 0,
   "test/push.test.js": 57,
-  "test/ratchets.test.js": 5,
+  "test/ratchets.test.js": 6,
   "test/read.test.js": 17,
   "test/readme-scanpack.test.js": 2,
   "test/rebase.test.js": 21,

@@ -6,7 +6,10 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, cpSync, symlinkSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
+
+import { judge, check, limitOf, ENTRIES } from '../scripts/bundle-budget.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../scripts/throw-ratchet.mjs', import.meta.url));
 const BASELINE = 'scripts/throw-baseline.json';
@@ -144,6 +147,7 @@ test('ratchet guard: a loosened baseline needs a Ratchet-Change line naming that
     put('scripts/absence-baseline.json', { boundary: 'src/absent.ts', optional: 0 });
     put('test/space/ratchet.json', holes('a', 'b'));
     put('test/durations.json', { 'test/x.test.js': 1 });
+    put('scripts/bundle-baseline.json', { tolerance: 0.005, min: { edit: 1000, read: 800 } });
     writeFileSync(join(dir, 'test/x.test.js'), '');
     const base = commit('base');
     assert.equal(guard(base).status, 0, 'nothing changed');
@@ -163,6 +167,7 @@ test('ratchet guard: a loosened baseline needs a Ratchet-Change line naming that
     // Lowering is the ratchet working: no marker needed. (2 holes -> 1, absence stays, throw back to 2.)
     put('scripts/throw-baseline.json', { throw: 2 });
     put('test/space/ratchet.json', holes('a'));
+    put('scripts/bundle-baseline.json', { tolerance: 0.005, min: { edit: 990, read: 800 } });
     const lowered = commit('lower');
     assert.equal(guard(lowered).status, 0);
     assert.equal(guard(base).status, 0);
@@ -181,6 +186,14 @@ test('ratchet guard: a loosened baseline needs a Ratchet-Change line naming that
     refused('scripts/absence-baseline.json', { boundary: 'src/absent.ts', optional: 2 }, /optional rose 0 -> 2/u);
     refused('scripts/absence-baseline.json', { boundary: 'src/other.ts', optional: 0 }, /boundary src\/absent\.ts -> src\/other\.ts/u);
     refused('test/durations.json', {}, /test\/x\.test\.js lost its weight/u);
+    refused('scripts/bundle-baseline.json', { tolerance: 0.005, min: { edit: 991, read: 800 } }, /min\.edit rose 990 -> 991/u);
+    refused('scripts/bundle-baseline.json', { tolerance: 0.01, min: { edit: 990, read: 800 } }, /tolerance rose 0\.005 -> 0\.01/u);
+    refused('scripts/bundle-baseline.json', { tolerance: 0.005, min: { edit: 990 } }, /min\.read removed/u);
+    // A raised bundle baseline passes with its Ratchet-Change line.
+    put('scripts/bundle-baseline.json', { tolerance: 0.005, min: { edit: 1200, read: 800 } });
+    commit('raise edit\n\nRatchet-Change: scripts/bundle-baseline.json: the edit path gains the settle walk');
+    assert.equal(guard(lowered).status, 0);
+    git('reset', '-q', '--hard', lowered);
     // A base that cannot be resolved fails closed.
     assert.equal(guard('no-such-ref').status, 1);
   } finally {
@@ -230,6 +243,75 @@ test('spaces --ratchet --init adds a hole only with --reason, and prints the Rat
     assert.deepEqual(ids().filter(id => !had.includes(id)), [SNEAKY_EXPORT, SNEAKY]);
     assert.ok(added.stdout.includes(SNEAKY), added.stdout);
     assert.ok(added.stdout.includes('Ratchet-Change: test/space/ratchet.json: decideSneaky is tracked in #999'), added.stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The bundle budget's comparison, on numbers chosen here: baseline 1000 and tolerance 0.005 allow 1000 + floor(5) =
+// 1005 bytes; baseline 999 allows 999 + floor(4.995) = 1003.
+test('bundle budget: over the tolerance fails, at or within it passes, under it says the baseline can be tightened', () => {
+  assert.equal(limitOf(1000, 0.005), 1005);
+  assert.equal(limitOf(999, 0.005), 1003);
+  assert.equal(limitOf(1000, 0), 1000);
+  const v = (got, budget = 1000, tolerance = 0.005) => judge('edit', got, budget, tolerance);
+  assert.deepEqual([v(1006).verdict, v(1006).ok], ['over', false]);
+  assert.match(v(1006).message, /^edit 1006 B is over budget: baseline 1000, limit 1005 \(\+6\)$/u);
+  assert.deepEqual([v(1005).verdict, v(1005).ok], ['within', true]);
+  assert.deepEqual([v(1001).verdict, v(1001).ok], ['within', true]);
+  assert.deepEqual([v(1000).verdict, v(1000).ok], ['at', true]);
+  assert.deepEqual([v(999).verdict, v(999).ok], ['under', true]);
+  assert.match(v(999).message, /under baseline 1000 \(-1\): the baseline can be tightened/u);
+  // Rounding is down: 1003 is the last byte baseline 999 admits.
+  assert.equal(v(1003, 999).ok, true);
+  assert.equal(v(1004, 999).ok, false);
+  // No tolerance: one byte over fails.
+  assert.equal(v(1001, 1000, 0).ok, false);
+  // check(): each measured entry against its line; an entry with no line fails, whatever its size.
+  const r = check({ tolerance: 0.005, min: { edit: 1000, read: 500 } }, { edit: { min: 1006, gz: 1 }, read: { min: 400, gz: 1 }, log: { min: 1, gz: 1 } });
+  assert.deepEqual(r.map(x => [x.name, x.verdict, x.ok]), [['edit', 'over', false], ['read', 'under', true], ['log', 'missing', false]]);
+});
+
+// The CLI as CI and a contributor run it, in a scratch tree whose entries are one-line modules. Expected sizes are
+// measured here with esbuild directly, not by the script.
+const BUDGET = fileURLToPath(new URL('../scripts/bundle-budget.mjs', import.meta.url));
+test('bundle budget: a missing baseline fails; --write creates it, lowers it, and refuses to raise it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ply-bundle-'));
+  const file = join(dir, 'scripts/bundle-baseline.json');
+  const budget = (...args) => spawnSync(process.execPath, [BUDGET, ...args], { cwd: dir, encoding: 'utf8' });
+  const minOf = async entry => (await build({ entryPoints: [join(dir, entry)], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent' })).outputFiles[0].contents.length;
+  try {
+    mkdirSync(join(dir, 'src'));
+    mkdirSync(join(dir, 'scripts'));
+    for (const [name, entry] of Object.entries(ENTRIES)) writeFileSync(join(dir, entry), `export const ${name}Entry = '${name}';\n`);
+    const missing = budget();
+    assert.equal(missing.status, 1, missing.stdout);
+    assert.match(missing.stderr, /no scripts\/bundle-baseline\.json/u);
+    assert.equal(existsSync(file), false);
+    assert.equal(budget('--write').status, 0);
+    const want = {};
+    for (const [name, entry] of Object.entries(ENTRIES)) want[name] = await minOf(entry);
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { tolerance: 0.005, min: want });
+    const at = budget();
+    assert.equal(at.status, 0, at.stderr);
+    assert.match(at.stdout, /edit \d+ B is at baseline/u);
+    // 200 more bytes in the edit entry: over (its tolerance is 0 bytes at this size), and --write does not raise it.
+    writeFileSync(join(dir, ENTRIES.edit), `export const editEntry = '${'e'.repeat(200)}';\n`);
+    const over = budget();
+    assert.equal(over.status, 1, over.stdout);
+    assert.match(over.stderr, /edit \d+ B is over budget/u);
+    const raise = budget('--write');
+    assert.equal(raise.status, 1);
+    assert.match(raise.stderr, /Ratchet-Change: scripts\/bundle-baseline\.json: <reason>/u);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).min.edit, want.edit);
+    // Back to the small entry, with the baseline raised by hand: it passes, says so, and --write lowers it again.
+    writeFileSync(join(dir, ENTRIES.edit), "export const editEntry = 'edit';\n");
+    writeFileSync(file, `${JSON.stringify({ tolerance: 0.005, min: { ...want, edit: want.edit + 100 } })}\n`);
+    const under = budget();
+    assert.equal(under.status, 0, under.stderr);
+    assert.match(under.stdout, /edit \d+ B is under baseline \d+ \(-100\): the baseline can be tightened/u);
+    assert.equal(budget('--write').status, 0);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).min.edit, want.edit);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

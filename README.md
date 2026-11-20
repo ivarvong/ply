@@ -645,7 +645,7 @@ codecs       pktline · inflate · sha1 · objects · pack (delta/build) · vali
 errors       errors.ts: every code, its retry policy; errors-doc.ts: what each means
 ```
 
-`test/import-graph.test.js` asserts that `src/` has no value-import cycle and `test/bundle.test.js` asserts what each entry's bundle carries; the layer order itself is not tested. Transport hints are neutral (`{ bypassCache }`), not headers; transport-specific detail goes under `http.*`, the neutral facts under `git.transport`, `git.request.bytes`, `git.response.bytes`, `git.response.cache`.
+`test/import-graph.test.js` asserts that `src/` has no value-import cycle and `test/bundle.test.js` asserts what each entry's bundle carries and that its minified size stays within `scripts/bundle-baseline.json`; the layer order itself is not tested. Transport hints are neutral (`{ bypassCache }`), not headers; transport-specific detail goes under `http.*`, the neutral facts under `git.transport`, `git.request.bytes`, `git.response.bytes`, `git.response.cache`.
 
 ## Telemetry conventions (enforced by `test/pure.test.js` and `test/span-contract.test.js`)
 

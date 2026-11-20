@@ -21,7 +21,7 @@ Names below are `src/` modules and the symbols they define; "internal" marks a f
 
 Each layer calls only the ones below it. `test/import-graph.test.js` asserts that `src/` has no value-import cycle;
 `test/bundle.test.js` asserts what each package entry's bundle carries (for example, the read bundle carries no push,
-merge or pack-building code). Neither test checks the layer order itself.
+merge or pack-building code) and gates its minified bytes against [scripts/bundle-baseline.json](../scripts/bundle-baseline.json). Neither test checks the layer order itself.
 
 | Layer | Modules | What lives there |
 |---|---|---|

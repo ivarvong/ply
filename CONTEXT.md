@@ -124,8 +124,9 @@ input (9 of about 36 000 calls with no ply code loaded, 0 of 13 000 from a file)
 files, merge-attribute conflicts, Myers heuristic splits, mxcost cutoffs), so a green run is known not to be vacuous.
 A first run with zero differences is treated with suspicion until the counters show the hard paths ran.
 
-**Tree-shaking is asserted** (`test/bundle.test.js`: esbuild metafile module lists and symbol greps; byte sizes are
-printed, not gated).
+**Tree-shaking is asserted** (`test/bundle.test.js`: esbuild metafile module lists and symbol greps). **Bundle size is
+gated**: each entry's minified bytes must stay within `scripts/bundle-baseline.json` plus its stated tolerance
+(`scripts/bundle-budget.mjs`); raising a baseline needs a `Ratchet-Change:` line. Gzip bytes are printed, not gated.
 
 **Constraints in force**: nothing was ever pushed to GitHub (the push side against GitHub is unexercised by design, pending
 real keys); the user's email address is used only to identify the user and is not written into the project.
@@ -191,7 +192,7 @@ This session (2026-10-19 → 20):
 | `rediff` option, default `myers` | git changed behaviour in 2.54; both are git; default follows current git, `skip`/`undecided` documented |
 | Merge base = git's best common ancestors, deepen until complete; criss-cross refused | the old "closest" rule produced wrong merges (shown); a single base cannot reproduce git's virtual base |
 | `attributes` option, default `null` | measured: git 2.43 bare repos read HEAD's attributes, 2.46+ read none — there is no single "git's answer"; the caller names the source |
-| Merge bundle budget 66 KB (edit bundle 44 KB) (2026-10-20; sizes are now printed, not gated: `test/bundle.test.js`) | line merge ≈ 10.4 KB and attributes ≈ 5.5 KB are deliberate; the edit path carries neither (asserted) |
+| Merge bundle budget 66 KB (edit bundle 44 KB) (2026-10-20; superseded: each entry's minified bytes are now gated against `scripts/bundle-baseline.json`) | line merge ≈ 10.4 KB and attributes ≈ 5.5 KB are deliberate; the edit path carries neither (asserted) |
 | Git's GPL test vectors (t3070) run once, not shipped | licence; the result (380/380) is recorded in SAFETY.md |
 | pushTree takes files as data; the directory walk is a separate Node module (`ply/tree-node`); likewise checkoutTree yields streams and `ply/checkout-node` writes them | `src/` stays Web-APIs-only for Workers; the bundle test asserts `node:` appears only in `tree-node.ts`, `checkout-node.ts` and `repo-node.ts` |
 | pushTree's "server has it" set = oids named by the parent's trees it read | exact for one-commit deploys (push 2 == `git rev-list --objects new ^old`, 7 objects / 1,176 B on a 208-entry tree); objects only in older history are resent — correct, not minimal, no history walk |
@@ -238,10 +239,11 @@ provenance from a clean commit and runs the pack and dist checks on that file; i
 docs/COMPATIBILITY.md, CHANGELOG.md).
 
 A ratchet baseline (`scripts/throw-baseline.json`, `scripts/absence-baseline.json`, `test/space/ratchet.json`,
-`test/durations.json`) moves the unsafe way only in a commit whose message has the line
+`test/durations.json`, `scripts/bundle-baseline.json`) moves the unsafe way only in a commit whose message has the line
 `Ratchet-Change: <file>: <reason>`. CI's `node scripts/ratchet-guard.mjs` compares each baseline with the base
 commit's and fails without that line; a squash merge must keep the line in its message, or main's own ci run fails.
-`npm run spaces -- --ratchet` only lowers `test/space/ratchet.json`. Adding a hole to it takes
+`npm run spaces -- --ratchet` only lowers `test/space/ratchet.json`, and `node scripts/bundle-budget.mjs --write` only
+lowers `scripts/bundle-baseline.json`. Adding a hole to it takes
 `npm run spaces -- --ratchet --init --reason "<why>"`, which prints that line; with no reason it exits 1, lists the
 holes it would add and writes nothing.
 
@@ -386,7 +388,7 @@ that did not hold at real sizes.
 
 ## 7. Numbers (2026-10-20)
 
-Historical, kept as written. The bundle sizes are superseded: `test/bundle.test.js` prints the current ones.
+Historical, kept as written. The bundle sizes are superseded: the current budgets are `scripts/bundle-baseline.json`, gated by `test/bundle.test.js`.
 
 - Bundles (esbuild, minified): edit 42.6 KB (16.5 KB gz); merge 63.9 KB; full 116 KB.
 - Line merge: 0 wrong across >40,000 random merges against 2.43 and 2.56; union 5,280 byte-identical; diff hunks identical

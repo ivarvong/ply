@@ -9,7 +9,7 @@ A fast, small, tested core. The shipped code is TypeScript compiled to plain ESM
 | oxlint + oxlint-tsgolint | 1.90.0 + 7.0.2005 | lint, type-aware rules (tsgolint runs TypeScript 7) |
 | vitest | 5.0.5 | test runner |
 | Stryker + vitest runner | 10.1.1 | mutation testing of `src/**/*.{js,ts}` |
-| esbuild | 0.28.2 | bundle contents and the size report (test/bundle.test.js), the workerd test worker (test/workerd/build.mjs) |
+| esbuild | 0.28.2 | bundle contents and the size gate (test/bundle.test.js, scripts/bundle-budget.mjs), the workerd test worker (test/workerd/build.mjs) |
 
 Runtime dependencies: none, ever. Node ≥ 22.18 runs `src/*.ts` directly (type stripping) for tests and fuzzers;
 consumers get `dist/` (plain `.js` + `.d.ts`), so `engines.node` stays `>=20`.
@@ -105,7 +105,10 @@ hot loops (inflate, sha1, delta, pkt-line, the pack parsers) keep their block su
 6. **Bounds before allocation**, as before: every wire-driven size is checked against a `limits.*` value
    (`checkLimit`/`parseLimits` return `Result`; a caller's limits record is parsed once at the entry into a
    `CheckedLimits`, and code past it reads plain numbers) before a buffer exists.
-7. **Keep bundles small.** `test/bundle.test.js` prints each entry's size and does not gate it. Types cost nothing; runtime helpers do. Prefer a type to a runtime check when the value
+7. **Keep bundles small.** `test/bundle.test.js` fails when an entry's minified bytes exceed its baseline in
+   `scripts/bundle-baseline.json` by more than the file's tolerance (gzip is printed, not gated). Under the baseline it
+   says so: lower it with `node scripts/bundle-budget.mjs --write`. A rise is a hand edit with
+   `Ratchet-Change: scripts/bundle-baseline.json: <reason>` in the commit (`scripts/ratchet-guard.mjs`, CI). Types cost nothing; runtime helpers do. Prefer a type to a runtime check when the value
    is already trusted; mark unused-but-exported module-level calls `/* @__PURE__ */` so esbuild drops them.
 8. **Absence is a value.** See Absence below. Do not write the platform missing value, an optional member, optional
    chaining, or nullish coalescing outside `src/absent.ts`.
@@ -180,7 +183,7 @@ function`); the rewrite only matters for `extends`/references outside the sandbo
 
 The rules that make parallel conversions collision-free: **a cluster touches only its own files**. Specifiers stay
 `.js`, so no importer changes; the ratchet has no list, so no shared file changes. The shared files are
-`src/errors.ts`, `src/result.ts`, `src/index.*`, `test/bundle.test.js` (budgets), `package.json` and CI: change them only
+`src/errors.ts`, `src/result.ts`, `src/index.*`, `test/bundle.test.js`, `scripts/bundle-baseline.json` (budgets), `package.json` and CI: change them only
 when your cluster cannot work without it, in a separate small commit, and say so in the PR body (the steward merges).
 Branch from `stack/foundation` (or main once it lands); merge main into your branch as main moves (no rebase, no
 force-push). Clusters and order: the T1–T7 / A1–A7 plan in `lab_notebook/ply-core-audit-2026-10-31.md` §11.
@@ -209,8 +212,8 @@ Gate, all green before opening the PR (paste the numbers into the PR body):
 - `npx vitest run <the test files that cover the cluster>`, then the full `npx vitest run`.
 - The fuzzers that exercise the cluster (`node --import ./test/ts-resolve.mjs test/fuzz/<f>.mjs …`, the same flags as
   `npm test`).
-- Bundle size: `npx vitest run test/bundle.test.js` passes, and the per-module bytes it prints for your files are
-  ≤ before (types are free; a runtime helper must pay for itself).
+- Bundle size: `npx vitest run test/bundle.test.js` passes (each entry within `scripts/bundle-baseline.json`), and the
+  per-module bytes it prints for your files are ≤ before (types are free; a runtime helper must pay for itself).
 - Mutation on your files: `node scripts/mutate.mjs` (mutates only files changed against main) — no new survivors in a
   parser or bounds function; the score on your files does not drop.
 - `npm run build` and, for the A pass of an entry module, the ply-web acceptance below.

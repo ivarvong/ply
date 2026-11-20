@@ -5,7 +5,8 @@
 //   Ratchet-Change: <file>: <reason>
 // Loosened means: throw-baseline's count rose; an absence-baseline count rose or its boundary changed; a category of
 // test/space/ratchet.json gained a hole id or was removed; test/durations.json lost the entry of a test file that
-// still exists (it would be planned as the heaviest file). A baseline the base does not have is new, not loosened.
+// still exists (it would be planned as the heaviest file); scripts/bundle-baseline.json's tolerance or an entry's
+// minified bytes rose, or an entry was removed. A baseline the base does not have is new, not loosened.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -22,6 +23,7 @@ export const BASELINES = {
     const had = new Set(ids);
     return now.ids.filter(id => !had.has(id)).map(id => `${c} gained hole ${id}`);
   }),
+  'scripts/bundle-baseline.json': (base, head) => [...rose({ tolerance: base.tolerance }, { tolerance: head.tolerance }), ...rose(base.min ?? {}, head.min ?? {}).map(w => `min.${w}`)],
   'test/durations.json': (base, head, exists) => Object.keys(base).filter(f => !(f in head) && exists(f)).map(f => `${f} lost its weight`),
 };
 

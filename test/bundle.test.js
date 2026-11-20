@@ -1,16 +1,18 @@
 // Tree-shaking is a property we have to earn, so it is asserted: bundle the edit entry and check what it carries.
 // Every symbol in ABSENT is general-client machinery that must not ride along. Those structural checks fail.
-// Byte sizes are REPORT-ONLY (ivar, 2026-10-31: "Until this thing fucking works do not microoptimize on bundle size"):
-// each entry's minified and gzip bytes are printed against the last budget, and a size never fails a test. The dated
-// notes below are that history.
+// Byte sizes are gated by the last test: each entry's minified bytes against scripts/bundle-baseline.json, within its
+// stated tolerance (scripts/bundle-budget.mjs; raising a baseline needs a Ratchet-Change line, scripts/ratchet-guard.mjs).
+// Gzip bytes are printed, not gated. The dated notes below are the history from before the gate (2026-10-31 to
+// 2026-11-19: sizes were report-only, ivar 2026-10-31: "Until this thing fucking works do not microoptimize on bundle
+// size"); new size changes are recorded in the baseline file's git history, not here.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { gzipSync } from 'node:zlib';
+import { readFileSync } from 'node:fs';
+import { BASELINE_PATH, ENTRIES, measureAll, check } from '../scripts/bundle-budget.mjs';
 
 const bundle = async entry => (await build({ entryPoints: [entry], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true }));
-// Report-only: prints `entry min|gz bytes (budget N, ±d)` and never fails.
-const size = (entry, kind, got, budget) => console.log(`bundle ${entry.padEnd(8)} ${kind.padEnd(3)} ${String(got).padStart(7)} B (budget ${budget}, ${got - budget >= 0 ? '+' : ''}${got - budget})`);
 const retained = out => Object.entries(Object.values(out.metafile.outputs)[0].inputs).map(([k, v]) => [k.replace(/^src\//, '').replace(/\.ts$/, '.js'), v.bytesInOutput]).sort((a, b) => b[1] - a[1]);
 
 test('edit entry carries only what the edit path uses', async () => {
@@ -58,11 +60,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-31: 71,208 B / 27,424 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 73,215 B / 28,144 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 73,369 B / 28,212 B gz. validatePushRef: receive-pack's funny refname refused before sending (#73).
-  size('edit', 'min', min, 73_370);
   // 2026-10-31: 73,090 B / 28,222 B gz. strict TS (T2: objects, format, validate, scrub): min down, gz up a few dozen bytes from strict-lint forms (/u regexes, Number.parseInt, explicit length checks, noUncheckedIndexedAccess guards) and identifier remangling.
   // 2026-10-31: 72,968 B / 28,246 B gz. lsRefs reads an unborn HEAD through an injected reader (issue #103): the edit path pays for the result field and the request flag (+99 B min, +25 B gz), not the parser or the advertisement probe.
   // 2026-11-19: 150,735 B / 54,030 B gz (149,269 / 53,547 before). An empty band 3 settled from the ref (SAFETY.md I36): push.js walks commits from the tip with fetch.js's objectAt, which the edit path already carries. No module joins the bundle; the same +1,460 B on tree and merge.
-  size('edit', 'gz', gz, 28_247);
 });
 
 test('merge entry: the line merge rides with merge/rebase only, under its own budget', async () => {
@@ -98,7 +98,6 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-31: 89,918 B. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 91,966 B. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 92,121 B. validatePushRef: receive-pack's funny refname refused before sending (#73).
-  size('merge', 'min', min, 92_122);
 });
 
 test('log entry: readLog carries no push, merge, pack building or rebase code', async () => {
@@ -113,8 +112,6 @@ test('log entry: readLog carries no push, merge, pack building or rebase code', 
   // 2026-10-30: 43,164 B / 17,227 B gz, first measured (issue #56): ls-refs, the commit-only window (fetchPackTree0
   // with the blob:none fallback, so the delta resolver), the deepen-contract check and readCommit's commit view.
   // 2026-10-31: 49,521 B / 19,807 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
-  size('log', 'min', min, 49_522);
-  size('log', 'gz', gz, 19_808);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -157,10 +154,8 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 51,502 B / 20,042 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
   // 2026-10-31: 53,946 B / 21,069 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 55,816 B / 21,786 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
-  size('read', 'min', min, 55_817);
   // 2026-10-31: 55,506 B / 21,791 B gz. T2 strict TS (see the edit budget).
   // 2026-10-31: 55,484 B / 21,805 B gz. lsRefs' unborn field and request flag (issue #103; see the edit budget).
-  size('read', 'gz', gz, 21_806);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -189,9 +184,7 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-31: 67,878 B / 26,343 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 69,891 B / 27,043 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 70,045 B / 27,104 B gz. validatePushRef: receive-pack's funny refname refused before sending (#73).
-  size('tree', 'min', min, 70_046);
   // 2026-10-31: 69,763 B / 27,134 B gz. T2 strict TS (see the edit budget).
-  size('tree', 'gz', gz, 27_135);
   const full = await build({ entryPoints: ['src/index.ts'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.ts'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
@@ -232,9 +225,7 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 48,181 B / 19,164 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
   // 2026-10-31: 50,542 B / 20,121 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 52,917 B / 20,911 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
-  size('checkout', 'min', min, 52_918);
   // 2026-10-31: 52,604 B / 20,928 B gz. T2 strict TS (see the edit budget).
-  size('checkout', 'gz', gz, 20_929);
   const full = await build({ entryPoints: ['src/index.ts'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.ts'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
@@ -252,4 +243,17 @@ test('repo entry: pushRepo (node:fs) lives only in repo-node.js; the delta gener
   assert.ok(inFull.includes('delta.js'), 'encodeDelta and planDeltas are on the full entry');
   const node = await build({ entryPoints: ['src/repo-node.ts'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
+});
+
+// The size gate (#301): every entry's minified bytes within its baseline plus the tolerance. Under or at the
+// baseline passes; under it says the baseline can be tightened (node scripts/bundle-budget.mjs --write).
+test('bundle sizes stay within scripts/bundle-baseline.json', async () => {
+  const baseline = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'));
+  assert.deepEqual(Object.keys(baseline.min).sort(), Object.keys(ENTRIES).sort(), 'one baseline per budgeted entry');
+  const sizes = await measureAll();
+  for (const [name, { min, gz }] of Object.entries(sizes)) console.log(`  ${name} bundle: ${min} B min, ${gz} B gz (gz not gated)`);
+  const results = check(baseline, sizes);
+  for (const r of results) console.log(`  ${r.message}`);
+  const failed = results.filter(r => !r.ok);
+  assert.deepEqual(failed.map(r => r.message), [], 'raise a baseline only by hand, with Ratchet-Change: scripts/bundle-baseline.json: <reason>');
 });

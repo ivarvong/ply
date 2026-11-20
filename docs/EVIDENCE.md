@@ -165,16 +165,18 @@ exist: Node 20 and later, Cloudflare Workers, and browsers behind a CORS proxy (
 | Cloudflare Workers (deployed) | streaming cells inside a 128 MB isolate | [bench/worker-mem](../bench/worker-mem/README.md), manual | limited claim: no committed result; see section 1 |
 | Browsers | the shipped `.d.ts` compiles under the `DOM` lib | [test/dist-types.test.js](../test/dist-types.test.js), `npm run check:dist` | types only; no browser runtime test in the repository |
 | TypeScript consumers | `.d.ts` compiles with `@types/node` 20, 22, 24, `DOM`, `@cloudflare/workers-types` | [test/dist-types.test.js](../test/dist-types.test.js) | tested invariant |
-| Workers-safe entries carry no Node builtins | the `ply` (full), edit, read, log, tree, checkout and merge bundles contain no `node:` import; `node:fs` lives only in [src/tree-node.ts](../src/tree-node.ts), [src/checkout-node.ts](../src/checkout-node.ts), [src/repo-node.ts](../src/repo-node.ts) | [test/bundle.test.js](../test/bundle.test.js) | tested invariant; the test prints each bundle's size and does not gate it (#301), and README quotes no sizes |
+| Workers-safe entries carry no Node builtins | the `ply` (full), edit, read, log, tree, checkout and merge bundles contain no `node:` import; `node:fs` lives only in [src/tree-node.ts](../src/tree-node.ts), [src/checkout-node.ts](../src/checkout-node.ts), [src/repo-node.ts](../src/repo-node.ts) | [test/bundle.test.js](../test/bundle.test.js) | tested invariant |
+| Bundle size | each entry's (full, edit, read, log, tree, checkout, merge) minified bytes are at most its baseline in [scripts/bundle-baseline.json](../scripts/bundle-baseline.json) plus the file's tolerance; a baseline rises only in a commit with a `Ratchet-Change:` line ([scripts/ratchet-guard.mjs](../scripts/ratchet-guard.mjs), CI) | [test/bundle.test.js](../test/bundle.test.js), [scripts/bundle-budget.mjs](../scripts/bundle-budget.mjs); the gate's logic in [test/ratchets.test.js](../test/ratchets.test.js) | tested invariant for minified bytes with esbuild as pinned; gzip bytes are printed, not gated (their stability across Node 20, 22 and 24 is not established); README quotes no sizes |
 
 **Known gaps.** #326 (no versioned release artifact or compatibility policy yet). No issue owns a browser runtime test.
+Gzip bundle size is not gated: no run has compared `node:zlib` level-9 output across Node 20, 22 and 24.
 
 **Reproduce.**
 
 | Command | What it checks | Run for this page |
 |---|---|---|
 | `npm run test:workerd` | the workerd suite | 14 passed, 1 failed: the Ed25519 signing test, because `ssh-keygen` is not installed on this machine (git's verifier needs it); the other 14 passed |
-| `npx vitest run test/dist-types.test.js test/bundle.test.js` | consumer type checks; bundle contents | passed: 2 files, 16 tests |
+| `npx vitest run test/dist-types.test.js test/bundle.test.js` | consumer type checks; bundle contents and size budgets | passed: 2 files, 17 tests |
 | `npm run check:pack` | pack, install, import on the current Node | not run |
 
 ## Sweep run
