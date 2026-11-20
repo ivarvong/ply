@@ -340,10 +340,10 @@ const FETCH: readonly BehaviourIn<'fetch'>[] = [
   }),
   b({
     id: 'fetch.filter-combine', area: 'fetch',
-    description: 'filter combine:blob:none+tree:<k> (a commit and the first levels of its path in one request).',
-    ops: [FETCH_PACK, READ_FILE],
-    tests: [t('test/protocol.test.js', MATRIX), t('test/path-trees.test.js', 'a server that takes it: first contact is tree:0')],
-    status: verified(git('test/protocol.test.js', MATRIX), git('test/path-trees.test.js', 'a server that takes it: first contact is tree:0')),
+    description: 'filter combine:blob:none+tree:<k> (a commit or a tree and the path levels under it in one request).',
+    ops: [FETCH_PACK, READ_FILE, EDIT_FILE],
+    tests: [t('test/protocol.test.js', MATRIX), t('test/path-trees.test.js', 'a server that takes it: first contact is one race'), t('test/path-walk.test.js', 'editFile, depth 1 to 8')],
+    status: verified(git('test/protocol.test.js', MATRIX), git('test/path-trees.test.js', 'a server that takes it: first contact is one race'), git('test/path-walk.test.js', 'editFile, depth 1 to 8')),
     notes: ['No Artifacts evidence of any kind for combine filters.'],
   }),
   b({
@@ -358,7 +358,7 @@ const FETCH: readonly BehaviourIn<'fetch'>[] = [
     id: 'fetch.filter-refusal-fallback', area: 'fetch',
     description: 'A server that advertises filter but refuses a filter spec with HTTP 400: ply records the refusal for that remote and falls back to blob:none.',
     ops: [LEARN_FILTER, FETCH_PACK, READ_FILE],
-    tests: [t('test/artifacts-compat.test.js', 'Unsupported Git fetch filter; only blob:none is supported.'), t('test/path-trees.test.js', 'an Artifacts-like server (only blob:none): never asked for the deep fetch')],
+    tests: [t('test/artifacts-compat.test.js', 'Unsupported Git fetch filter; only blob:none is supported.'), t('test/path-trees.test.js', 'an Artifacts-like server (only blob:none): one deep fetch per record')],
     status: verified(git('test/artifacts-compat.test.js', 'Unsupported Git fetch filter; only blob:none is supported.'), validatePly('read/blob README.md'), plyWorker('read/small')),
     notes: ['The reference tests emulate the 400 with a proxy in front of git; git judges the results, not the refusal.'],
   }),

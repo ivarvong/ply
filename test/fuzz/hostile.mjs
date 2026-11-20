@@ -20,7 +20,11 @@ const N = parseInt(args.n ?? '300', 10), SEED = parseInt(args.seed ?? String(Dat
 console.log(`hostile: seed ${SEED}, n ${N}  replay: node --import ./test/ts-resolve.mjs test/fuzz/hostile.mjs --n ${N} --seed ${SEED}`);
 const CODES = new Set(['pack_corrupt', 'protocol', 'network', 'timeout', 'aborted', 'not_git', 'auth', 'not_found', 'rate_limited', 'upstream_5xx', 'http', 'limit_exceeded', 'remote_error', 'match_count', 'cas_conflict', 'push_rejected', 'bad_request', 'unsupported', 'ambiguous']);
 // 'push-sb' is a direct sideband push (side-band-64k + report-status-v2), the response path the edit pipeline does not use
-const STAGES = [['ls-refs', 0], ['fetch', 0], ['fetch', 1], ['fetch', 2], ['fetch', 3], ['fetch', 4], ['receive-pack', 0], ['push-sb', 0]];
+// The edit runs with one object per fetch (limits.maxPathTreesBytes 0), so a fetch index names one object: the commit
+// and the four trees of FILE. 'path-trees' is the edit with the default budget and the mutation on its path-trees
+// fetch (src/pathtrees.ts: the commit with its first two tree levels), whose failure is never the edit's: it must succeed.
+const STAGES = [['ls-refs', 0], ['fetch', 0], ['fetch', 1], ['fetch', 2], ['fetch', 3], ['fetch', 4], ['receive-pack', 0], ['push-sb', 0], ['path-trees', 0]];
+const isPathTrees = ctx => ctx.stage === 'fetch' && Buffer.from(ctx.reqBody).toString('latin1').includes('filter combine:blob:none+tree:');
 // which check caught it, from the message. 'bounds' is take()'s typed short read raised inside a frame parser, e.g. a
 // pkt-line cut to 0004 in the packfile section has no band byte (git: "missing sideband designator"); case 2366521731.
 const SITE = [['trailer', /trailer/], ['adler', /adler/], ['zlib_bound', /zlib stream longer/], ['size', /size|exceeds expected|streamed more|inflated \d+ !=/], ['pkt', /pkt-line/], ['huffman', /huffman|block type|invalid|distance|stored|repeat|end-of-block|unexpected end/], ['zlib_hdr', /zlib:/], ['delta', /delta/], ['limit', /exceeds limit/], ['v2', /v2:|no packfile|sideband/], ['remote', /remote:/], ['ls_refs', /ls-refs:/], ['unsupported', /unsupported/], ['pack_hdr', /signature|version|expected 1 object|object type|not in pack|truncated before object header|missing trailer|single-object pack is a delta|trailing bytes after object|served for want/], ['tree', /tree:|not found/], ['content_type', /content-type/], ['http', /HTTP \d/], ['report', /push rejected|unpack/], ['net', /network|aborted|timeout/], ['bounds', /^short read:/], ['ambiguous', /outcome unknown/]];
@@ -45,7 +49,7 @@ try {
     const mseed = rng.u32();
     const proxyStage = stage === 'push-sb' ? 'receive-pack' : stage;
     const proxy = await startProxy(srv.url, ctx => {
-      if (ctx.stage !== proxyStage || ctx.n !== k) return { type: 'pass' };
+      if (stage === 'path-trees' ? !isPathTrees(ctx) : (ctx.stage !== proxyStage || ctx.n !== k)) return { type: 'pass' };
       const r = new Rng(mseed); let b = ctx.bytes;
       for (const m of chain) b = MUTATORS[m](r, b);
       return { type: 'bytes', bytes: b, name: chain.join('+'), chunks: rng.bool(0.3) ? Array.from({ length: 50 }, () => rng.int(1, 300)) : undefined };
@@ -62,7 +66,7 @@ try {
         const c = unwrap(GitHttp.create(`${proxy.url}/${name}.git`, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000 }) }));
         const r = await unwrapAsync(c.push({ ref: 'refs/heads/main', oldOid: head, newOid: nxt, objects: objs, sideband: true, reportV2: true }));
         result = { newCommit: nxt, report: r.report };
-      } else result = await unwrapAsync(editFile(`${proxy.url}/${name}.git`, { path: FILE, find: 'MARK', replace: 'XX', author: { name: 'h', email: 'h@x' }, message: 'h' }, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000 }) }));
+      } else result = await unwrapAsync(editFile(`${proxy.url}/${name}.git`, { path: FILE, find: 'MARK', replace: 'XX', author: { name: 'h', email: 'h@x' }, message: 'h' }, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000, ...(stage === 'path-trees' ? {} : { maxPathTreesBytes: 0 }) }) }));
     } catch (e) { error = e; }
     const ms = performance.now() - t0;
     await proxy.close();
@@ -70,6 +74,7 @@ try {
     const nowHead = git(bare, ['rev-parse', 'main']).trim();
     const content = gitBuf(bare, ['cat-file', 'blob', `main:${FILE}`]).toString();
     if (ms > 8000) problems.push(`took ${ms | 0}ms`);
+    if (error && stage === 'path-trees') problems.push(`a fault in the path-trees fetch failed the edit: ${error.code} ${error.message}`);
     if (error) {
       if (!CODES.has(error.code)) problems.push(`untyped error ${error.code}: ${error.message}`);
       if (nowHead !== head) {
@@ -98,5 +103,5 @@ try {
   }
 } finally { await srv.close(); cleanup(); }
 const show = o => Object.entries(o).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${String(v).padStart(4)} ${k}`).join('\n');
-console.log(`\n${N} cases, ${fails.length} failures, ${silentOk} git-verified successes (mutation hit nothing we read)\n\noutcomes:\n${show(codes)}\n\ndetection site:\n${show(sites)}\n\nmutator → outcome:\n${show(muts)}`);
+console.log(`\n${N} cases, ${fails.length} failures, ${silentOk} git-verified successes (mutation hit nothing we read, or only the path-trees fetch)\n\noutcomes:\n${show(codes)}\n\ndetection site:\n${show(sites)}\n\nmutator → outcome:\n${show(muts)}`);
 process.exit(fails.length ? 1 : 0);

@@ -1051,6 +1051,11 @@ const fetchWide = (t: Transport, { learned, requested, ...want }: Fallback): Pro
 // oxlint-disable-next-line typescript/promise-function-async -- wideFetch's promise, passed through
 export const commitWithTrees = (t: Transport, oid: Oid, filter: string): Promise<Result<FetchedObject, PlyError>> =>
   wideFetch(t, { oid, deepen: 1, expectType: TYPE.COMMIT, filter }, { 'git.fetch.path_trees': filter });
+// The same for a tree want: the tree and the trees `filter` brings from under it, no depth (no history is reachable from
+// a tree). The wanted tree is the answer, under the full checks; the others are harvested (pathtrees.ts).
+// oxlint-disable-next-line typescript/promise-function-async -- wideFetch's promise, passed through
+export const treeWithTrees = (t: Transport, oid: Oid, filter: string): Promise<Result<FetchedObject, PlyError>> =>
+  wideFetch(t, { oid, deepen: 0, expectType: TYPE.TREE, filter }, { 'git.fetch.path_trees': filter });
 
 // The caller's oid, parsed once: a JS caller may pass anything, so it is read as String() renders it (a missing one
 // renders as no id) and quoted the same way. Not 40 lowercase hex is `fetchObject: oid must be 40-hex` (bad_request, no

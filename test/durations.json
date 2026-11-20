@@ -91,6 +91,8 @@
   "test/parsetree.test.js": 12,
   "test/path-trees-unit.test.js": 0,
   "test/path-trees.test.js": 33,
+  "test/path-walk-unit.test.js": 1,
+  "test/path-walk.test.js": 25,
   "test/pick-empty.test.js": 5,
   "test/plan-build.test.js": 4,
   "test/prefix-closure.test.js": 0,

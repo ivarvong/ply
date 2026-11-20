@@ -49,10 +49,12 @@ still raise is a stream (it errors), `assertNever` and an `internal` invariant (
    `Git-Protocol: version=2`. Its `post` generator (internal) reads the body through `deadline.ts` `readAbortable`
    and yields one network chunk at a time; `frames()` runs each chunk through `pktStep`, which copies each payload
    out of the chunk and carries at most one partial pkt-line (`PKT_MAX_SIZE`).
-4. **Commit.** `pathtrees.ts` `commitForWalk` → `commit.ts` `commitById` → `fetch.ts` `objectAt` with
-   `filter tree:0`, `deepen 1` where the server takes `deepen`. Where the server is known to take
-   `combine:blob:none+tree:K`, `commitForWalk` asks for the commit and its first two tree levels in one fetch (the
-   first time, beside the plain commit fetch) and harvests the trees (#218, SAFETY I42).
+4. **Commit.** `pathtrees.ts` `commitForWalk` → `pathWalk(t).commit` → `commit.ts` `commitObject` → `fetch.ts`
+   `objectAt` with `filter tree:0`, `deepen 1` where the server takes `deepen`. Where the server takes
+   `combine:blob:none+tree:K`, the walk asks for the commit and its first two tree levels in one fetch
+   (`commitWithTrees`) and harvests the trees; while that is not known of the server (a first contact included) it
+   sends both fetches at once and uses the wider answer if it comes (#218, SAFETY I42; "Two tree levels per fetch"
+   below).
 5. **Protocol framing.** `fetchRequest` / `fetchRequestBody` build the command; `packStream` drives `v2Step` over the
    frames: section lines (capped by `maxSectionLines`), then `sidebandStep`, which yields band 1 (pack bytes) and
    holds band 1 and band 2 each to `maxPackBytes` before a frame is passed on. Band 3 and `ERR` are `remote_error`.
@@ -63,8 +65,11 @@ still raise is a stream (it errors), `assertNever` and an `internal` invariant (
    `inflatestream.ts` (`inflateInit`, `inflatePull`) into one `Uint8Array` of the declared size. `spFinish` checks
    the pack trailer, then `singleObject` (internal) hashes the object (`objects.ts` `hashObject`, pure-JS SHA-1) and
    requires the want's id, then `assertFetched` parses it under the caller's limits (`maxTreeEntries` for a tree).
-7. **Trees.** `walkFrom` (internal) fetches one tree per directory on the path (`objectAt`, `filter tree:0`),
-   unless the caller's `cache` (a `Map` from oid to tree bytes) or the transport's harvest (`t.objects`) has it.
+7. **Trees.** `walkFrom` (internal) reads one tree per directory on the path through `pathWalk(t).tree`: from the
+   caller's `cache` (a `Map` from oid to tree bytes), from the transport's harvest (`t.objects`), or by a fetch. That
+   fetch is the tree with its child trees (`treeWithTrees`, `filter combine:blob:none+tree:1`) when the walk reads
+   another level under it and the server takes the filter, so the next level is in the harvest; otherwise the tree
+   alone (`objectAt`, `filter tree:0`).
 8. **Blob, streamed.** `openBlob` asks for the blob with no filter. Its pump pulls `packStream`, steps `spStep`, and
    writes the zlib bytes into the runtime's `DecompressionStream('deflate')`. Inflated chunks pass a
    `TransformStream` that counts them against the declared size, feeds `sha1.ts` `streamingSha1` (Workers' native
@@ -84,9 +89,50 @@ response body (runtime chunks)
 ```
 
 **Held during a read:** the ref listing (`maxRefs`, `maxLsRefsBytes`); the commit and every tree on the path, each
-whole (`maxObjectSize`, `maxTreeEntries`), the trees also kept in `cache`; harvested commits and trees from a wide pack
-(`maxHarvestBytes`, per transport); one network chunk and its frames; the inflate state (window plus one chunk); the
-latest blob chunk. **Streamed:** the blob, at the caller's pace.
+whole (`maxObjectSize`, `maxTreeEntries`), the trees also kept in `cache`; the trees a path-trees fetch brought beside
+the path's (`maxPathTreesBytes` per fetch, while it is read and after it in the harvest) and harvested commits and
+trees from a wide pack (`maxHarvestBytes` in all, per transport); one network chunk and its frames; the inflate state
+(window plus one chunk); the latest blob chunk. **Streamed:** the blob, at the caller's pace.
+
+### Two tree levels per fetch
+
+A tree's id is only known from its parent, so a path of n tree levels is n round trips that each wait on the one
+before, after the commit's. The requests of a read at n levels (an edit adds the push; `test/path-walk.test.js`
+asserts each sequence against git http-backend):
+
+| Server | Requests | Count |
+|---|---|---|
+| refuses the filter (GitHub), or `maxPathTreesBytes: 0` | ls-refs; commit `tree:0`; n × tree `tree:0`; blob | n + 3 |
+| takes it, first contact | ls-refs; commit `combine:blob:none+tree:2` beside commit `tree:0`; then as below | ceil(n / 2) + 3 |
+| takes it, known | ls-refs; commit `combine:blob:none+tree:2` (commit, root, root's child trees); per two further levels a tree `combine:blob:none+tree:1` (the tree and its child trees), a last odd level `tree:0`; blob | ceil(n / 2) + 2 |
+| refuses `tree:0` (Artifacts) | ls-refs; commit `blob:none` (every tree); blob | 3 |
+
+What is sequential stays sequential: ls-refs before the commit (the id), each fetch before the next (the child's id is
+in the parent), the blob after the last tree, the push after the blob. Nothing in protocol v2 as hosts serve it names
+a path: `want-ref` would merge ls-refs into the commit fetch but no host measured advertises `ref-in-want`
+(CONTEXT §5, 2026-11-06), and `sparse:oid` needs a blob on the server and is refused by GitHub. `tree:K` is the only
+widening, and it is breadth-first: the level below a directory is all of its child trees. `pathtrees.ts` `pathWalk`
+keeps that bounded and safe to refuse:
+
+- **Two levels, not more.** A fetch brings the level the walk reads and the one below it. A third is the fan-out
+  squared (gitlab-org/gitlab from the root: 566 trees and 526 KB against 48 and 36 KB).
+- **A budget per fetch.** The width is not known before the answer is read, so the fetch runs on a view of the
+  transport whose `maxPackBytes` and `maxInflatedTotal` are lowered to `limits.maxPathTreesBytes` (`budgeted`, 1 MiB
+  by default): `sidebandStep` refuses band 1 past it, and the pack scan charges each tree its declared size plus
+  `LIMIT_OBJECT_OVERHEAD` against it before inflating (at most 341 trees). Worst case per fetch: that many bytes
+  read, that many held. Nothing is asked unless the harvest has room for a whole budget (`maxHarvestBytes`).
+- **One unused answer per walk.** An answer over the budget, a refusal, or any other failure of such a fetch is not
+  used: the `tree:0` fetch of the same object answers, and that walk asks one object at a time from there. So the
+  worst walk is the per-level walk plus one request, and its bytes the per-level walk's plus one budget.
+- **Learned, never assumed.** A refusal in the server's own words (`isPathTreesRefusal`), or a timeout of such a
+  fetch, is kept beside the `quirks` record and the server is not asked again. Not known yet: both fetches at once (the refusal costs a request, no
+  round trip). A record whose `treeFilter` is not `tree:0` is never asked.
+- **Checked as a wide pack.** `wideFetch` keys every object by its computed hash; the wanted object passes the full
+  checks; the others are harvested under their own ids, so a substituted tree is never read as the path's.
+
+What it costs: the child trees of every second directory on the path, on the wire and in the harvest; the commit a
+second time on a first contact; and, for a walk whose trees are all in the caller's `cache`, the commit's two levels
+for nothing (the root's id is not known before the commit is read). bench/compare records the bytes.
 
 ### When the server will not filter
 
@@ -113,6 +159,7 @@ sequenceDiagram
     P->>S: fetch want tree, filter tree:0
     S-->>P: 1-object pack: tree, held and cached by oid
   end
+  Note over P,S: where the server takes combine:blob:none+tree:K, the commit comes with two tree levels and each tree fetch brings two (see "Two tree levels per fetch")
   P->>S: fetch want blob
   S-->>P: 1-object pack, streamed: inflate, scanStep, streamingSha1
   P->>S: receive-pack: "oldCommit newCommit ref" + thin pack
@@ -124,8 +171,9 @@ sequenceDiagram
 2. **Parent.** `lsRefs([ref])`. With a `head` hint, a speculative `objectAt` of that commit runs beside it;
    `decideHead` makes ls-refs win and reports the hint as `used` or `stale`. `strictHead` turns a stale hint into
    `cas_conflict` before anything is fetched further.
-3. **Commit and trees.** `objectAt` as in the read's steps 5–7 (no `combine` filter), one tree per directory, each
-   kept in `levels` and in `cache`; `findEntry` (internal) picks the next entry.
+3. **Commit and trees.** `pathWalk(t)` as in the read's steps 4–7: the commit (the hinted one too) and one tree per
+   directory, two levels per fetch where the server takes it, each tree on the path kept in `levels` and in `cache`;
+   `findEntry` (internal) picks the next entry.
 4. **Blob, streamed through the edit.** `streamBlobEdit` (internal): a pump like `openBlob`'s into
    `DecompressionStream`. The inflate side refuses a Git LFS pointer by its first bytes (`isLfsPointerPrefix`), then
    for each chunk runs `scanStep` (find/replace, carrying at most `|find| − 1` bytes) and feeds the transformed bytes
@@ -162,7 +210,8 @@ sequenceDiagram
     (an empty band 3, below) is not read again.
 
 **Held during an edit:** the commit, every tree on the path (old bytes, new bytes, and the 20-byte-replacement
-delta), `find`, `replace`, the scanner's carry, one inflate chunk, the built objects (small: one commit, path-many
+delta), the trees a path-trees fetch brought beside them (`maxPathTreesBytes` per fetch, `maxHarvestBytes` in all; not
+counted in `mem.alloc.*`, which counts the objects the edit read), `find`, `replace`, the scanner's carry, one inflate chunk, the built objects (small: one commit, path-many
 tree deltas, one blob delta of about `|replace|` bytes), and the pack when it is at most `INFLATE_CHUNK`.
 **Streamed:** the old blob, and the pack's second pass when it is larger.
 
@@ -197,7 +246,7 @@ the runtime's).
 | File size | constant: one inflate chunk, one held chunk | constant: one inflate chunk, scanner carry | wire: `maxPackBytes`, `zlibBound`; no `maxObjectSize` on the streamed blob |
 | `find` / `replace` | — | held whole; the blob delta is about the size of `replace` | the caller's input; the pack by `maxPackBytes` |
 | Tree size | each path tree held whole | each path tree held twice plus a delta | `maxObjectSize`, `maxTreeEntries` |
-| Path depth | one tree per level, all kept | same, plus one new tree per level | `maxPathDepth` |
+| Path depth | one tree per level, all kept; per two levels, the child trees of one directory in the harvest | same, plus one new tree per level | `maxPathDepth`; `maxPathTreesBytes` per fetch, `maxHarvestBytes` in all |
 | Object count | one per narrow fetch (a commit want may also bring its tag); wide packs: every kept object | same | `maxPackObjects`, `maxInflatedTotal` (+ `LIMIT_OBJECT_OVERHEAD` each), `maxHarvestBytes` |
 | Delta chain depth | none on the narrow path (`spStep` refuses a delta); wide packs resolve | edit writes depth-1 deltas only | `maxDeltaChain`, `maxDeltaResult`, `maxInflatedTotal` |
 | Ref count | the listed refs | the listed refs | `maxRefs`, `maxLsRefsBytes` |
@@ -246,7 +295,7 @@ outcome space is enumerated in [SPACE.md](../SPACE.md).
 | Inflate fetched objects and packs as they arrive (#172) | join the pack, then parse | `fetch.ts` `collectWire`, `streambound.ts` | `test/stream-memory.test.js` | README "Memory" |
 | Deflate the push pack twice and stream pass 2 (#172) | hold the pack (about 4× the largest object) | `packwrite.ts` `measurePack`, `streamPack` | `test/packwrite.test.js`, `test/push-stream.test.js` | CONTEXT §5, SAFETY I41 |
 | Learn filter support from the answer; fall back to `blob:none` or no filter | detect by host, or fail | `fetch.ts` `objectAt`, `transport.ts` `probing` | `test/wide-limits.test.js`, `test/no-filter.test.js`, `test/artifacts-compat.test.js` | CONTEXT §5, SAFETY I30 |
-| First two path levels ride with the commit where the server takes `combine` | one round trip per level | `pathtrees.ts` `commitForWalk` | `test/path-trees.test.js` | CONTEXT §5, SAFETY I42 |
+| Two path levels per fetch where the server takes `combine`, under a byte budget, asked beside the plain fetch until known | one round trip per level; or deeper `tree:K` (the fan-out squared) | `pathtrees.ts` `pathWalk` | `test/path-walk.test.js`, `test/path-walk-unit.test.js`, `test/path-trees.test.js`, bench/compare | CONTEXT §5, SAFETY I42 |
 | Cache wants-only fetch answers; the client's own parse checks a HIT | trust or re-verify in the cache | `packcache.ts` `cachingFetch` | `test/packcache.test.js` | CONTEXT §5, SAFETY I14 |
 | `head` hint overlaps ls-refs; ls-refs always wins | skip ls-refs | `edit.ts` `decideHead` | `test/packcache.test.js`, `test/workerd.test.js` | SAFETY I15 |
 | Per-exchange first-byte, idle and held timers; no total cap | one request timer (cut long healthy streams) | `deadline.ts` `exchangeClock` | `test/deadline.test.js`, `test/deadline-scenarios.test.js`, `test/upload-progress-socket.test.js` | CONTEXT §5, SAFETY I1 |
@@ -265,6 +314,10 @@ outcome space is enumerated in [SPACE.md](../SPACE.md).
   state, not measured from the heap.
 - Trees on the path are held whole, so one very large directory costs up to `maxObjectSize`; `maxTreeEntries` refuses
   past it.
+- A path walk is still a chain: ceil(n / 2) fetches for n tree levels where the server takes the filter, n where it
+  does not (GitHub). git's blobless clone reads every tree of the commit in one fetch, which ply does not do because
+  its bytes grow with the repository; at path depth 8 that is 8 requests (7 once the server is known) against git's 5
+  (bench/compare).
 - `find` and `replace` are held whole and are not limited by `limits`.
 - The tree `cache` a caller passes grows with every new tree ply adds to it; ply does not evict.
 - After the push is handed over, `ambiguous` is an outcome ply cannot resolve except in the one empty-band-3 case:

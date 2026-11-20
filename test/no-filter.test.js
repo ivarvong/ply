@@ -111,9 +111,11 @@ test('reads: readFile, listTree, readCommit, readLog, checkoutTree answer the sa
   assert.ok(!probes[0].attrs['git.server.fetch'].includes('filter'));
   const fetches = spans.filter(s => s.name === 'git.upload-pack fetch');
   const filtered = fetches.filter(s => s.attrs['git.fetch.filter'] !== '');
-  assert.equal(filtered.length, 1, 'the one filtered request is the one the server died on');
-  assert.equal(filtered[0].attrs['error.type'], 'protocol');
-  assert.equal(filtered[0].attrs['error.kind'], 'empty_response');
+  // the first read is a path walk on a record that knows nothing: its commit is asked with tree:0 and, beside it, with
+  // the path-trees filter (src/pathtrees.ts). The server dies on both, and no filter is ever sent again.
+  assert.deepEqual(filtered.map(s => s.attrs['git.fetch.filter']).toSorted(), ['combine:blob:none+tree:1', 'tree:0'], 'the two filtered requests of the first contact are the ones the server died on');
+  for (const s of filtered) { assert.equal(s.attrs['error.type'], 'protocol'); assert.equal(s.attrs['error.kind'], 'empty_response'); }
+  assert.deepEqual(fetches.slice(0, 2).map(s => s.attrs['git.fetch.filter']).toSorted(), ['combine:blob:none+tree:1', 'tree:0'], 'and they are the first two fetches');
   const learned = fetches.filter(s => s.attrs['git.fetch.filter.learned'] === true);
   assert.equal(learned.length, 1);
   assert.equal(learned[0].attrs['git.fetch.filter.fallback'], 'none');
@@ -266,8 +268,10 @@ test('an advertisement the probe cannot read (cut inside a pkt) decides nothing:
 });
 
 // #136: with no quirks passed, the no-filter learning is remembered per remote too: across any order of
-// edit/read/checkout/log/merge, at most one filtered request (the one the stock server dies on: empty_response) and one
-// advertisement probe per remote. Counted at the fetchImpl. A fresh `quirks: {}` per call (ply before #136) pays per call.
+// edit/read/checkout/log/merge, one tree:0 request (the one the stock server dies on: empty_response) and one
+// advertisement probe per remote. When the remote's first operation is a path walk (edit, read), its commit is also asked
+// with the path-trees filter beside that tree:0 request (src/pathtrees.ts): a second filtered request and a second
+// empty_response, once per remote, and no advertisement read of its own. Counted at the fetchImpl. A fresh `quirks: {}` per call (ply before #136) pays per call.
 const OPS = ['edit', 'read', 'checkout', 'log', 'merge'];
 const orders = [...OPS.map((_, i) => [...OPS.slice(i), ...OPS.slice(0, i)]), [...OPS].reverse()];
 async function sweep(order, perCall) {
@@ -297,10 +301,13 @@ test('#136: no quirks passed, any order: one empty_response and one advertisemen
   forgetQuirks();
   for (const order of orders) {
     const { filtered, probes, empties } = await sweep(order, false);
-    assert.equal(filtered, 1, `${order}: one filtered request`);
-    assert.equal(empties, 1, `${order}: one empty_response`);
+    const walkFirst = order[0] === 'edit' || order[0] === 'read';
+    assert.equal(filtered, walkFirst ? 2 : 1, `${order}: one tree:0 request${walkFirst ? ', and the path-trees one beside it' : ''}`);
+    assert.equal(empties, walkFirst ? 2 : 1, `${order}: one empty_response each`);
     assert.equal(probes, 1, `${order}: one advertisement read`);
   }
   const before = await sweep(OPS, true);
-  assert.ok(before.empties >= 4 && before.probes === before.empties, JSON.stringify(before));
+  // a fresh record per call pays per call: an advertisement read for each of the five operations, an empty answer to
+  // each one's tree:0 request, and to the path-trees request of the two that walk a path
+  assert.deepEqual(before, { filtered: 7, probes: 5, empties: 7 });
 });

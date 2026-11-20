@@ -10,7 +10,8 @@ import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
 import { operation, verifyPushed } from './operation.js';
 import { lsRefs } from './lsrefs.js';
-import { packStream, objectAt, spInit, spStep, spFinish, treeEntries } from './fetch.js';
+import { packStream, spInit, spStep, spFinish, treeEntries } from './fetch.js';
+import { pathWalk } from './pathtrees.js';
 import { push, ZERO_OID } from './push.js';
 import { spliceDelta } from './pack.js';
 import { parseCommit, parseTree, objectHeader, TYPE } from './objects.js';
@@ -479,6 +480,7 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
   const { limits } = options;
   const base = baseName(s.base);
   const held: number[] = []; // sizes of metadata objects held whole, for memAttrs
+  const keep = (o: Result<Fetched, PlyError>): Result<Fetched, PlyError> => { if (o.ok) held.push(o.value.size); return o; };
   let streamed: { readonly scan: Held; readonly inflated: number } = { scan: { chunks: 0, maxChunk: 0 }, inflated: 0 };
   let hint = hintWas;
   let creating = create === null ? s.create : create;
@@ -488,7 +490,9 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
   return operation('edit', url, { ...options, attrs, onFinish, link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } }, async ({ t, root, outcome }) => {
     // the tracer operation() started the root span on (opts.tracer)
     const tracer = root.tracer;
-    const getObject = async (oid: Oid, expectType: number, deepen: number): Promise<Result<Fetched, PlyError>> => { const o = await objectAt(t, oid, { filter: 'tree:0', deepen, expectType }); if (o.ok) held.push(o.value.size); return o; };
+    // the commit and each tree come with the level below them where the server takes that (pathtrees.ts)
+    const walk = pathWalk(t);
+    const getCommit = async (oid: Oid): Promise<Result<Fetched, PlyError>> => keep(await walk.commit(oid, s.comps.length));
     // An attempt's Err leaves with its attempt number and how the hint turned out: retryLink reads them for the retry.
     // oxlint-disable-next-line complexity -- the edit is one sequence of protocol steps
     const done = await (async (): Promise<Result<EditResult, PlyError>> => {
@@ -511,7 +515,7 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
       return ok(s.create ? getOrElse(fromNullish(found.value.peeled), found.value.oid) : found.value.oid);
     };
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
-    const [resolvedTo, speculative] = await Promise.all([resolve(), head ? getObject(head, TYPE.COMMIT, 1) : null]);
+    const [resolvedTo, speculative] = await Promise.all([resolve(), head ? getCommit(head) : null]);
     if (!resolvedTo.ok) return resolvedTo;
     const resolved = resolvedTo.value;
     root.set({ 'git.edit.create': creating });
@@ -521,7 +525,7 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
     const strict = strictParent(strictHead, decided, base, head);
     if (!strict.ok) return strict;
     if (speculative !== null && !speculative.ok) root.set({ 'git.edit.head.speculative_error': speculative.error.code });
-    const commitGot = decided.hint === 'used' && speculative !== null && speculative.ok ? speculative : await getObject(oldCommit, TYPE.COMMIT, 1);
+    const commitGot = decided.hint === 'used' && speculative !== null && speculative.ok ? speculative : await getCommit(oldCommit);
     if (!commitGot.ok) return commitGot;
     const parsed = parseCommit(commitGot.value.data, limits);
     if (!parsed.ok) return parsed;
@@ -540,7 +544,7 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
         let data: Uint8Array;
         // a fetched tree's entries are the ones its check parsed (treeEntries, #208); a cached tree's are parsed here
         let entries: Result<TreeEntry[], PlyError>;
-        if (cached.tag === 'some') { data = cached.value; cacheHits++; entries = parseTree(data, limits); } else { const got = await getObject(treeOid, TYPE.TREE, 0); if (!got.ok) return got; data = got.value.data; cache.set(treeOid, data); entries = treeEntries(got.value, limits); }
+        if (cached.tag === 'some') { data = cached.value; cacheHits++; entries = parseTree(data, limits); } else { const got = keep(await walk.tree(treeOid, s.comps.length - 1 - depth)); if (!got.ok) return got; data = got.value.data; cache.set(treeOid, data); entries = treeEntries(got.value, limits); }
         span.set({ 'git.edit.tree.cache_hit': cached.tag === 'some' });
         const found = entries.ok ? findEntry(entries.value, data.length, name, last) : entries;
         if (!found.ok) {

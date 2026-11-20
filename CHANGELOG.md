@@ -41,18 +41,43 @@ User-visible changes to ply, newest first. The versioning and compatibility rule
   moved the ref before ply read it (only after the empty band 3 above). With `verify: true` such a result is ok, not
   `ambiguous`: the read that settled the push is the verification, recorded as `<op>.verify.ref`, and the ref is not
   read again. (#327; corrects #225)
+- A path walk makes fewer requests on a server that takes `filter combine:blob:none+tree:K` (a git with
+  `uploadpack.allowFilter`: GitLab, Codeberg, self-hosted): `readFile`, `listTree`, `walkCommit`, `walkPath` and
+  `editFile` (and a `commitChanges` routed to it) read two tree levels per fetch, where #218 gave `readFile` and
+  `listTree` the first two levels only and `editFile` none. A path of n components is ceil(n / 2) + 2 requests for
+  `readFile` (n + 3 before; one more for `editFile`). It applies on a first contact too: while a `quirks` record does
+  not yet know whether the server takes the filter, the commit (or the first tree) is asked both ways at once, so a
+  first contact is one request more than that, and on GitHub (which refuses the filter) one request more than
+  before, once per record, with no round trip added. A new record for a server that refuses `tree:0` (Cloudflare
+  Artifacts) or takes no filter now sees that one request as well, beside its one refused `tree:0`; a record that
+  already says `treeFilter: 'blob:none'` or `'none'` is never asked. Results are unchanged: the same commit, trees and
+  blob. `limits.maxPathTreesBytes: 0` restores one tree per fetch. (PR number pending)
 
 ### Added
 
 - `PushResult.readBack`: `null` for a push its report settled; the tip ply read for one settled after an empty band 3.
   `limits.maxPushSettleCommits` (default 8, also in `WORKER_LIMITS`; 0 reads none): the commits read from that tip,
   one fetch each. (#327; corrects #225)
+- `limits.maxPathTreesBytes` (default 1 MiB, also in `WORKER_LIMITS`; 0 never asks): the budget of one path-trees
+  fetch, in place of `maxPackBytes` and `maxInflatedTotal` for that fetch (at most 341 trees). An answer over it is
+  dropped and that walk reads one tree per fetch from there; it never fails an operation. Before, the #218 fetch ran
+  under `maxPackBytes` and `maxInflatedTotal` themselves. (PR number pending)
+- `ply/fetch` exports `treeWithTrees(transport, oid, filter)`: a tree and the trees `filter` brings from under it,
+  read and checked as `commitWithTrees` reads a commit's. (PR number pending)
 
 ### Telemetry
 
 - `git.receive-pack`: `git.push.ambiguous.resolved` (set only after an empty band 3) gains the values `ancestor`
   (landed, the ref moved on), `unchanged`, `unproven` and `unknown` (each still `ambiguous`), beside `landed`,
   `cas_conflict` and `unread`. No key is added or retyped. (#327; corrects #225)
+- `git.upload-pack fetch`: `git.fetch.path_trees` (and the `git.fetch.wide.*` keys beside it) now also appears on
+  fetches under `git.edit` and on tree wants, with the value `combine:blob:none+tree:1` for a tree; such a fetch that
+  is over `limits.maxPathTreesBytes` ends with `error.type: limit_exceeded` while its operation succeeds. `git.read`,
+  `git.ls_tree` and `git.edit` have fewer `git.upload-pack fetch` children where the server takes the filter, and a
+  `git.read.tree` / `git.edit.tree` span may have none (its tree came with the level above). Nine keys ply already
+  emitted (`git.fetch.path_trees` and eight `git.fetch.wide.*`) are added to `test/span-contract.json` on the fetch
+  spans under `git.read`, `git.ls_tree`, `git.edit` and `git.commit > git.edit`; no key is removed or retyped.
+  (PR number pending)
 
 ## 0.2.0
 

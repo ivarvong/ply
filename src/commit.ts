@@ -5,6 +5,7 @@ import type { CommitMiss, PlyError } from './errors.js';
 import { map } from './result.js';
 import type { Result } from './result.js';
 import { objectAt, objectId } from './fetch.js';
+import type { FetchedObject } from './fetch.js';
 import type { Oid } from './oid.js';
 import { parseCommit, TYPE } from './objects.js';
 import type { Commit } from './objects.js';
@@ -20,8 +21,12 @@ export type FetchedCommit = { readonly oid: Oid; readonly data: Uint8Array; read
 // `{ kind: 'commit', miss: { kind: 'absent' } }` (v2Step's not_our_ref). An object that arrived as a tree, blob, or tag
 // is not_found `{ kind: 'commit', miss: { kind: 'not_commit' } }`. A corrupt pack stays pack_corrupt.
 // fetchCommit of a parsed id: ply's own callers, which hold an Oid, start here.
-export async function commitById(t: Transport, oid: Oid): Promise<Result<FetchedCommit, PlyError>> {
-  const got = await objectAt(t, oid, { filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT });
+// `got`: that fetch, for a caller that asks for the commit another way (pathtrees.ts: with its first tree levels); its
+// answer is read here as the tree:0 fetch's is.
+// oxlint-disable-next-line typescript/promise-function-async -- objectAt's promise, passed through
+export const commitObject = (t: Transport, oid: Oid): Promise<Result<FetchedObject, PlyError>> => objectAt(t, oid, { filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT });
+export async function commitById(t: Transport, oid: Oid, fetched: Promise<Result<FetchedObject, PlyError>> = commitObject(t, oid)): Promise<Result<FetchedCommit, PlyError>> {
+  const got = await fetched;
   if (!got.ok) {
     if (got.error.code === 'remote_error' && thrownReasonIs(got.error, 'not_our_ref')) return fail('not_found', `commit ${oid} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid } } });
     return got;

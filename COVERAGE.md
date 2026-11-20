@@ -61,7 +61,7 @@ Each behaviour that is not verified by both ply↔git and ply↔Artifacts, filed
 - `caps.object-format`: object-format=sha1 is accepted; any other object format is refused as unsupported.
 - `caps.filter-not-advertised`: A server whose fetch= line lists no `filter` (stock http-backend) gets no filter argument after one probe.
 - `fetch.acknowledgments-ready-packfile`: v2 response sections in order (acknowledgments, ready, shallow-info, packfile); a server that breaks the order is a protocol error, as it is for git.
-- `fetch.filter-combine`: filter combine:blob:none+tree:&lt;k> (a commit and the first levels of its path in one request).
+- `fetch.filter-combine`: filter combine:blob:none+tree:&lt;k> (a commit or a tree and the path levels under it in one request).
 - `fetch.sideband-bands`: Side-band in the packfile section: band 1 data, band 2 progress, band 3 fatal error.
 - `pack.ofs-delta-resolve`: A served pack with OFS_DELTA chains resolves to the objects git verify-pack lists.
 - `pack.thin-ref-base`: A thin REF base supplied from outside the pack is checked against its claimed id before a delta applies.
@@ -480,7 +480,7 @@ Observed:
 | `fetch.filter-blob-none` | verified | ply↔git, ply↔Artifacts, git↔Artifacts | `fetchPack`, `fetchPackFiltered`, `readFile` | 2 |
 | `fetch.filter-tree-depth` | verified | ply↔git, git↔Artifacts | `fetchPack`, `readCommit` | 2 |
 | `fetch.filter-blob-limit` | verified | ply↔git, git↔Artifacts | `fetchPack` | 1 |
-| `fetch.filter-combine` | verified | ply↔git | `fetchPack`, `readFile` | 2 |
+| `fetch.filter-combine` | verified | ply↔git | `fetchPack`, `readFile`, `editFile` | 3 |
 | `fetch.filter-sparse-oid` | unsupported (observed) | git↔Artifacts, wire↔Artifacts | — | 0 |
 | `fetch.filter-refusal-fallback` | verified | ply↔git, ply↔Artifacts | `learnFilter`, `fetchPack`, `readFile` | 2 |
 | `fetch.deepen-depth` | verified | ply↔git, git↔Artifacts | `fetchPack`, `fetchObject` | 3 |
@@ -656,19 +656,21 @@ Evidence:
 
 #### `fetch.filter-combine`
 
-filter combine:blob:none+tree:&lt;k> (a commit and the first levels of its path in one request).
+filter combine:blob:none+tree:&lt;k> (a commit or a tree and the path levels under it in one request).
 
-Ops: `src/fetchpack.ts` `fetchPack`, `src/read.ts` `readFile`.
+Ops: `src/fetchpack.ts` `fetchPack`, `src/read.ts` `readFile`, `src/edit.ts` `editFile`.
 
 Tests:
 
 - `test/protocol.test.js`: exhaustive fetch matrix: wants × haves × deepen × filter × server
-- `test/path-trees.test.js`: a server that takes it: first contact is tree:0
+- `test/path-trees.test.js`: a server that takes it: first contact is one race
+- `test/path-walk.test.js`: editFile, depth 1 to 8
 
 Evidence:
 
 - ply↔git: `test/protocol.test.js`
 - ply↔git: `test/path-trees.test.js`
+- ply↔git: `test/path-walk.test.js`
 
 > No Artifacts evidence of any kind for combine filters.
 
@@ -694,7 +696,7 @@ Ops: `src/transport.ts` `learnFilter`, `src/fetchpack.ts` `fetchPack`, `src/read
 Tests:
 
 - `test/artifacts-compat.test.js`: Unsupported Git fetch filter; only blob:none is supported.
-- `test/path-trees.test.js`: an Artifacts-like server (only blob:none): never asked for the deep fetch
+- `test/path-trees.test.js`: an Artifacts-like server (only blob:none): one deep fetch per record
 
 Evidence:
 

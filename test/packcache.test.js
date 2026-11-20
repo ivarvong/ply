@@ -1,6 +1,6 @@
 // Pack cache + head hint against real git through the counting proxy. The oracle for "fewer round trips" is the
 // proxy's per-stage request count (what the server actually saw); the oracle for correctness is git itself.
-import { test, beforeAll as before, afterAll as after } from 'vitest';
+import { test, beforeAll as before, afterAll as after, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { fetchBody as fetchBodyR, GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { learnPathTrees, quirksKey, rememberedQuirks } from '../src/transport.js';
 import { unwrap, unwrapAsync } from './unwrap.js';
 
 // Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
@@ -33,6 +34,11 @@ before(async () => {
   proxy = await startProxy(srv.url, () => null);
   url = `${proxy.url}/pc.git`;
 });
+// This file's subject is the cache and the head hint, counted per request, so its remote is one whose path walks are one
+// object per fetch: before each test (test/quirks-reset.js has just cleared what was learned) the remote's remembered
+// record says the path-trees filter is refused, as it would after GitHub's answer (src/pathtrees.ts). The cache over
+// path-trees fetches is the last test, on a record of its own.
+beforeEach(() => { learnPathTrees(rememberedQuirks(quirksKey(url)), 'refused'); });
 after(async () => { await proxy.close?.(); await srv.close(); cleanup(); });
 
 const counts = () => ({ ...proxy.counts });
@@ -1100,4 +1106,40 @@ test('cachingFetch verifyBeforeStore (#270): the whole-answer read is capped at 
   const over = await run(answerWith(22));
   assert.deepEqual([over.f.stats.verifyOk, over.f.stats.verifyFailed, over.cache.entries.size], [0, 1, 0]);
   assert.match(over.f.stats.verifyError, /cached answer bytes 198 exceeds limit 192/);
+});
+
+test('pack cache over path-trees fetches: the commit with two tree levels and a tree with its children are cached, hit and repaired like any wants-only filtered fetch', async () => {
+  const cache = memoryCache();
+  const f = cachingFetch(globalThis.fetch, cache);
+  const quirks = {};
+  const start = headOf();
+  const run = async (find, replace) => {
+    const ex = arrayExporter(); const before = counts();
+    const r = await unwrapAsync(editFile(url, { path: 'a/b/c/file.txt', find, replace, author, message: 'm' }, { tracer: new Tracer({ exporter: ex }), fetchImpl: f, quirks }));
+    return { r, d: delta(before, counts()), fetches: spansOf(ex).filter(s => s.name === 'git.upload-pack fetch') };
+  };
+  const word = /hello (\w+) world/.exec(git(bare, ['cat-file', '-p', 'main:a/b/c/file.txt']))[1];
+  // a first contact: the commit both ways at once (a, the root and the root's children ride with one), a/b with a/b/c, the blob
+  const a = await run(word, 'PT1');
+  assert.deepEqual(a.d, { 'ls-refs': 1, fetch: 4, 'receive-pack': 1 });
+  assert.deepEqual(a.fetches.map(s => [s.attrs['git.fetch.filter'], s.attrs['git.pack.cache']]).toSorted(), [['', ''], ['combine:blob:none+tree:1', 'MISS'], ['combine:blob:none+tree:2', 'MISS'], ['tree:0', 'MISS']]);
+  assert.equal(f.stats.miss, 3); assert.equal(cache.entries.size, 3);
+  git(bare, ['update-ref', 'refs/heads/main', start]); // rewind so the same commit and trees are wanted again
+  // the record now knows the server: the two path-trees fetches alone, both from the cache
+  const b = await run(word, 'PT2');
+  assert.deepEqual(b.d, { 'ls-refs': 1, fetch: 1, 'receive-pack': 1 }, 'only the blob stream reaches the server');
+  assert.deepEqual(b.fetches.map(s => [s.attrs['git.fetch.filter'], s.attrs['git.pack.cache']]), [['combine:blob:none+tree:2', 'HIT'], ['combine:blob:none+tree:1', 'HIT'], ['', '']]);
+  assert.equal(f.stats.hit, 2);
+  assert.equal(b.r.newCommit, headOf());
+  assert.equal(git(bare, ['cat-file', '-p', 'main:a/b/c/file.txt']), 'hello PT2 world\n');
+  git(bare, ['update-ref', 'refs/heads/main', start]);
+  // poison every cached body: each hit fails its hash check, is fetched once more past the cache, and the edit is the same
+  for (const e of cache.entries.values()) e.body[e.body.length - 30] ^= 0xff;
+  const c = await run(word, 'PT3');
+  assert.deepEqual(c.d, { 'ls-refs': 1, fetch: 3, 'receive-pack': 1 }, 'the two poisoned entries were refetched once each');
+  assert.equal(f.stats.bust, 2);
+  assert.equal(c.fetches.filter(s => s.attrs['git.pack.cache'] === 'BUST' && String(s.attrs['git.fetch.path_trees']).startsWith('combine:')).length, 2);
+  assert.equal(c.r.newCommit, headOf());
+  assert.equal(git(bare, ['cat-file', '-p', 'main:a/b/c/file.txt']), 'hello PT3 world\n');
+  assert.deepEqual(fsckProblems(bare), []);
 });

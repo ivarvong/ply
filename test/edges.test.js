@@ -38,7 +38,9 @@ test('wide tree: 20k siblings (tree ≈ 700 KB, multi-pkt, multi-block zlib) and
   for (let i = 0; i < 20000; i++) files[`wide/f${String(i).padStart(5, '0')}.txt`] = '';
   commitFiles(r.work, r.bare, files, 's');
   const ex = arrayExporter();
-  await unwrapAsync(editFile(r.url, { path: 'wide/target.txt', find: 'MARK', replace: 'OK', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) }));
+  // one object per fetch (maxPathTreesBytes 0, as on a server that refuses the path-trees filter): the 700 KB tree is a
+  // fetch of its own, through the single-object parser
+  await unwrapAsync(editFile(r.url, { path: 'wide/target.txt', find: 'MARK', replace: 'OK', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }), limits: withLimits({ maxPathTreesBytes: 0 }) }));
   assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:wide/target.txt']).toString(), 'OK');
   const t = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.edit.tree' && s.attrs['git.edit.tree.depth'] === 1);
   assert.equal(t.attrs['git.edit.tree.entries'], 20001);
@@ -49,6 +51,13 @@ test('wide tree: 20k siblings (tree ≈ 700 KB, multi-pkt, multi-block zlib) and
   assert.ok(f.attrs['git.pack.compressed.bytes'] < f.attrs['git.pack.inflated.bytes'] / 5, 'near-identical names compress hard; the pack is small on the wire');
   await assert.rejects(edit(r, 'wide/target.txt', { find: 'OK' }, { limits: withLimits({ maxTreeEntries: 1000 }) }), e => e.code === 'limit_exceeded');
   assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:wide/target.txt']).toString(), 'OK');
+  // by default the tree comes with the commit (two tree levels in one fetch: it fits maxPathTreesBytes), and the edit is the same
+  const deep = arrayExporter();
+  await edit(r, 'wide/target.txt', { find: 'OK', replace: 'DEEP' }, { tracer: new Tracer({ exporter: deep }) });
+  assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:wide/target.txt']).toString(), 'DEEP');
+  const brought = deep.lines.flatMap(flattenLine).find(s => s.name === 'git.upload-pack fetch' && s.attrs['git.fetch.path_trees'] === 'combine:blob:none+tree:2');
+  assert.ok(brought.attrs['git.fetch.wide.harvested_bytes'] > 600000, 'the 700 KB tree was harvested from the commit\'s fetch');
+  assert.equal(deep.lines.flatMap(flattenLine).find(s => s.name === 'git.edit.tree' && s.attrs['git.edit.tree.depth'] === 1).attrs['git.edit.tree.entries'], 20001);
 });
 
 test('modes: symlink and submodule along the path are refused; executable preserved; names with every odd byte', async () => {

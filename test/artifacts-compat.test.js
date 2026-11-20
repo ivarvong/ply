@@ -86,7 +86,10 @@ test('blob:none fallback: edit (deep path) and read match git; learned once, rem
     assert.ok(wide[0].attrs['git.fetch.wide.extra_objects'] > 40 && wide[0].attrs['git.fetch.wide.extra_bytes'] > 0, JSON.stringify(wide[0].attrs));
     assert.equal(wide[0].attrs['git.fetch.wide.blobs'], 0);
     const rejected = r.proxy.log.filter(l => l.spec === 'status').length;
-    assert.equal(rejected, 1, 'one 400, then remembered');
+    // the edit is this record's first contact and a path walk: its commit was asked with tree:0 and, beside it, with the
+    // path-trees filter (src/pathtrees.ts). Both are refused, once, and the record never sends either again.
+    assert.equal(rejected, 2, 'the tree:0 400 and the path-trees 400 beside it, then remembered');
+    assert.deepEqual(fetches.filter(s => s.attrs['http.response.status_code'] === 400 || s.attrs['error.type'] === 'http').map(s => s.attrs['git.fetch.filter']).toSorted(), ['combine:blob:none+tree:2', 'tree:0']);
     // second operation, same quirks object: no 400 at all; read == git show
     const before400 = rejected;
     const rd = await unwrapAsync(readFile(r.url, { path: 'a/b/c/d/deep.txt' }, { tracer: new Tracer(), quirks }));
@@ -96,17 +99,22 @@ test('blob:none fallback: edit (deep path) and read match git; learned once, rem
     assert.equal(ls.entries.length, 40); assert.equal(ls.tree, git(r.bare, ['rev-parse', 'main:many']).trim());
     assert.equal(r.proxy.log.filter(l => l.spec === 'status').length, before400, 'no further 400s');
     // without a quirks object: the remote's remembered record (#136). The calls above kept theirs in the caller's
-    // object, so the remote's record learns it once (one more 400), and every later call without one pays none
+    // object, so the remote's record learns it once (the same two 400s: a read is a path walk), and every later call
+    // without one pays none
     const statuses = () => r.proxy.log.filter(l => l.spec === 'status').length;
-    for (const want of [before400 + 1, before400 + 1]) {
+    for (const want of [before400 + 2, before400 + 2]) {
       const rd2 = await unwrapAsync(readFile(r.url, { path: 'README.md' }, { tracer: new Tracer() }));
       for await (const _ of rd2.stream); // eslint-disable-line no-unused-vars
       assert.equal(statuses(), want, 'remembered per remote');
     }
-    // a caller's own fresh record opts out: it learns again (one more 400)
+    // a caller's own fresh record opts out: it learns again (the two 400s once more)
     const rd3 = await unwrapAsync(readFile(r.url, { path: 'README.md' }, { tracer: new Tracer(), quirks: {} }));
     for await (const _ of rd3.stream); // eslint-disable-line no-unused-vars
-    assert.equal(statuses(), before400 + 2);
+    assert.equal(statuses(), before400 + 4);
+    // a record that already says blob:none (a caller that persists what was learned) sends neither
+    const rd4 = await unwrapAsync(readFile(r.url, { path: 'README.md' }, { tracer: new Tracer(), quirks: { treeFilter: 'blob:none', blobWants: 'many' } }));
+    for await (const _ of rd4.stream); // eslint-disable-line no-unused-vars
+    assert.equal(statuses(), before400 + 4);
   } finally { await r.proxy.close(); }
 });
 
@@ -152,6 +160,8 @@ test('git-default server: no fallback attributes, tree:0 throughout (the fallbac
 
 // #136: with no quirks passed, the refused filter is asked for at most once per remote, whatever the order of the
 // operations. Counted at the fetchImpl: every upload-pack request that carries `filter tree:0` (Artifacts' 400).
+// When the remote's first operation is a path walk (edit, read), its commit is also asked with the path-trees filter
+// beside that tree:0 request (src/pathtrees.ts): a second 400, at the same time, once per remote.
 // The contrast: a fresh `quirks: {}` per operation (each call its own record, ply before #136) pays one per operation.
 const OPS = ['edit', 'read', 'checkout', 'log', 'merge'];
 const orders = [...OPS.map((_, i) => [...OPS.slice(i), ...OPS.slice(0, i)]), [...OPS].reverse()];
@@ -183,11 +193,13 @@ test('#136: no quirks passed, any order of edit/read/checkout/log/merge: tree:0 
   for (const order of orders) {
     const { refused, status } = await sweep(order, false);
     assert.equal(refused, 1, `${order}: one tree:0 request for the remote`);
-    assert.equal(status, 1, `${order}: one 400`);
+    const walkFirst = order[0] === 'edit' || order[0] === 'read';
+    assert.equal(status, walkFirst ? 2 : 1, `${order}: one 400${walkFirst ? ', and the path-trees one beside it' : ''}`);
   }
   const before = await sweep(OPS, true);
   assert.ok(before.refused >= 4, `a fresh record per call pays per operation: ${before.refused}`);
-  assert.equal(before.status, before.refused);
+  // each call's tree:0 request, and the path-trees request of the two that walk a path (edit, read)
+  assert.equal(before.status, before.refused + 2);
 });
 
 test('#136: forgetQuirks clears one remote or all; the key never holds the credential', async () => {

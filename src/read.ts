@@ -36,7 +36,7 @@ import type { Err, Option, Result } from './result.js';
 import { operation } from './operation.js';
 import { lsRefs, parseUnbornLine, type LsRefsResult } from './lsrefs.js';
 import { discover } from './discover.js';
-import { packStream, objectAt, objectId, spInit, spStep, spFinish, treeEntries } from './fetch.js';
+import { packStream, objectId, spInit, spStep, spFinish, treeEntries } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
 import { bufferSource, concat } from './bytes.js';
@@ -51,7 +51,8 @@ import { raised } from './transport.js';
 import type { TreeEntry } from './objects.js';
 import { isPlyThrown, thrownCodeOr, thrownText } from './boundary.js';
 import { commitById } from './commit.js';
-import { commitForWalk } from './pathtrees.js';
+import { commitForWalk, pathWalk } from './pathtrees.js';
+import type { PathWalk } from './pathtrees.js';
 import { parseOid, type Oid } from './oid.js';
 import type { EntryOptions, TypeNames } from './boundary.js';
 import { at, fromNullable, fromNullish, mapGet, readKey, withDefaults } from './absent.js';
@@ -275,12 +276,14 @@ export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: R
   });
 }
 
-// Effect: a tree's entries, from its bytes in the caller's cache (parsed here) or by one tree:0 fetch whose bytes the
-// cache keeps (the fetch's own check parsed them: treeEntries, #208).
-async function treeAt(t: Transport, cache: TreeCache, oid: Oid, limits: CheckedLimits): Promise<Result<TreeEntry[], PlyError>> {
+// Effect: a tree's entries, from its bytes in the caller's cache (parsed here) or by one fetch whose bytes the cache
+// keeps (a tree:0 fetch's own check parsed them: treeEntries, #208). `below`: the tree levels the walk reads under this
+// one, which that fetch brings the first of where the server takes it (pathtrees.ts).
+type TreeRead = { readonly cache: TreeCache; readonly walk: PathWalk; readonly limits: CheckedLimits };
+async function treeAt({ cache, walk, limits }: TreeRead, oid: Oid, below: number): Promise<Result<TreeEntry[], PlyError>> {
   const cached = mapGet(cache, oid);
   if (cached.tag === 'some') return parseTree(cached.value, limits);
-  const fetched = await objectAt(t, oid, { filter: 'tree:0', expectType: TYPE.TREE });
+  const fetched = await walk.tree(oid, below);
   if (!fetched.ok) return fetched;
   cache.set(oid, fetched.value.data);
   return treeEntries(fetched.value, limits);
@@ -291,19 +294,23 @@ const spanErr = <E>(span: Span, r: Err<E>): Err<E> => { span.error(r.error); ret
 export type Walked = { readonly tree: Oid; readonly entry: TreeEntry | null };
 export type WalkConfig = { readonly cache: TreeCache };
 export type WalkOptions = Input<WalkConfig>;
+// A walk's own state: the tree levels it reads from where it starts (the path's directories, and the listed directory
+// for listTree), and its reads (pathtrees.ts).
+type WalkState = { readonly levels: number; readonly walk: PathWalk };
 // Effect: walk `comps` from a tree the caller already has. `tree` is that starting oid; `entry` is the last component
 // (null when comps is empty). A missing component or a non-directory along the way is not_found with its miss. Each
 // level is a `git.read.tree` span under the transport's parent, so a readFile/listTree walk stays on that trace.
 // walkPath from a parsed tree id: readFile, listTree and ply's other walks start here.
-async function walkFrom(t: Transport, treeOid: Oid, comps: readonly string[], options: WalkOptions = {}): Promise<Result<Walked, PlyError>> {
+async function walkFrom(t: Transport, treeOid: Oid, comps: readonly string[], options: WalkOptions = {}, state: WalkState | null = null): Promise<Result<Walked, PlyError>> {
   const { cache } = withDefaults<WalkConfig>(options, { cache: new Map<string, Uint8Array>() });
+  const { levels, walk } = state === null ? { levels: comps.length, walk: pathWalk(t) } : state;
   let here = treeOid;
   let entry: TreeEntry | null = null;
   for (const [depth, name] of comps.entries()) {
     // oxlint-disable-next-line no-loop-func -- the span runs to completion inside this iteration (awaited)
     const level = await spanOn(t.tracer, 'git.read.tree', { parent: t.parent, attrs: { 'git.read.tree.depth': depth, 'git.read.tree.oid': here, 'git.read.tree.lookup': name } }, async (span): Promise<Result<TreeEntry, PlyError>> => {
       span.set({ 'git.read.tree.cache_hit': isSome(mapGet(cache, here)) });
-      const entries = await treeAt(t, cache, here, t.limits);
+      const entries = await treeAt({ cache, walk, limits: t.limits }, here, levels - 1 - depth);
       if (!entries.ok) return spanErr(span, entries);
       const found = fromNullable(entries.value.find(x => x.name === name));
       span.set({ 'git.read.tree.entries': entries.value.length, 'git.read.tree.entry.found': found.tag === 'some', 'git.read.tree.entry.mode': getOrElse(mapOption(found, f => f.mode), '') });
@@ -329,16 +336,19 @@ export type CommitWalkConfig = WalkConfig & { readonly levels: number };
 export type CommitWalkOptions = Input<CommitWalkConfig>;
 // Effect: walk `comps` from the commit's root tree. `tree` is that root (walkPath's tree is the tree it started from).
 // `levels` is how many tree levels the caller reads from the root: the path's directories, and the listed directory
-// itself for listTree. The commit fetch brings the first of them where the server takes it (pathtrees.ts, #218).
+// itself for listTree. Each fetch brings two of them where the server takes it (pathtrees.ts, #218).
 // `root`, when given, is the operation's span: it carries the commit and its root tree before the walk starts.
-async function walkFromCommit(t: Transport, commit: Oid, comps: readonly string[], { levels, cache }: CommitWalkConfig, root: Span | null): Promise<Result<CommitWalked, PlyError>> {
-  const fetched = await commitForWalk(t, commit, levels);
+// `walk`: the walk's reads, which a caller that reads a tree of its own after the walk goes on with (listTree's listed
+// directory).
+type WalkOn = { readonly root: Span | null; readonly walk: PathWalk };
+async function walkFromCommit(t: Transport, commit: Oid, comps: readonly string[], { levels, cache }: CommitWalkConfig, { root, walk }: WalkOn): Promise<Result<CommitWalked, PlyError>> {
+  const fetched = await commitForWalk(t, commit, levels, walk);
   if (!fetched.ok) return fetched;
   const { data } = fetched.value;
   const info = parseCommit(data, t.limits);
   if (!info.ok) return info;
   if (root !== null) root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.value.tree });
-  const walked = await walkFrom(t, info.value.tree, comps, { cache });
+  const walked = await walkFrom(t, info.value.tree, comps, { cache }, { levels, walk });
   if (!walked.ok) return walked;
   return ok({ commit, data, tree: info.value.tree, entry: walked.value.entry });
 }
@@ -354,7 +364,7 @@ export async function walkCommit(t: Transport, commit: string, comps: readonly s
   if (!id.ok) return id;
   const config = withDefaults<CommitWalkConfig>(options, { cache: new Map<string, Uint8Array>(), levels: comps.length + 1 });
   if (!Number.isSafeInteger(config.levels) || config.levels < 0) return fail('bad_request', `walkCommit: levels must be a non-negative integer, got ${String(config.levels)}`);
-  return walkFromCommit(t, id.value, comps, config, null);
+  return walkFromCommit(t, id.value, comps, config, { root: null, walk: pathWalk(t) });
 }
 
 // A path as the entries take it: validated components. With `allowRoot` (a tree path), a missing, null, empty or '/'
@@ -399,12 +409,13 @@ export async function listTree(url: string, spec: PathSpec = {}, options: TreeRe
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;
     // the tracer operation() started the root span on (opts.tracer)
-    const walked = await walkFromCommit(t, commit, comps, { levels: comps.length + 1, cache }, root);
+    const walk = pathWalk(t);
+    const walked = await walkFromCommit(t, commit, comps, { levels: comps.length + 1, cache }, { root, walk });
     if (!walked.ok) return walked;
     const dir = listedDir(walked.value, comps);
     if (!dir.ok) return dir;
     const oid = dir.value;
-    const parsed = await treeAt(t, cache, oid, limits);
+    const parsed = await treeAt({ cache, walk, limits }, oid, 0);
     if (!parsed.ok) return parsed;
     const entries: readonly TreeEntry[] = parsed.value;
     return outcome('ok', { ref: name, commit, tree: oid, entries: entries.map(e => ({ name: e.name, mode: lsMode(e.mode), oid: e.oid, type: entryType(e.mode) })) }, { 'git.ls_tree.tree': oid, 'git.ls_tree.entries': entries.length });
@@ -441,7 +452,7 @@ export async function readFile(url: string, spec: PathSpec = {}, options: TreeRe
     const resolved = await resolveCommit(t, ref);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;
-    const walked = await walkFromCommit(t, commit, comps, { levels: comps.length, cache }, root);
+    const walked = await walkFromCommit(t, commit, comps, { levels: comps.length, cache }, { root, walk: pathWalk(t) });
     if (!walked.ok) return walked;
     // comps is non-empty (validatePath refuses an empty path), so the walk ends at an entry
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)

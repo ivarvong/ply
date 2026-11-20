@@ -160,19 +160,31 @@ const seeded = () => { const r = repo(); r.base = commitOn(r, 'main', { 'a/b.txt
 const drain = async stream => { const rd = stream.getReader(); let bytes = 0; for (;;) { const { value, done } = await rd.read(); if (done) return bytes; bytes += value.length; } };
 const traced = () => { const ex = arrayExporter(); return { tracer: new Tracer({ exporter: ex }), spans: () => spansOf(ex.lines) }; };
 
+// A path walk on a server that takes `combine:blob:none+tree:K` reads its trees with the commit (src/pathtrees.ts); on
+// one that does not (GitHub), or with this budget at 0, each tree is a fetch of its own. Both are emitted in production,
+// so the path-walking scenarios run once each way and the contract holds the union of their keys.
+const PER_LEVEL = { maxPathTreesBytes: 0 };
 // one entry per public operation (and the wire layer): name → async ({ tracer }) => void, every stream drained
 const SCENARIOS = {
-  editFile: async ({ tracer }) => { const r = seeded(); await unwrapAsync(editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'DONE', author, message: 'edit' }, { tracer, verify: true })); },
+  editFile: async ({ tracer }) => {
+    const r = seeded();
+    await unwrapAsync(editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'DONE', author, message: 'edit' }, { tracer, verify: true }));
+    await unwrapAsync(editFile(r.url, { path: 'a/b.txt', find: 'DONE', replace: 'MARK', author, message: 'edit back' }, { tracer, verify: true, limits: PER_LEVEL }));
+  },
   commitChanges: async ({ tracer }) => {
     const r = seeded();
     await unwrapAsync(commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'create', path: 'n.txt', content: 'n\n' }], author, message: 'add', time: 1700000000 }, { tracer, verify: true }));
     await unwrapAsync(commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'edit', path: 'a/b.txt', find: 'MARK', replace: 'DONE' }], author, message: 'edit', time: 1700000000 }, { tracer, verify: true }));
+    await unwrapAsync(commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'edit', path: 'a/b.txt', find: 'DONE', replace: 'MARK' }], author, message: 'edit back', time: 1700000000 }, { tracer, verify: true, limits: PER_LEVEL }));
   },
   pushTree: async ({ tracer }) => { const r = seeded(); await unwrapAsync(pushTree(r.url, { files: { 'a/b.txt': 'NEW\n', 'a/c.txt': 'c\n', 'x/y.txt': 'y\n' }, author, message: 'deploy' }, { tracer, verify: true })); },
   checkoutTree: async ({ tracer }) => { const r = seeded(); const res = await unwrapAsync(checkoutTree(r.url, {}, { tracer })); for await (const f of res.files) if (f.stream) await drain(f.stream); },
   'checkoutTree(batch=1)': async ({ tracer }) => { const r = seeded(); const res = await unwrapAsync(checkoutTree(r.url, { path: 'a' }, { tracer, batch: 1 })); for await (const f of res.files) if (f.stream) await drain(f.stream); },
-  readFile: async ({ tracer }) => { const r = seeded(); const res = await unwrapAsync(readFile(r.url, { path: 'a/b.txt' }, { tracer })); await drain(res.stream); },
-  listTree: async ({ tracer }) => { const r = seeded(); await unwrapAsync(listTree(r.url, { path: 'a' }, { tracer })); },
+  readFile: async ({ tracer }) => {
+    const r = seeded();
+    for (const limits of [{}, PER_LEVEL]) { const res = await unwrapAsync(readFile(r.url, { path: 'a/b.txt' }, { tracer, limits })); await drain(res.stream); }
+  },
+  listTree: async ({ tracer }) => { const r = seeded(); for (const limits of [{}, PER_LEVEL]) await unwrapAsync(listTree(r.url, { path: 'a' }, { tracer, limits })); },
   readCommit: async ({ tracer }) => { const r = seeded(); await unwrapAsync(readCommit(r.url, {}, { tracer })); },
   mergeBranch: async ({ tracer }) => {
     const r = seeded(); commitOn(r, 'feat', { 'f.txt': 'f\n' }, 'feat', 'main'); commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'main moves');

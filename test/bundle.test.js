@@ -62,6 +62,7 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-31: 73,090 B / 28,222 B gz. strict TS (T2: objects, format, validate, scrub): min down, gz up a few dozen bytes from strict-lint forms (/u regexes, Number.parseInt, explicit length checks, noUncheckedIndexedAccess guards) and identifier remangling.
   // 2026-10-31: 72,968 B / 28,246 B gz. lsRefs reads an unborn HEAD through an injected reader (issue #103): the edit path pays for the result field and the request flag (+99 B min, +25 B gz), not the parser or the advertisement probe.
   // 2026-11-19: 150,735 B / 54,030 B gz (149,269 / 53,547 before). An empty band 3 settled from the ref (SAFETY.md I36): push.js walks commits from the tip with fetch.js's objectAt, which the edit path already carries. No module joins the bundle; the same +1,460 B on tree and merge.
+  // 2026-11-20: 152,106 B / 54,564 B gz (150,735 / 54,030 before). The path walk (pathtrees.js: two tree levels per fetch under limits.maxPathTreesBytes) joins the edit path, with commit.js's commit fetch; read +734 B / +329 B gz for the tree step and the budget.
   size('edit', 'gz', gz, 28_247);
 });
 

@@ -1,5 +1,6 @@
 // #218: readFile / listTree fetch the commit and the path's first two tree levels in one request where the server takes
-// `combine:blob:none+tree:K`. git is the oracle for every answer (`git show`, `git ls-tree`); the proxy in front of git
+// `combine:blob:none+tree:K`, and (since the bench/compare finding) every two levels after them the same way, on a first
+// contact too: test/path-walk.test.js has the request sequences per depth, the budget and editFile. git is the oracle for every answer (`git show`, `git ls-tree`); the proxy in front of git
 // http-backend counts the requests and the filters they carry. Servers: git with uploadpack.allowFilter (takes it), git
 // configured as GitHub is (uploadpackfilter.tree.maxDepth=0, uploadpackfilter.combine.allow=false: GitHub's two refusals,
 // byte for byte), git with maxDepth=1, an Artifacts-like proxy (every filter but blob:none is a 400), and a proxy that
@@ -31,9 +32,12 @@ const READS = ['README.md', 'a/x.txt', 'a/b/y.txt', 'a/b/c/z.txt', 'a/b/c/d/w.tx
 const LISTS = ['', 'a', 'a/b', 'a/b/c'];
 const depth = p => (p === '' ? 0 : p.split('/').length);
 // Round trips of a warm read on a server that takes the deep fetch: ls-refs, the commit with the first
-// min(levels, PATH_TREE_LEVELS) tree levels, one fetch per level past them, and the blob for readFile.
-const deepReadRequests = p => 1 + 1 + Math.max(0, depth(p) - PATH_TREE_LEVELS) + 1;
-const deepListRequests = p => 1 + 1 + Math.max(0, depth(p) + 1 - PATH_TREE_LEVELS);
+// min(levels, PATH_TREE_LEVELS) tree levels, one fetch per PATH_TREE_LEVELS levels past them, and the blob for readFile.
+const pastCommit = levels => Math.ceil(Math.max(0, levels - PATH_TREE_LEVELS) / PATH_TREE_LEVELS);
+const deepReadRequests = p => 1 + 1 + pastCommit(depth(p)) + 1;
+const deepListRequests = p => 1 + 1 + pastCommit(depth(p) + 1);
+// The filters of those fetches, in order: the commit's, then one per two levels (the last alone when one level is left).
+const deepWalkFilters = levels => { const out = [pathTreesFilter(levels)]; for (let left = levels - PATH_TREE_LEVELS; left > 0; left -= PATH_TREE_LEVELS) out.push(left === 1 ? 'tree:0' : 'combine:blob:none+tree:1'); return out; };
 // ... and on one that does not (today's walk): ls-refs, the commit, one tree per level, the blob.
 const narrowReadRequests = p => 1 + 1 + depth(p) + 1;
 const narrowListRequests = p => 1 + 1 + depth(p) + 1;
@@ -76,29 +80,25 @@ test('pathTreesFilter: the levels a walk reads, capped at PATH_TREE_LEVELS', () 
   assert.equal(pathTreesFilter(7), 'combine:blob:none+tree:2');
 });
 
-test('a server that takes it: first contact is tree:0, then one race, then the deep fetch alone; every answer is git\'s', async () => {
+test('a server that takes it: first contact is one race, then the deep fetch alone; every answer is git\'s', async () => {
   const r = await repo();
   try {
     const quirks = {}; const tracer = new Tracer();
-    // 1: nothing known: the tree:0 walk (tree:0 is settled by it)
+    // 1: nothing known: both commit fetches, concurrently; the deep one wins and is learned
     let at = r.mark(); await checkRead(r, 'a/b/y.txt', { tracer, quirks });
-    assert.equal(since(r, at).length, narrowReadRequests('a/b/y.txt'));
-    assert.equal(deepFilters(since(r, at)).length, 0, 'no deep fetch before tree:0 is known to be taken');
-    // 2: tree:0 taken, the deep fetch not known: both commit fetches, concurrently; the deep one wins
-    at = r.mark(); await checkRead(r, 'a/b/y.txt', { tracer, quirks });
     assert.equal(since(r, at).length, deepReadRequests('a/b/y.txt') + 1, 'the race adds the tree:0 commit fetch');
     assert.deepEqual(deepFilters(since(r, at)).map(s => s.filter), ['combine:blob:none+tree:2']);
-    // 3+: taken: the deep fetch alone, every depth, readFile and listTree
+    assert.equal(since(r, at).filter(s => s.filter === 'tree:0').length, 2, 'the tree:0 commit fetch, and a/b: the one level past the commit\'s two');
+    // 2+: taken: the deep fetches alone, every depth, readFile and listTree
     for (const p of READS) {
       at = r.mark(); await checkRead(r, p, { tracer, quirks });
       assert.equal(since(r, at).length, deepReadRequests(p), `readFile ${p}`);
-      assert.deepEqual(deepFilters(since(r, at)).map(s => s.filter), [pathTreesFilter(depth(p))], `readFile ${p}`);
-      assert.equal(since(r, at).filter(s => s.filter === 'tree:0').length, Math.max(0, depth(p) - PATH_TREE_LEVELS), `readFile ${p}: tree:0 only past the deep levels`);
+      assert.deepEqual(since(r, at).slice(1, -1).map(s => s.filter), deepWalkFilters(depth(p)), `readFile ${p}`);
     }
     for (const p of LISTS) {
       at = r.mark(); await checkList(r, p, { tracer, quirks });
       assert.equal(since(r, at).length, deepListRequests(p), `listTree ${p || '/'}`);
-      assert.deepEqual(deepFilters(since(r, at)).map(s => s.filter), [pathTreesFilter(depth(p) + 1)], `listTree ${p || '/'}`);
+      assert.deepEqual(since(r, at).slice(1).map(s => s.filter), deepWalkFilters(depth(p) + 1), `listTree ${p || '/'}`);
     }
     assert.equal(quirks.treeFilter, 'tree:0', 'the public record is unchanged by what was learned');
     assert.deepEqual(Object.keys(quirks).toSorted(), ['blobWants', 'treeFilter']);
@@ -112,14 +112,12 @@ test('walkCommit (#222): the commit and the path\'s first two levels in one fetc
     const head = git(r.bare, ['rev-parse', 'main']).trim();
     const rev = spec => git(r.bare, ['rev-parse', spec]).trim();
     const t = unwrap(createTransport(r.url, { tracer, quirks }));
-    // first contact: nothing known, so the commit (tree:0) and one tree per level, as readFile's first walk
+    // first contact: nothing known, so the deep fetch races the commit's tree:0 fetch once and is learned
     let at = r.mark();
     let cache = new Map();
     const cold = await unwrapAsync(walkCommit(t, head, ['a', 'b'], { cache }));
-    assert.deepEqual(since(r, at).map(s => s.filter), ['tree:0', 'tree:0', 'tree:0']);
+    assert.deepEqual(since(r, at).map(s => s.filter).toSorted(), ['combine:blob:none+tree:2', 'tree:0']);
     assert.equal(cold.entry.oid, rev('main:a/b'));
-    // tree:0 is now known to be taken: the deep fetch races the commit's tree:0 fetch once and is learned
-    await unwrapAsync(walkCommit(t, head, ['a'], { cache: new Map() }));
     at = r.mark(); cache = new Map();
     const w = await unwrapAsync(walkCommit(t, head, ['a', 'b'], { cache }));
     assert.deepEqual(since(r, at).map(s => s.filter), ['combine:blob:none+tree:2'], 'one request: the commit, the root and a/');
@@ -135,12 +133,13 @@ test('walkCommit (#222): the commit and the path\'s first two levels in one fetc
     assert.deepEqual(Buffer.from(sibling.data), gitBuf(r.bare, ['cat-file', 'tree', rev('main:q')]));
     assert.equal(since(r, at).length, 0);
     // levels: the default is comps.length + 1 (root listing: tree:1), 0 is the commit alone (its root tree is still in the
-    // transport's harvest from the deep fetches above), past 2 is capped at 2
+    // transport's harvest from the deep fetches above), past 2 is capped at 2 per fetch: a/b comes with a/b/c in the next
+    // one (a/b was that fetch's want, which the caller's cache keeps, not the harvest: the second walk asks for it again)
     for (const [comps, levels, filters] of [
       [[], undefined, ['combine:blob:none+tree:1']],
       [['a'], 0, ['tree:0']],
-      [['a', 'b', 'c', 'd'], undefined, ['combine:blob:none+tree:2', 'tree:0', 'tree:0']],
-      [['a', 'b', 'c', 'd'], 9, ['combine:blob:none+tree:2', 'tree:0', 'tree:0']],
+      [['a', 'b', 'c', 'd'], undefined, ['combine:blob:none+tree:2', 'combine:blob:none+tree:1']],
+      [['a', 'b', 'c', 'd'], 9, ['combine:blob:none+tree:2', 'combine:blob:none+tree:1']],
       [['a'], 1, ['combine:blob:none+tree:1']],
     ]) {
       at = r.mark();
@@ -198,7 +197,6 @@ test('a server whose tree depth is capped at 1: a K=2 refusal is learned as refu
   const r = await repo({ config: [['uploadpackfilter.tree.maxDepth', '1']] });
   try {
     const quirks = {}; const tracer = new Tracer();
-    await checkRead(r, 'README.md', { tracer, quirks }); // settles tree:0
     await checkRead(r, 'README.md', { tracer, quirks }); // race, K = 1: taken
     let at = r.mark(); await checkRead(r, 'README.md', { tracer, quirks });
     assert.equal(since(r, at).length, deepReadRequests('README.md'));
@@ -211,7 +209,7 @@ test('a server whose tree depth is capped at 1: a K=2 refusal is learned as refu
   } finally { await r.proxy.close(); }
 });
 
-test('an Artifacts-like server (only blob:none): never asked for the deep fetch; one 400 per record, as #136', async () => {
+test('an Artifacts-like server (only blob:none): one deep fetch per record, beside the one refused tree:0, both 400; never asked again', async () => {
   const REJECT = 'Unsupported Git fetch filter; only blob:none is supported.';
   const r = await repo({ fault: ctx => (ctx.phase !== 'request' && ctx.stage === 'fetch' && filterOf(ctx.reqBody) && filterOf(ctx.reqBody) !== 'blob:none' ? { type: 'status', status: 400, contentType: 'text/plain; charset=utf-8', body: REJECT } : null) });
   try {
@@ -221,8 +219,14 @@ test('an Artifacts-like server (only blob:none): never asked for the deep fetch;
       for (const p of LISTS) await checkList(r, p, { tracer, quirks });
     }
     assert.equal(quirks.treeFilter, 'blob:none');
-    assert.equal(deepFilters(r.seen).length, 0);
+    // the first commit fetch is the race: the two requests the record ever sends that are not blob:none
+    assert.deepEqual(r.seen.slice(1, 3).map(s => s.filter).toSorted(), ['combine:blob:none+tree:1', 'tree:0']);
+    assert.equal(deepFilters(r.seen).length, 1, 'refused once, never asked again on this record');
     assert.equal(r.seen.filter(s => s.filter === 'tree:0').length, 1, 'tree:0 refused once');
+    // a record that already says blob:none (ply-web persists it as JSON) is never asked
+    const at = r.mark();
+    await checkRead(r, 'a/b/y.txt', { tracer, quirks: { treeFilter: 'blob:none', blobWants: 'many' } });
+    assert.deepEqual(since(r, at).map(s => s.filter), [null, 'blob:none', null]);
   } finally { await r.proxy.close(); }
 });
 

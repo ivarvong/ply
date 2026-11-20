@@ -431,6 +431,16 @@ function pass2(add) {
       bytes: 8 * 64, entries: 8, limits: { [key]: 0 }, expect: ok,
     });
   }
+  // ---- maxPathTreesBytes. It cannot refuse a read either: it bounds what one path-trees fetch may bring (a walk's commit
+  // or tree with the level below it, src/pathtrees.ts), and an answer over it is dropped for one tree per level. So a
+  // read under 0 (never asked), under 1 (every such answer is over) and under the default must all be the file git has.
+  // Where the budget decides (an answer that fits exactly, one byte over) is test/path-walk-unit.test.js.
+  for (const [name, limits] of [['zero', { maxPathTreesBytes: 0 }], ['one', { maxPathTreesBytes: 1 }], ['default', null]]) {
+    add({
+      id: `pathtrees.readFile.${name}`, param: 'maxPathTreesBytes', op: 'readFile', repo: 'depth-8', path: 'd/d/d/d/d/d/d/f.txt',
+      bytes: 64, entries: 8, ...(limits === null ? {} : { limits }), expect: ok,
+    });
+  }
   // The default cap equals maxRefs, so the largest push maxRefs allows (10 000 commands) has 10 001 report lines.
   const refCap = DEFAULT_LIMITS.maxRefs;
   for (const n of [refCap - 1, refCap, refCap + 1]) {

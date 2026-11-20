@@ -1,5 +1,5 @@
 // #218, the decision table of commitForWalk (src/pathtrees.ts) over a fake transport, fast enough for the mutation run
-// (vitest.stryker.config.ts). What git does with each request is test/path-trees.test.js's; this file pins which
+// (vitest.stryker.config.ts). The walk's trees, the budget and the walk's own state are test/path-walk-unit.test.js's. What git does with each request is test/path-trees.test.js's; this file pins which
 // requests are sent, what is learned, and which answer is returned, for every state × outcome.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
@@ -74,7 +74,7 @@ test('pathTreesFilter and PATH_TREE_LEVELS', () => {
   assert.deepEqual([1, 2, 3, 9].map(pathTreesFilter), ['combine:blob:none+tree:1', 'combine:blob:none+tree:2', 'combine:blob:none+tree:2', 'combine:blob:none+tree:2']);
 });
 
-test('no levels, tree:0 not settled, or a non-tree:0 record: the tree:0 commit fetch alone, nothing learned', async () => {
+test('no levels, or a non-tree:0 record: the commit fetch alone, nothing learned; a first contact is the race', async () => {
   const { tip } = fixture();
   const a = fake('ok');
   sameCommit(await commitForWalk(a.t, tip, 0));
@@ -82,13 +82,21 @@ test('no levels, tree:0 not settled, or a non-tree:0 record: the tree:0 commit f
   sameCommit(await commitForWalk(a.t, tip, 0));
   assert.deepEqual(a.log, ['tree:0', 'tree:0'], 'levels 0 never asks, settled or not');
   assert.equal(pathTreesOf(a.t.quirks), null);
+  // a first contact (tree:0 not settled): both commit fetches at once, and the deep answer is learned and used
   const b = fake('ok');
   sameCommit(await commitForWalk(b.t, tip, 2));
-  assert.deepEqual(b.log, ['tree:0'], 'first contact: tree:0 alone');
-  assert.equal(pathTreesOf(b.t.quirks), null);
-  for (const filter of ['blob:none', 'none']) {
-    const c = fake('ok'); await settle(c.t); c.t.quirks.treeFilter = filter;
-    assert.equal(tree0Taken(c.t.quirks), false, filter);
+  assert.deepEqual(b.log.toSorted(), ['combine:blob:none+tree:2', 'tree:0'], 'first contact: the race');
+  assert.equal(pathTreesOf(b.t.quirks), 'taken');
+  // a record that says the server refuses tree:0 or takes no filter: never asked, whatever else is known of it
+  for (const [filter, sent] of [['blob:none', 'blob:none'], ['none', '']]) {
+    for (const known of [null, 'taken']) {
+      const c = fake('ok'); await settle(c.t); c.t.quirks.treeFilter = filter; c.log.length = 0;
+      assert.equal(tree0Taken(c.t.quirks), false, filter);
+      if (known !== null) learnPathTrees(c.t.quirks, known);
+      sameCommit(await commitForWalk(c.t, tip, 2));
+      assert.deepEqual(c.log, [sent], `${filter} ${known}`);
+      assert.equal(pathTreesOf(c.t.quirks), known, `${filter} ${known}`);
+    }
   }
 });
 

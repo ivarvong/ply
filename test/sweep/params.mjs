@@ -11,6 +11,7 @@ export const PARAMS = [
   { key: 'maxMergeWork', limit: DEFAULT_LIMITS.maxMergeWork, probe: 'mergeBranch of a three-line file both sides changed, with a budget of no steps and with each preset\'s', later: false },
   { key: 'maxObjectSize', limit: DEFAULT_LIMITS.maxObjectSize, probe: 'pushTree of one file', later: false },
   { key: 'maxHarvestBytes', limit: DEFAULT_LIMITS.maxHarvestBytes, probe: 'readLog on a server without filters, the cap around the commit and tree bytes git reports', later: false },
+  { key: 'maxPathTreesBytes', limit: DEFAULT_LIMITS.maxPathTreesBytes, probe: 'readFile of a depth-8 path under a budget of 0 and of 1: the file is still read (a cap on what one fetch may bring with a tree, not on the outcome)', later: false },
   { key: 'maxPackBytes', limit: DEFAULT_LIMITS.maxPackBytes, probe: 'readFile of an incompressible blob', later: false },
   { key: 'maxDeltaResult', limit: DEFAULT_LIMITS.maxDeltaResult, probe: 'parsePack with the cap around the largest delta git stored', later: false },
   { key: 'maxDeltaChain', limit: DEFAULT_LIMITS.maxDeltaChain, probe: 'resolvePack of a pack-objects chain', later: false },

@@ -82,7 +82,16 @@ const LIES = {
   'push:no-ref-lines': (R, D) => ctx => ctx.stage === 'receive-pack' ? { type: 'bytes', bytes: concat([pktLine('unpack ok\n'), FLUSH]), name: 'no ref lines' } : { type: 'pass' },
   // two lies: ls-refs old commit AND blob stale (consistent with each other: a fully lagging replica).
   'replica:consistent-lag': (R, D) => ctx => ctx.stage === 'ls-refs' ? { type: 'bytes', bytes: concat([pktLine(`${R.older} refs/heads/main\n`), FLUSH]), name: 'lag' } : { type: 'pass' },
+  // The path-trees fetch (src/pathtrees.ts: the commit asked with its first two tree levels, beside the tree:0 commit
+  // fetch on a first contact). The other lies run the edit with one object per fetch (limits.maxPathTreesBytes 0), so a
+  // fetch index names one object; these two run it with the default budget and lie in that fetch alone. Every object of
+  // its pack is kept under the hash of its own bytes, so neither can change what the edit reads: it must succeed.
+  // the real commit with the decoy's root and leaf trees where its own should be
+  'path-trees:decoy-trees': (R, D) => ctx => isPathTrees(ctx) ? { type: 'bytes', bytes: fetchResponse([obj(R.bare, R.head), obj(D.bare, D.rootTree), obj(D.bare, D.leafTree)], { shallow: [R.head] }), name: 'decoy trees' } : { type: 'pass' },
+  // the decoy's commit and trees: not the wanted commit at all
+  'path-trees:decoy-commit': (R, D) => ctx => isPathTrees(ctx) ? { type: 'bytes', bytes: fetchResponse([obj(D.bare, D.head), obj(D.bare, D.rootTree), obj(D.bare, D.leafTree)], { shallow: [D.head] }), name: 'decoy commit' } : { type: 'pass' },
 };
+const isPathTrees = ctx => ctx.stage === 'fetch' && Buffer.from(ctx.reqBody).toString('latin1').includes('filter combine:blob:none+tree:');
 
 // one random DAG per case, pushed to a bare repo; every commit's bytes read once, up front (the fault never spawns git)
 function dagRepo(rng, i, decoy) {
@@ -175,12 +184,13 @@ try {
     // decoy repo: same path, different content
     const dbare = makeBareRepo(root, 'd' + name); const dwork = join(root, `dw${i}`); mkdirSync(dwork); initRepo(dwork);
     const dhead = commitFiles(dwork, dbare, { [FILE]: 'decoy MARK decoy\n' }, 'decoy');
-    const D = { bare: dbare, head: dhead, leafTree: git(dbare, ['rev-parse', 'main:a/b']).trim() };
+    const D = { bare: dbare, head: dhead, rootTree: git(dbare, ['rev-parse', 'main^{tree}']).trim(), leafTree: git(dbare, ['rev-parse', 'main:a/b']).trim() };
     const proxy = await startProxy(srv.url, LIES[lie](R, D));
     const exporter = arrayExporter();
     let result = null, error = null;
     const verify = rng.bool(0.5);
-    try { result = await unwrapAsync(editFile(`${proxy.url}/${name}.git`, { path: FILE, find: 'MARK', replace: 'XX', author: { name: 'l', email: 'l@x' }, message: 'l' }, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000 }), verify })); }
+    const pathTrees = lie.startsWith('path-trees:');
+    try { result = await unwrapAsync(editFile(`${proxy.url}/${name}.git`, { path: FILE, find: 'MARK', replace: 'XX', author: { name: 'l', email: 'l@x' }, message: 'l' }, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000, ...(pathTrees ? {} : { maxPathTreesBytes: 0 }) }), verify })); }
     catch (e) { error = e; }
     await proxy.close();
     const problems = [];
@@ -198,6 +208,8 @@ try {
       else if (content !== EXPECTED) problems.push(`claimed success with WRONG CONTENT ${JSON.stringify(content)}`);
       else { const parent = (() => { try { return git(bare, ['rev-parse', `${result.newCommit}^`]).trim(); } catch { return null; } })(); if (parent !== head && lie !== 'ls-refs:old-commit' && lie !== 'replica:consistent-lag') problems.push('new commit parent is not the real head'); }
     }
+    if (pathTrees && error) problems.push(`a lie in the path-trees fetch failed the edit: ${error.code} ${error.message}`);
+    if (pathTrees && !exporter.lines.flatMap(flattenLine).some(s => s.name === 'git.upload-pack fetch' && String(s.attrs['git.fetch.path_trees']).startsWith('combine:'))) problems.push('the path-trees fetch was not sent');
     // a lying 'ok' must be caught whenever verify is on (the proxy's fake report never reaches the real server)
     if (lie === 'push:fake-ok') { if (verify && !error) problems.push('verify=on but forged ok was believed'); if (verify && error && error.code !== 'ambiguous') problems.push(`verify=on: expected ambiguous, got ${error.code}`); }
     const code = error ? error.code : 'ok';

@@ -54,6 +54,18 @@ export const LIMIT_OBJECT: number = 64 * MIB;
 /** Commits and trees kept from an over-wide blob:none pack. Half an object, so a harvest cannot hide a second full one. */
 export const LIMIT_HARVEST: number = LIMIT_OBJECT / 2;
 /**
+ * What one path-trees fetch may bring (pathtrees.ts): a path walk's commit or tree asked for together with the trees one
+ * level below it (`filter combine:blob:none+tree:K`), so two path levels cost one round trip. How wide that level is, is
+ * the repository's and is not known until the answer is read, so the fetch runs under this budget in place of
+ * maxPackBytes and of maxInflatedTotal: at most this many band-1 bytes are read, and the trees held (each charged its
+ * size plus LIMIT_OBJECT_OVERHEAD, before it is inflated) sum to at most this. An answer past it is dropped and the
+ * walk reads one tree per level from there on, as it does on a server that refuses the filter. 1 MiB holds at most 341
+ * trees (1 MiB / LIMIT_OBJECT_OVERHEAD): the 20 to 55 KB and 48 trees measured for a root and its children on
+ * gitlab-org/gitlab, linux and forgejo (CONTEXT.md, #218) pass, and the 566 trees of one level more do not. 0 never
+ * asks: every level is its own fetch.
+ */
+export const LIMIT_PATH_TREES: number = MIB;
+/**
  * Band-1 (pack) bytes one fetch may deliver, buffered or streamed, and band-2 bytes beside them; also one advertisement,
  * one receive-pack report. Two objects, on the wire. A streamed blob holds none of it, but its ingress has to end
  * somewhere a caller controls: 128 MiB is above GitHub's 100 MiB file cap, so any blob GitHub stores streams under it.
@@ -220,6 +232,7 @@ export type Limits = {
   readonly maxMergeWork: number;
   readonly maxObjectSize: number;
   readonly maxHarvestBytes: number;
+  readonly maxPathTreesBytes: number;
   readonly maxPackBytes: number;
   readonly maxPushBytes: number;
   readonly maxDeltaResult: number;
@@ -271,6 +284,7 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
   maxMergeWork: LIMIT_MERGE_WORK,
   maxObjectSize: LIMIT_OBJECT,
   maxHarvestBytes: LIMIT_HARVEST,
+  maxPathTreesBytes: LIMIT_PATH_TREES,
   maxPackBytes: LIMIT_PACK_WIRE,
   maxPushBytes: LIMIT_PUSH_BYTES,
   maxDeltaResult: LIMIT_DELTA_RESULT,

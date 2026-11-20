@@ -1116,7 +1116,8 @@ test('listTree: the root, a subdirectory, cache hits and every not_found', async
   const before = r.fetches().length;
   const e3 = env(r);
   await unwrapAsync(listTree('http://fake/r.git', { path: 'src/lib' }, { ...e3.opts, cache }));
-  assert.equal(r.fetches().length, before + 1, 'only the commit');
+  // (asked both ways at once: this transport's record does not know the server yet, src/pathtrees.ts)
+  assert.deepEqual(r.fetches().slice(before).map(f => [f.wants[0], f.filter]).toSorted(), [[c, 'combine:blob:none+tree:2'], [c, 'tree:0']], 'only the commit');
   assert.deepEqual(e3.all('git.read.tree').map(x => x.attrs['git.read.tree.cache_hit']), [true, true]);
   for (const path of [undefined, null, '', '/']) assert.equal((await unwrapAsync(listTree('http://fake/r.git', { path }, env(r).opts))).tree, GIT.root);
   await rejects(unwrapAsync(listTree('http://fake/r.git', { path: 'README' }, env(r).opts)), 'not_found', 'README is not a directory (mode 100644)', { miss: { kind: 'not_directory', path: 'README', mode: '100644' } });
@@ -1426,9 +1427,15 @@ test('the details each operation stamps: prefixes, filters, nested paths, caller
   await rejects(unwrapAsync(readCommit('http://fake/r.git', {}, env(words('protocol', 'expected commit')).opts)), 'protocol', 'expected commit');
 
   // read.js: tree fetches are tree:0, nested paths in messages, caller limits
-  const le = env(r); r.log.length = 0;
+  const le = env(r, { limits: withLimits({ maxPathTreesBytes: 0 }) }); r.log.length = 0;
   await unwrapAsync(listTree('http://fake/r.git', { path: 'src' }, le.opts));
-  assert.deepEqual(r.fetches().map(f => f.filter), ['tree:0', 'tree:0', 'tree:0']);
+  assert.deepEqual(r.fetches().map(f => [f.wants[0] === c, f.filter]), [[true, 'tree:0'], [false, 'tree:0'], [false, 'tree:0']]);
+  // with the default budget the commit is asked both ways (a first contact) and a tree that has a level under it with
+  // its children; this remote answers each with the wanted object alone, so every tree is still a fetch of its own
+  const lw = env(r); r.log.length = 0;
+  await unwrapAsync(listTree('http://fake/r.git', { path: 'src' }, lw.opts));
+  assert.deepEqual([r.fetches().slice(0, 2).map(f => [f.wants[0], f.filter]).toSorted(), r.fetches().slice(2).map(f => [f.wants[0] === c, f.filter])],
+    [[[c, 'combine:blob:none+tree:2'], [c, 'tree:0']], [[false, 'combine:blob:none+tree:1'], [false, 'tree:0']]]);
   await rejects(unwrapAsync(listTree('http://fake/r.git', { path: 'src/a.js' }, env(r).opts)), 'not_found', 'src/a.js is not a directory (mode 100644)');
   await rejects(unwrapAsync(readFile('http://fake/r.git', { path: 'src/lib' }, env(r).opts)), 'not_found', 'src/lib is a directory');
   await rejects(unwrapAsync(listTree('http://fake/r.git', { path: 'src/lib' }, { ...env(r).opts, limits: withLimits({ maxPathDepth: 1 }) })), 'bad_request', 'invalid path: depth 2 exceeds 1');

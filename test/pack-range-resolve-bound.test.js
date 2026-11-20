@@ -141,6 +141,8 @@ test('withLimits(null) is the frozen defaults: null from an untyped caller is no
     maxMergeWork: 4_294_967_296, maxReportReasonBytes: 4096, maxReportProgressBytes: 8_388_608,
     // README Limits: maxPushSettleCommits 8 commits read to settle an empty band 3
     maxPushSettleCommits: 8,
+    // README Limits: maxPathTreesBytes 1 MiB for one path-trees fetch
+    maxPathTreesBytes: 1_048_576,
   };
   const made = withLimits(null);
   assert.deepEqual({ ...made }, defaults);

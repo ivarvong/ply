@@ -53,10 +53,11 @@ the reason instead of being measured as something they are not. ply runs on both
   not timed), and the measured steps are `git pull -q --ff-only origin main` (or `git fetch` + `cat-file FETCH_HEAD:PATH`
   for a partial read) and the task. The head commit rewrites the target file, so the stale clone lacks the current
   blob. ply keeps no repository state, so its reused mode is a warm process: the same task runs once, unmeasured,
-  against the one-commit-behind copy (module load, JIT, a kept-alive connection, learned server quirks), then the
-  measured call. Its elapsed time is `performance.now()` around that call and excludes process start-up; its memory
-  covers the whole process. ply's optional pack cache is not exercised. Reused elapsed figures are not comparable with
-  fresh ones.
+  against the one-commit-behind copy (module load, JIT, a kept-alive connection), then the measured call. What ply
+  learns about a server is kept per remote URL, and the copy is another URL: for what ply knows of the server, the
+  measured call is a first contact. Its elapsed time is `performance.now()` around that call and excludes process
+  start-up; its memory covers the whole process. ply's optional pack cache is not exercised. Reused elapsed figures
+  are not comparable with fresh ones.
 
 **Held equal.** One server process and one fixture per cell for every client; every sample runs against its own fresh
 copy of the fixture repository in an empty client directory (so nothing a previous sample pushed, packed or cached is
@@ -157,6 +158,80 @@ strategy's, and says whether the two min-max ranges overlap; an overlapping diff
 | `summary[]` | per cell, task, mode, client: `attempted`, `accepted`, `failed`, `unsupported`, `reasons`, per-metric statistics |
 | `comparisons[]` | ply against each git strategy per metric: both medians, `ratio`, `verdict` (`ply-lower`, `tie`, `ply-higher`), `separated` |
 | `totals` | sample counts by status |
+
+## Path resolution: requests per read and edit (2026-11-20)
+
+The 2026-11-18 run showed ply making more requests than git's leanest strategy, growing with the directory depth of
+the target: a fresh read at depth 8 was 12 requests against 5, at depth 2 6 against 5. ply read one tree per fetch;
+git's depth-1 blobless clone reads every tree of the commit in one. Since then a path walk asks for two tree levels per
+fetch where the server takes `filter combine:blob:none+tree:K` ([README](../../README.md) "Reading without a clone",
+[docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) "Two tree levels per fetch"), and this server does.
+
+Before and after, ply alone, one repetition per cell: `node bench/compare/run.mjs --reps 1 --clients
+ply,git-shallow-partial --no-memory` on the parent commit (`3a1ea26`) and on the change, same machine, same seed. It
+is not a recorded run (no file under results/): requests, request bytes and pack bytes are exact and the same on
+every repetition. Response bytes are not: between two runs of one build they moved by up to some tens of bytes in the
+64 KiB cells and by hundreds to about 2,400 in the 4 MiB and 32 MiB cells (the parent's numbers here against the
+2026-11-18 run's, and two runs of the change against each other), so a difference of that size in that column is not
+the change's. Each cell is "before → after (difference)". Elapsed time and memory were not taken.
+
+| cell | task | mode | requests | request bytes | response bytes | fetch pack bytes | push pack bytes | `git-shallow-partial` requests (after run) |
+|---|---|---|---|---|---|---|---|---|
+| h200-f64k-text-d2 | read | fresh | 6 → 5 (-1) | 2799 → 2363 (-436) | 22968 → 22975 (+7) | 20914 → 21161 (+247) |  | 5 |
+| h200-f64k-text-d2 | read | reused | 6 → 5 (-1) | 2799 → 2363 (-436) | 22963 → 22985 (+22) | 20914 → 21161 (+247) |  | 5 |
+| h200-f64k-text-d2 | edit | fresh | 7 → 6 (-1) | 3637 → 3201 (-436) | 23315 → 23322 (+7) | 20914 → 21161 (+247) | 432 → 432 | 7 |
+| h200-f64k-text-d2 | edit | reused | 7 → 6 (-1) | 3637 → 3201 (-436) | 23310 → 23312 (+2) | 20914 → 21161 (+247) | 432 → 432 | 7 |
+| h20-f64k-text-d2 | read | fresh | 6 → 5 (-1) | 2799 → 2363 (-436) | 22925 → 22945 (+20) | 20871 → 21116 (+245) |  | 5 |
+| h20-f64k-text-d2 | edit | fresh | 7 → 6 (-1) | 3641 → 3205 (-436) | 23267 → 23287 (+20) | 20871 → 21116 (+245) | 436 → 436 | 7 |
+| h2000-f64k-text-d2 | read | fresh | 6 → 5 (-1) | 2799 → 2363 (-436) | 23001 → 23018 (+17) | 20947 → 21194 (+247) |  | 5 |
+| h2000-f64k-text-d2 | read | reused | 6 → 5 (-1) | 2799 → 2363 (-436) | 22996 → 23018 (+22) | 20947 → 21194 (+247) |  | 5 |
+| h2000-f64k-text-d2 | edit | fresh | 7 → 6 (-1) | 3638 → 3202 (-436) | 23348 → 23350 (+2) | 20947 → 21194 (+247) | 433 → 433 | 7 |
+| h2000-f64k-text-d2 | edit | reused | 7 → 6 (-1) | 3638 → 3202 (-436) | 23343 → 23350 (+7) | 20947 → 21194 (+247) | 433 → 433 | 7 |
+| h200-f4k-text-d2 | read | fresh | 6 → 5 (-1) | 2799 → 2363 (-436) | 4365 → 4380 (+15) | 2316 → 2561 (+245) |  | 5 |
+| h200-f4k-text-d2 | edit | fresh | 7 → 6 (-1) | 3638 → 3202 (-436) | 4712 → 4722 (+10) | 2316 → 2561 (+245) | 433 → 433 | 7 |
+| h200-f4m-text-d2 | read | fresh | 6 → 5 (-1) | 2799 → 2363 (-436) | 1235508 → 1235327 (-181) | 1232789 → 1233033 (+244) |  | 5 |
+| h200-f4m-text-d2 | read | reused | 6 → 5 (-1) | 2799 → 2363 (-436) | 1235298 → 1235062 (-236) | 1232789 → 1233033 (+244) |  | 5 |
+| h200-f4m-text-d2 | edit | fresh | 7 → 6 (-1) | 3761 → 3325 (-436) | 1235885 → 1235784 (-101) | 1232789 → 1233033 (+244) | 556 → 556 | 7 |
+| h200-f4m-text-d2 | edit | reused | 7 → 6 (-1) | 3761 → 3325 (-436) | 1235650 → 1235619 (-31) | 1232789 → 1233033 (+244) | 556 → 556 | 7 |
+| h200-f32m-text-d2 | read | fresh | 6 → 5 (-1) | 2799 → 2363 (-436) | 9859457 → 9857041 (-2416) | 9852293 → 9852542 (+249) |  | 5 |
+| h200-f32m-text-d2 | edit | fresh | 7 → 6 (-1) | 4711 → 4275 (-436) | 9860179 → 9858523 (-1656) | 9852293 → 9852542 (+249) | 1505 → 1505 | 7 |
+| h200-f64k-random-d2 | read | fresh | 6 → 5 (-1) | 2799 → 2363 (-436) | 68107 → 68115 (+8) | 66043 → 66291 (+248) |  | 5 |
+| h200-f64k-random-d2 | edit | fresh | 7 → 6 (-1) | 3640 → 3204 (-436) | 68469 → 68492 (+23) | 66043 → 66291 (+248) | 435 → 435 | 7 |
+| h200-f64k-text-d1 | read | fresh | 5 → 4 (-1) | 2332 → 1896 (-436) | 22584 → 22598 (+14) | 20858 → 21102 (+244) |  | 5 |
+| h200-f64k-text-d1 | edit | fresh | 6 → 5 (-1) | 3113 → 2677 (-436) | 22931 → 22945 (+14) | 20858 → 21102 (+244) | 375 → 375 | 7 |
+| h200-f64k-text-d8 | read | fresh | 12 → 8 (-4) | 5601 → 3818 (-1783) | 25391 → 24353 (-1038) | 21399 → 21550 (+151) |  | 5 |
+| h200-f64k-text-d8 | edit | fresh | 13 → 9 (-4) | 6777 → 4994 (-1783) | 25738 → 24700 (-1038) | 21399 → 21550 (+151) | 770 → 770 | 7 |
+
+What changed, by column:
+
+- **Requests** fall by one at depth 1 and 2 and by four at depth 8. A read at directory depth d is d + 1 tree levels:
+  before, ls-refs, the commit, d + 1 trees, the blob (d + 4); now ls-refs, the commit asked two ways at once, one
+  fetch per two further levels, the blob. git's leanest strategy is 5 at any depth: ply is now below it at depth 1,
+  level at depth 2 and still above it at depth 8 (8 against 5; an edit 9 against 7).
+- **Round trips in sequence** fall by one more than requests: the two commit fetches of a first contact are sent at
+  once (ply does not yet know whether the server takes the filter, and the plain one answers if it does not), so a
+  depth-2 read waits on 4 exchanges in turn where it waited on 6, and a depth-8 read on 7 where it waited on 12. In
+  this benchmark every ply sample is a first contact, the reused mode too (its warm-up call goes to another URL, the
+  one-commit-behind copy, and what ply learns is kept per remote); a second operation on the same remote in one
+  process drops the extra commit fetch: 4 requests at depth 2, 7 at depth 8 (`test/path-walk.test.js` asserts the
+  sequences for depths 1 to 8).
+- **Request bytes** fall with the requests (436 bytes a request here).
+- **Fetch pack bytes are higher in every cell**: by 244 to 249 bytes at depth 1 and 2 and by 151 at depth 8. A first
+  contact receives the commit twice, and each two-level fetch brings the sibling directories of one path level (here
+  one small tree) in a pack with one header and trailer instead of two. In a repository with wide directories the
+  second term is larger: the child trees of every second directory on the path, bounded per fetch by
+  `limits.maxPathTreesBytes` (1 MiB; an answer over it is dropped for one tree per fetch).
+- **Response bytes** fall at depth 8 (about 1,040 bytes: four responses' headers and framing) and are within the
+  run-to-run movement elsewhere, in either direction.
+- **Push pack bytes** are unchanged: the edit writes the same commit, trees and blob.
+
+Connections: ply uses the runtime's `fetch`, which keeps connections alive, and the benchmark server allows it; a
+depth-8 read with one tree per fetch made its 12 requests over 2 connections (counted at the server's `connection`
+event), so the request count is not a connection count.
+
+On a server that refuses the filter (GitHub) the walk is one tree per fetch as before, plus one refused request the
+first time a process meets the remote; this benchmark does not measure that server (`test/path-walk.test.js` does,
+with git configured as GitHub is).
 
 ## Limits of this benchmark
 

@@ -67,7 +67,12 @@ function freshRepo() {
 }
 
 // Run one edit through a proxy with the given fault; return everything needed to check invariants.
-async function run(fault, { limits = withLimits({ requestTimeoutMs: 1500 }), find = FIND, replace = REPL, opts = {} } = {}) {
+// `pathTrees`: limits.maxPathTreesBytes for the edit. 0 (the default here) is the walk with one object per fetch, as on
+// a server that refuses the path-trees filter (GitHub): a stage index (STAGES) then names one object, and a fault on it
+// has no other fetch to fall back to. The walk that asks for two tree levels per fetch (src/pathtrees.ts) is run with
+// `pathTrees: null` (the caller's limits as they are) by the path-trees test below.
+async function run(fault, { limits: given = withLimits({ requestTimeoutMs: 1500 }), find = FIND, replace = REPL, opts = {}, pathTrees = 0 } = {}) {
+  const limits = pathTrees === null ? given : withLimits({ ...given, maxPathTreesBytes: pathTrees });
   const repo = freshRepo();
   const proxy = await startProxy(srv.url, fault);
   const exporter = arrayExporter();
@@ -127,6 +132,42 @@ test('HTTP-level faults at every stage: statuses, non-git bodies, stall, drop, e
     checkInvariants(r, { stage: label, requireError: true, allowMoved: stage === 'receive-pack' });
     if (code) assert.equal(r.error.code, stage === 'receive-pack' ? 'ambiguous' : code, `${label}: ${r.error.message}`);
   }
+});
+
+test('the path-trees fetches (the commit with two tree levels): every HTTP fault and every mutator on them is survived, and the edit is git-verified', async () => {
+  // FILE is three tree levels (root, a, a/b): ls-refs, the commit asked both ways at once (a first contact), a/b, the
+  // blob, the push. A fault on the path-trees fetch is never the edit's: the tree:0 fetch beside it answers.
+  const isPathTrees = ctx => ctx.stage === 'fetch' && /filter combine:blob:none\+tree:/.test(Buffer.from(ctx.reqBody).toString('latin1'));
+  const sequence = r => r.spans.filter(s => s.name === 'git.upload-pack fetch').map(s => s.attrs['git.fetch.filter']).toSorted();
+  const clean = await run(() => ({ type: 'pass' }), { pathTrees: null });
+  checkInvariants(clean, { stage: 'no fault' });
+  assert.equal(clean.error, null);
+  assert.deepEqual(sequence(clean), ['', 'combine:blob:none+tree:2', 'tree:0', 'tree:0'], 'the commit both ways, a/b, the blob');
+  const faults = [
+    ['500 html', { type: 'status', status: 500 }], ['401', { type: 'status', status: 401 }], ['403', { type: 'status', status: 403 }], ['404', { type: 'status', status: 404 }],
+    ['429', { type: 'status', status: 429 }], ['200 html login page', { type: 'status', status: 200, body: '<html>sign in</html>' }], ['200 empty body', { type: 'bytes', bytes: new Uint8Array(0) }],
+    ['stall', { type: 'stall' }], ['stall after partial', { type: 'stall', partial: 10 }], ['drop', { type: 'drop' }], ['drop after partial', { type: 'drop', after: 30 }],
+  ];
+  for (const [name, spec] of faults) {
+    const r = await run(ctx => (isPathTrees(ctx) ? spec : { type: 'pass' }), { pathTrees: null });
+    checkInvariants(r, { stage: `path-trees ${name}` });
+    assert.equal(r.error, null, `path-trees ${name}: ${r.error?.code} ${r.error?.message}`);
+    // the walk went on one tree per fetch: the commit, the root, a, a/b, and the blob
+    assert.deepEqual(sequence(r), ['', 'combine:blob:none+tree:2', 'tree:0', 'tree:0', 'tree:0', 'tree:0'], name);
+  }
+  const rng = new Rng(4242);
+  const hist = {};
+  for (const name of MUTATOR_NAMES) for (let rep = 0; rep < 3; rep++) {
+    const seed = rng.u32();
+    const r = await run(ctx => (isPathTrees(ctx) ? { type: 'bytes', bytes: MUTATORS[name](new Rng(seed), ctx.bytes), name } : { type: 'pass' }), { pathTrees: null });
+    const label = `path-trees ${name} seed=${seed}`;
+    checkInvariants(r, { stage: label });
+    assert.equal(r.error, null, `${label}: ${r.error?.code} ${r.error?.message}`);
+    const used = sequence(r).length === 4 ? 'used' : 'fell back';
+    hist[used] = (hist[used] ?? 0) + 1;
+  }
+  console.log('  path-trees mutation outcomes:', JSON.stringify(hist));
+  assert.ok(hist['fell back'] > 0, 'some mutation broke the path-trees pack and the walk fell back');
 });
 
 test('receive-pack refused for this caller (403 on its POST and on its advertisement) is auth, and the ref did not move (#144)', async () => {

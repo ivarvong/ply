@@ -17,3 +17,8 @@ list); the JSON, and so every number, is the run's own.
 
 To add a run: `npm run bench:compare -- --machine "<what the machine is>"` on a clean tree, then copy
 `bench/compare/out/results.json` here under the date and short commit and render it.
+
+**After 2026-11-18-6636294.** Its request counts for ply are those of one tree per fetch (a depth-8 read: 12). ply now
+reads two tree levels per fetch on this server (8); the before and after per cell are in
+[../README.md](../README.md) "Path resolution: requests per read and edit", from a reduced run that is not recorded
+here.
